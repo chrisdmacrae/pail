@@ -96,3 +96,25 @@ func TestOAuthApps(t *testing.T) {
 		t.Errorf("Gitea with no server: %v", err)
 	}
 }
+
+func TestRuntimeIsMicroVMsContainersOrWhicheverRuns(t *testing.T) {
+	load := func(runtime string) (Config, error) {
+		vars := map[string]string{"PAIL_TOKEN": "t", "PAIL_RUNTIME": runtime}
+		for k, v := range s3 {
+			vars[k] = v
+		}
+		return Load(env(vars))
+	}
+	for in, want := range map[string]string{"": "auto", "auto": "auto", "firecracker": "firecracker", "container": "container", "Docker": "container", "podman": "container"} {
+		c, err := load(in)
+		if err != nil || c.Runtime != want {
+			t.Errorf("PAIL_RUNTIME=%q: runtime %q, %v; want %q", in, c.Runtime, err, want)
+		}
+		if c.ContainerSocket != "/var/run/docker.sock" || c.ContainerNetwork != "pail" {
+			t.Errorf("PAIL_RUNTIME=%q: engine defaults: %+v", in, c)
+		}
+	}
+	if _, err := load("kubernetes"); err == nil || !strings.Contains(err.Error(), "PAIL_RUNTIME") {
+		t.Errorf("an unknown runtime: got %v", err)
+	}
+}

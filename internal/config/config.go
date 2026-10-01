@@ -29,13 +29,23 @@ type Config struct {
 	Listen string
 	// ListenTLS is the address the HTTPS listener binds (PAIL_LISTEN_TLS).
 	ListenTLS string
-	// DataDir is local disk for what microVMs need: root filesystems and
-	// work disks (PAIL_DATA_DIR).
+	// DataDir is local disk for what builds, containers and functions need:
+	// root filesystems and work disks (PAIL_DATA_DIR).
 	DataDir string
 	// Firecracker is the firecracker binary (PAIL_FIRECRACKER), and Kernel
 	// the guest kernel microVMs boot (PAIL_KERNEL).
 	Firecracker string
 	Kernel      string
+	// Runtime is what builds, containers and functions run in
+	// (PAIL_RUNTIME): "firecracker" for microVMs, "container" for the
+	// containers of Docker or Podman, or "auto" for microVMs where this
+	// machine can run them and containers where it can't.
+	Runtime string
+	// ContainerSocket is the container engine's API socket
+	// (PAIL_CONTAINER_SOCKET), and ContainerNetwork the engine's network
+	// Pail's containers join (PAIL_CONTAINER_NETWORK).
+	ContainerSocket  string
+	ContainerNetwork string
 	// TLSOff turns HTTPS off (PAIL_TLS=off): Pail then serves everything
 	// over plain HTTP, for local development or behind a proxy that
 	// terminates TLS itself.
@@ -156,6 +166,16 @@ func Load(getenv func(string) string) (Config, error) {
 
 	c.Firecracker = get("PAIL_FIRECRACKER", "firecracker")
 	c.Kernel = get("PAIL_KERNEL", c.DataDir+"/vmlinux")
+	switch runtime := strings.ToLower(get("PAIL_RUNTIME", "auto")); runtime {
+	case "auto", "firecracker", "container":
+		c.Runtime = runtime
+	case "docker", "podman":
+		c.Runtime = "container"
+	default:
+		return c, errors.New(`PAIL_RUNTIME: use "firecracker" for microVMs, "container" for Docker or Podman, or leave it unset for whichever this machine can run`)
+	}
+	c.ContainerSocket = get("PAIL_CONTAINER_SOCKET", "/var/run/docker.sock")
+	c.ContainerNetwork = get("PAIL_CONTAINER_NETWORK", "pail")
 
 	c.OAuth = map[string]OAuthApp{}
 	for _, h := range oauthHosts {

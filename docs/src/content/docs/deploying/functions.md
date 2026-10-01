@@ -15,7 +15,7 @@ Use a function when you have a script that answers a request: a form handler, a 
 
 For a server that stays up, websockets, or data that has to last, [run a container](/deploying/containers/) instead.
 
-Functions need `/dev/kvm` on the server. [Running Pail](/running/) covers that.
+Functions need `/dev/kvm` on the server, or a Pail on [Docker](/running/docker/) or [Podman](/running/podman/). [Running Pail](/running/) covers both.
 
 ## 1. Write the program
 

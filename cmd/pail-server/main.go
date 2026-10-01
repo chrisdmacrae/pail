@@ -16,6 +16,7 @@ import (
 
 	"github.com/chrisdmacrae/pail/internal/certs"
 	"github.com/chrisdmacrae/pail/internal/config"
+	"github.com/chrisdmacrae/pail/internal/engine"
 	"github.com/chrisdmacrae/pail/internal/githost"
 	"github.com/chrisdmacrae/pail/internal/microvm"
 	"github.com/chrisdmacrae/pail/internal/pails"
@@ -36,11 +37,44 @@ func main() {
 		microvm.GuestMain()
 		return
 	}
+	// In a function's container, it is the agent that runs the function.
+	if engine.IsAgent() {
+		engine.AgentMain()
+		return
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := run(logger); err != nil {
 		logger.Error("pail can't start", "err", err)
 		os.Exit(1)
 	}
+}
+
+// machinesFor picks what this Pail runs builds, containers and functions in, and
+// says which in the log.
+func machinesFor(ctx context.Context, cfg config.Config, logger *slog.Logger) (microvm.Machines, error) {
+	vms := microvm.New(microvm.Config{Firecracker: cfg.Firecracker, Kernel: cfg.Kernel, Dir: cfg.DataDir}, logger)
+	containers := engine.New(engine.Config{Socket: cfg.ContainerSocket, Network: cfg.ContainerNetwork, Dir: cfg.DataDir}, logger)
+
+	ok, why := vms.Available()
+	if cfg.Runtime == "container" || (cfg.Runtime == "auto" && !ok) {
+		if can, whyNot := containers.Available(); can {
+			if err := containers.Prepare(ctx); err != nil {
+				return nil, err
+			}
+			logger.Info("this pail can run containers: builds, containers and functions are on",
+				"engine", containers.Kind(), "socket", cfg.ContainerSocket, "network", cfg.ContainerNetwork)
+			return containers, nil
+		} else if cfg.Runtime == "container" {
+			logger.Info("this pail serves static files only: " + whyNot)
+			return containers, nil
+		}
+	}
+	if ok {
+		logger.Info("this pail can run microVMs: builds and containers are on", "firecracker", cfg.Firecracker, "kernel", cfg.Kernel)
+	} else {
+		logger.Info("this pail serves static files only: " + why)
+	}
+	return vms, nil
 }
 
 func run(logger *slog.Logger) error {
@@ -63,13 +97,12 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	// The KVM check: builds and server code run in microVMs, which need
-	// Linux with KVM. Without it Pail still serves static files.
-	vms := microvm.New(microvm.Config{Firecracker: cfg.Firecracker, Kernel: cfg.Kernel, Dir: cfg.DataDir}, logger)
-	if ok, why := vms.Available(); ok {
-		logger.Info("this pail can run microVMs: builds and containers are on", "firecracker", cfg.Firecracker, "kernel", cfg.Kernel)
-	} else {
-		logger.Info("this pail serves static files only: " + why)
+	// Builds and server code run in microVMs, which need Linux with KVM, or
+	// where there is none, in the containers of Docker or Podman. Without
+	// either Pail still serves static files.
+	machines, err := machinesFor(ctx, cfg, logger)
+	if err != nil {
+		return err
 	}
 
 	svc := pails.New(pails.Options{
@@ -77,7 +110,7 @@ func run(logger *slog.Logger) error {
 		BaseDomain:         cfg.BaseDomain,
 		MaxDeploys:         cfg.MaxDeploys,
 		MaxUnpackedSize:    cfg.MaxUploadSize * unpackedRatio,
-		Builder:            vms,
+		Builder:            machines,
 		Dir:                cfg.DataDir,
 		MaxContainerMemory: cfg.MaxContainerMemory,
 		MaxFunctionMemory:  cfg.MaxFunctionMemory,

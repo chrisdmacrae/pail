@@ -26,6 +26,16 @@ Already running Pail from this installer? Update it in place, with the container
 pct exec 101 -- pail-update $version
 \`\`\`
 
+### The server, on your own machine
+
+With Docker or Podman running, on macOS or Linux. This runs Pail in one container, with storage inside it, and has it run builds, functions and containers as containers beside its own.
+
+\`\`\`bash
+PAIL_VERSION=$version bash -c "\$(curl -fsSL $base/pail-container.sh)"
+\`\`\`
+
+Run it again to move an earlier one to this version. The image is \`ghcr.io/$repo:$version\`.
+
 On another kind of Linux machine, \`pail-server_linux_amd64.tar.gz\` and \`pail-server_linux_arm64.tar.gz\` below hold the server by itself. The [README](https://github.com/$repo#readme) says what it needs around it.
 
 ### The command line, with Homebrew

@@ -5,6 +5,7 @@ package microvm
 import (
 	"context"
 	"errors"
+	"net"
 	"runtime"
 )
 
@@ -49,3 +50,6 @@ func IsGuestInit() bool { return false }
 
 // GuestMain does nothing off Linux.
 func GuestMain() {}
+
+// ServeAgent runs programs, which only Linux's agent knows how to.
+func ServeAgent(net.Listener, string) error { return errNotLinux }

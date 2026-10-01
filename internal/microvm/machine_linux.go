@@ -16,9 +16,6 @@ import (
 	"time"
 )
 
-// How long a container has to finish after it's asked to stop.
-const stopGrace = 10 * time.Second
-
 // machine is a long-lived microVM.
 type machine struct {
 	tap    *tap
@@ -116,7 +113,7 @@ func (m *machine) Stop() {
 			select {
 			case <-m.gone:
 				return
-			case <-time.After(stopGrace + 5*time.Second):
+			case <-time.After(StopGrace + 5*time.Second):
 			}
 		}
 		m.cancel()

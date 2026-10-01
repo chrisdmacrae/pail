@@ -165,7 +165,7 @@ func (u *unit) run() {
 func (u *unit) boot(ctx context.Context, gen int) (microvm.Machine, error) {
 	m, err := u.s.builder.Start(ctx, u.spec)
 	if err != nil {
-		return nil, fmt.Errorf("%s's microVM didn't start: %w", u.name, err)
+		return nil, fmt.Errorf("%s's %s didn't start: %w", u.name, u.s.box(), err)
 	}
 	u.mu.Lock()
 	if u.gen != gen {
@@ -395,7 +395,7 @@ func (s *Service) goLive(ctx context.Context, e *entry, id string, man *Manifest
 				old.halt()
 				paused = append(paused, old)
 			}
-			say("step", "→ starting %s in a microVM (%s)", name, u.c.size())
+			say("step", "→ starting %s in a %s (%s)", name, s.box(), u.c.size())
 			if err := u.start(ctx); err != nil {
 				undo()
 				return err

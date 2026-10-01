@@ -9,7 +9,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"time"
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -18,9 +17,8 @@ import (
 
 // What a Dockerfile build gets.
 const (
-	buildahImage          = "quay.io/buildah/stable:latest"
-	containerBuildWorkMB  = 16384
-	containerBuildTimeout = 30 * time.Minute
+	buildahImage         = "quay.io/buildah/stable:latest"
+	containerBuildWorkMB = 16384
 	// containerSpareMB is the room a container has to write in its root
 	// filesystem, beyond what the image holds.
 	containerSpareMB = 1024
@@ -58,7 +56,7 @@ func (r *Runner) BuildContainer(ctx context.Context, req ContainerBuild) (Built,
 	if log == nil {
 		log = func(string) {}
 	}
-	ctx, cancel := context.WithTimeout(ctx, containerBuildTimeout)
+	ctx, cancel := context.WithTimeout(ctx, ContainerBuildTimeout)
 	defer cancel()
 
 	if err := os.MkdirAll(filepath.Join(r.cfg.Dir, "builds"), 0o755); err != nil {
@@ -93,11 +91,11 @@ func (r *Runner) BuildContainer(ctx context.Context, req ContainerBuild) (Built,
 			"PAIL_DOCKERFILE=" + path.Join("/work/src", req.Dockerfile),
 			"PAIL_CONTEXT=" + path.Join("/work/src", req.Context),
 		},
-		VCPUs: buildVCPUs, MemMB: buildMemMB, Network: true, Log: log,
+		VCPUs: BuildVCPUs, MemMB: BuildMemMB, Network: true, Log: log,
 	})
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
-		return fail(fmt.Errorf("the build ran for %s and was stopped", containerBuildTimeout))
+		return fail(fmt.Errorf("the build ran for %s and was stopped", ContainerBuildTimeout))
 	case err != nil:
 		return fail(err)
 	case done.ExitCode != 0:
@@ -122,9 +120,6 @@ func (r *Runner) BuildContainer(ctx context.Context, req ContainerBuild) (Built,
 	return Built{Image: img, Cleanup: cleanup}, nil
 }
 
-// containerPullTimeout is how long fetching an image may take.
-const containerPullTimeout = 15 * time.Minute
-
 // PullContainer fetches an image from a registry and turns it into a root
 // filesystem a microVM can boot. Nothing in the image runs on this machine:
 // its files are unpacked into a folder, and only ever run inside a microVM.
@@ -133,7 +128,7 @@ func (r *Runner) PullContainer(ctx context.Context, req ContainerPull) (Built, e
 	if log == nil {
 		log = func(string) {}
 	}
-	ctx, cancel := context.WithTimeout(ctx, containerPullTimeout)
+	ctx, cancel := context.WithTimeout(ctx, ContainerPullTimeout)
 	defer cancel()
 
 	// This reads the image's manifest; its layers come when they're unpacked.
@@ -161,7 +156,7 @@ func (r *Runner) PullContainer(ctx context.Context, req ContainerPull) (Built, e
 	if err := r.flatten(ctx, pulled, img, containerSpareMB); err != nil {
 		os.RemoveAll(dir)
 		if ctx.Err() == context.DeadlineExceeded {
-			return Built{}, fmt.Errorf("pulling %s ran for %s and was stopped", req.Ref, containerPullTimeout)
+			return Built{}, fmt.Errorf("pulling %s ran for %s and was stopped", req.Ref, ContainerPullTimeout)
 		}
 		return Built{}, fmt.Errorf("can't pull %s: %w", req.Ref, err)
 	}

@@ -477,7 +477,7 @@ func (s *Service) buildContainers(ctx context.Context, name string, d *Deploy, a
 			man.Containers[c] = pulled
 			continue
 		}
-		lg.add("step", "→ building %s from ./%s in a microVM", c, cc.dockerfile)
+		lg.add("step", "→ building %s from ./%s in a %s", c, cc.dockerfile, s.box())
 		built, err := s.builder.BuildContainer(ctx, microvm.ContainerBuild{
 			Fill:       extractTo(archive, format, p.strip),
 			Dockerfile: cc.dockerfile,
@@ -655,7 +655,7 @@ func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, arc
 		return nil, userErrorf("This project needs a build, and this Pail can’t run one: %s. Build it yourself and deploy the result with pail up ./dist.", why)
 	}
 	lg.add("", "unpacking %d %s%s · found package.json with a build script", len(p.names), plural(len(p.names), "file"), p.from())
-	lg.add("step", "→ building in a microVM")
+	lg.add("step", "→ building in a %s", s.box())
 
 	built, err := s.builder.BuildSite(ctx, microvm.BuildRequest{
 		// With a build, pail.json's static is where the result lands.

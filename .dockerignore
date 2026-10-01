@@ -1,0 +1,14 @@
+# The image is built from source: nothing a build made goes in.
+.git
+.github
+**/node_modules
+**/.DS_Store
+/bin
+/dist
+/data
+/site
+/docs
+/adapters
+/internal/webui/dist/*
+!/internal/webui/dist/.gitkeep
+*.tgz

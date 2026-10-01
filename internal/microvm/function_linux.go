@@ -3,12 +3,9 @@
 package microvm
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,19 +17,8 @@ import (
 	"time"
 )
 
-// What a function's build gets.
-const (
-	functionBuildWorkMB  = 8192
-	functionBuildTimeout = 15 * time.Minute
-)
-
-// functionPrelude goes before a language's build script. The root
-// filesystem is read-only, so everything a tool caches goes under /work.
-const functionPrelude = `set -e
-cd /work/src
-export HOME=/work/home CI=true NO_COLOR=1
-mkdir -p "$HOME"
-`
+// functionBuildWorkMB is how big a function build's work disk is.
+const functionBuildWorkMB = 8192
 
 // BuildFunction makes a function ready to run: its source built, where the
 // language needs that, in a throwaway microVM that can reach the internet
@@ -42,7 +28,7 @@ func (r *Runner) BuildFunction(ctx context.Context, req FunctionBuild) (Function
 	if log == nil {
 		log = func(string) {}
 	}
-	ctx, cancel := context.WithTimeout(ctx, functionBuildTimeout)
+	ctx, cancel := context.WithTimeout(ctx, FunctionBuildTimeout)
 	defer cancel()
 	var fn FunctionImage
 
@@ -71,12 +57,12 @@ func (r *Runner) BuildFunction(ctx context.Context, req FunctionBuild) (Function
 		}
 		done, err := r.Run(ctx, Job{
 			Image: image, Stage: stage, WorkMB: functionBuildWorkMB,
-			Argv: []string{"/bin/sh", "-c", functionPrelude + req.Script}, Dir: "/",
-			VCPUs: buildVCPUs, MemMB: buildMemMB, Network: true, Log: log,
+			Argv: []string{"/bin/sh", "-c", FunctionPrelude + req.Script}, Dir: "/",
+			VCPUs: BuildVCPUs, MemMB: BuildMemMB, Network: true, Log: log,
 		})
 		switch {
 		case ctx.Err() == context.DeadlineExceeded:
-			return fn, fmt.Errorf("the build ran for %s and was stopped", functionBuildTimeout)
+			return fn, fmt.Errorf("the build ran for %s and was stopped", FunctionBuildTimeout)
 		case err != nil:
 			return fn, err
 		case done.ExitCode != 0:
@@ -280,115 +266,14 @@ func (c *functionCopy) Call(ctx context.Context, call FunctionCall) (FunctionRes
 	return c.ask(ctx, req, call.Body, call.BodyLen, call.Stderr, call.MaxOutput, call.Timeout+5*time.Second)
 }
 
-// Frames from the agent: a kind, a length, and that many bytes.
-const (
-	frameStdout = 1
-	frameStderr = 2
-	frameResult = 3
-)
-
-// agentRequest is what the host asks of the agent in a function's microVM.
-type agentRequest struct {
-	// Op is "hello" or "run".
-	Op string `json:"op"`
-	// For hello: the guest's address on its network, and the time.
-	IP      string `json:"ip,omitempty"`
-	Gateway string `json:"gateway,omitempty"`
-	Time    int64  `json:"time,omitempty"`
-	// For run.
-	Argv      []string `json:"argv,omitempty"`
-	Env       []string `json:"env,omitempty"`
-	Dir       string   `json:"dir,omitempty"`
-	BodyLen   int64    `json:"body_len,omitempty"`
-	TimeoutMS int64    `json:"timeout_ms,omitempty"`
-}
-
-// agentResult is how the agent says a request ended.
-type agentResult struct {
-	Error    string `json:"error,omitempty"`
-	ExitCode int    `json:"exit_code"`
-	Signal   string `json:"signal,omitempty"`
-	TimedOut bool   `json:"timed_out,omitempty"`
-	OOM      bool   `json:"oom,omitempty"`
-}
-
 // ask sends the agent one request and reads its answer.
 func (c *functionCopy) ask(ctx context.Context, req agentRequest, body io.Reader, bodyLen int64, stderr func(string), maxOutput int64, limit time.Duration) (FunctionResult, error) {
-	var res FunctionResult
 	conn, err := dialVsock(filepath.Join(c.dir, functionVsock), guestAgentPort)
 	if err != nil {
-		return res, err
+		return FunctionResult{}, err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(limit))
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
-	defer stop()
-
-	header, _ := json.Marshal(req)
-	var size [4]byte
-	binary.BigEndian.PutUint32(size[:], uint32(len(header)))
-	if _, err := conn.Write(append(size[:], header...)); err != nil {
-		return res, err
-	}
-	if body != nil && bodyLen > 0 {
-		// Sent while the answer is read: a program may write before it has
-		// read everything it was sent.
-		go io.CopyN(conn, body, bodyLen)
-	}
-
-	r := bufio.NewReader(conn)
-	var out, errLine bytes.Buffer
-	for {
-		var head [5]byte
-		if _, err := io.ReadFull(r, head[:]); err != nil {
-			if ctx.Err() != nil {
-				return res, ctx.Err()
-			}
-			return res, fmt.Errorf("the function's microVM stopped answering: %w", err)
-		}
-		n := int64(binary.BigEndian.Uint32(head[1:]))
-		switch head[0] {
-		case frameStdout:
-			if maxOutput > 0 && int64(out.Len())+n > maxOutput {
-				// Closing the connection has the agent stop the program.
-				res.TooBig = true
-				return res, nil
-			}
-			if _, err := io.CopyN(&out, r, n); err != nil {
-				return res, err
-			}
-		case frameStderr:
-			if _, err := io.CopyN(&errLine, r, n); err != nil {
-				return res, err
-			}
-			for {
-				line, rest, found := bytes.Cut(errLine.Bytes(), []byte("\n"))
-				if !found {
-					break
-				}
-				if stderr != nil {
-					stderr(strings.TrimRight(string(line), "\r"))
-				}
-				errLine = *bytes.NewBuffer(append([]byte(nil), rest...))
-			}
-		case frameResult:
-			var ar agentResult
-			if err := json.NewDecoder(io.LimitReader(r, n)).Decode(&ar); err != nil {
-				return res, err
-			}
-			if errLine.Len() > 0 && stderr != nil {
-				stderr(errLine.String())
-			}
-			if ar.Error != "" {
-				return res, errors.New(ar.Error)
-			}
-			res.Output, res.ExitCode, res.Signal = out.Bytes(), ar.ExitCode, ar.Signal
-			res.TimedOut, res.OutOfMemory = ar.TimedOut, ar.OOM
-			return res, nil
-		default:
-			return res, fmt.Errorf("the function's microVM sent something Pail doesn't understand")
-		}
-	}
+	return converse(ctx, conn, req, body, bodyLen, stderr, maxOutput, limit)
 }
 
 // dialVsock reaches a port inside a guest through Firecracker's socket.

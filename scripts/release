@@ -4,6 +4,7 @@
 #   pail-server_linux_<arch>.tar.gz   the server, with the web UI inside
 #   pail_<os>_<arch>.tar.gz|zip       pail-cli, for macOS, Linux and Windows
 #   pail-proxmox.sh                   the Proxmox LXC installer
+#   pail-container.sh                 runs Pail in a container, on Docker or Podman
 #   checksums.txt                     SHA-256 of each of the above
 #
 # File names carry no version, so "releases/latest/download/<name>" always
@@ -49,6 +50,8 @@ for os in linux darwin windows; do
 done
 
 cp deploy/proxmox/pail-lxc.sh "$out/pail-proxmox.sh"
+# The image this one runs is built and pushed by the release workflow.
+cp deploy/container/pail-container.sh "$out/pail-container.sh"
 
 (cd "$out" && { command -v sha256sum >/dev/null && sha256sum -- * || shasum -a 256 -- *; } > "$stage/checksums.txt")
 mv "$stage/checksums.txt" "$out/checksums.txt"

@@ -30,7 +30,8 @@ GOFILES   := $(shell git ls-files '*.go')
 .DEFAULT_GOAL := help
 .PHONY: help setup build ui install test test-go test-ui test-astro lint lint-go lint-ui lint-astro fmt check \
         dev dev-storage dev-server dev-ui dev-docs docs clean \
-        kvm-up kvm-check kvm-smoke kvm-shell kvm-down dev-kvm test-kvm release
+        kvm-up kvm-check kvm-smoke kvm-shell kvm-down dev-kvm test-kvm release \
+        image test-container
 
 help: ## List these commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -57,6 +58,12 @@ docs: ## Build the documentation site into docs/dist
 
 release: ui ## Build what a release publishes into dist/release (VERSION=v0.1.0)
 	scripts/release $(or $(VERSION),dev)
+
+# The engine is Docker or Podman, whichever answers: make image ENGINE=podman
+ENGINE ?= $(shell command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && echo docker || echo podman)
+
+image: ## Build Pail's container image as pail:dev, with Docker or Podman
+	$(ENGINE) build -f deploy/container/Dockerfile --build-arg VERSION=$(or $(VERSION),dev) -t pail:dev .
 
 install: ## Install the pail command into your Go bin
 	go install ./cmd/pail
@@ -154,6 +161,9 @@ dev-kvm: ui ## Run Pail on the KVM host, with microVMs, on :8080
 
 test-kvm: ## Run the tests that boot real microVMs, on the KVM host
 	scripts/kvm-host test
+
+test-container: ## Run Pail in a container and deploy one of everything to it
+	PAIL_ENGINE=$(ENGINE) scripts/container-smoke
 
 clean: ## Remove what the build made
 	rm -rf $(BIN) dist $(DOCS)/dist $(DOCS)/.astro

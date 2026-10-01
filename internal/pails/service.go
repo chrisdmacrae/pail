@@ -24,8 +24,8 @@ type Options struct {
 	MaxDeploys int
 	// MaxUnpackedSize caps what one archive may unpack to, in bytes.
 	MaxUnpackedSize int64
-	// Builder runs builds and containers in microVMs. Nil means this Pail
-	// has none.
+	// Builder runs builds and containers, in microVMs or in an engine's
+	// containers. Nil means this Pail has neither.
 	Builder microvm.Machines
 	// Dir is local disk for containers' root filesystems and data volumes.
 	Dir string
@@ -277,6 +277,15 @@ func (s *Service) manifestOf(ctx context.Context, e *entry, id string) (*Manifes
 	}
 	man = &Manifest{}
 	return man, s.readJSON(ctx, manifestKey(e.name, id), man)
+}
+
+// box is what this Pail runs builds and server code in, for messages: a
+// microVM, unless the builder says otherwise.
+func (s *Service) box() string {
+	if named, ok := s.builder.(interface{ Sandbox() string }); ok {
+		return named.Sandbox()
+	}
+	return "microVM"
 }
 
 // CanBuild says whether this Pail can build a project before serving it and,

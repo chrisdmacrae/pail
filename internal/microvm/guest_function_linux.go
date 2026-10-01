@@ -4,6 +4,7 @@ package microvm
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -76,7 +77,21 @@ func functionMain() {
 			panic(fmt.Sprintf("accept: %v", err))
 		}
 		conn := os.NewFile(uintptr(nfd), "vsock")
-		serveAgent(conn)
+		serveAgent(conn, "")
+		conn.Close()
+	}
+}
+
+// ServeAgent is the agent where there is no microVM around it: it answers
+// the requests that arrive on l, one at a time, until l closes. Each has to
+// carry token, since more than the host may be able to reach l.
+func ServeAgent(l net.Listener, token string) error {
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			return err
+		}
+		serveAgent(conn, token)
 		conn.Close()
 	}
 }
@@ -109,8 +124,9 @@ func (f *frames) result(r agentResult) {
 	f.send(frameResult, b)
 }
 
-// serveAgent answers one request from the host.
-func serveAgent(conn *os.File) {
+// serveAgent answers one request from the host. token, when set, is what
+// the request has to carry.
+func serveAgent(conn io.ReadWriter, token string) {
 	out := &frames{w: conn}
 	in := bufio.NewReader(conn)
 	var size [4]byte
@@ -124,6 +140,11 @@ func serveAgent(conn *os.File) {
 	var req agentRequest
 	if err := json.Unmarshal(header, &req); err != nil {
 		out.result(agentResult{Error: "the agent couldn't read the request: " + err.Error()})
+		return
+	}
+
+	if token != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(token)) != 1 {
+		out.result(agentResult{Error: "the agent was asked by something that isn't its Pail"})
 		return
 	}
 
@@ -246,10 +267,13 @@ func runProgram(req agentRequest, body io.Reader, out *frames) agentResult {
 	return res
 }
 
-// oomKills is how many processes the guest's kernel has killed for want of
-// memory.
+// oomKills is how many processes the kernel has killed for want of memory:
+// in this container, where the agent runs in one, else in the whole guest.
 func oomKills() int {
-	raw, err := os.ReadFile("/proc/vmstat")
+	raw, err := os.ReadFile("/sys/fs/cgroup/memory.events")
+	if err != nil {
+		raw, err = os.ReadFile("/proc/vmstat")
+	}
 	if err != nil {
 		return 0
 	}

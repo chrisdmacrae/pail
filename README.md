@@ -21,6 +21,7 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | 6 | Git hosts: token first, then OAuth | done |
 | 7 | Firecracker microVMs: the build VM, containers, and the KVM check | done |
 | 8 | pail.json functions: base images, snapshots, sleep when idle, and routing | done |
+| 9 | Running without KVM: one image, and Docker or Podman's containers in place of microVMs | done |
 
 ## Layout
 
@@ -32,12 +33,15 @@ internal/storage     the object store: S3 (versitygw) and an in-memory one for t
 internal/certs       TLS certificates: Pail's own authority, or Let's Encrypt
 internal/githost     git hosts: GitHub, GitLab, Bitbucket, Gitea and Forgejo
 internal/microvm     Firecracker microVMs: base images, networking, builds, containers
+internal/engine      the same, in the containers of Docker or Podman, where there is no KVM
 scripts/kvm-host     the KVM host for development: a Lima VM, or a Linux machine over SSH
+scripts/container-smoke runs Pail in a container and deploys one of everything to it
 scripts/release      builds what a release publishes
 scripts/brew-formula prints the Homebrew formula for a release
 scripts/release-notes prints the install instructions a release's description opens with
 scripts/npm-next-version prints the version astro-pail is published to npm as next
 deploy/proxmox       the installer that sets Pail up in a Proxmox container
+deploy/container     Pail's image, and the script that runs it on Docker or Podman
 .github/workflows    CI, the release that tags publish, and astro-pail's release to npm
 internal/pails       pails, deploys, the live pointer, the deploy pipeline
 internal/server      the listener: Host routing, the REST API, static serving
@@ -153,9 +157,12 @@ Everything is an environment variable on the server.
 | `PAIL_ACME_RESOLVERS` | the system's | DNS servers to check the challenge record with, comma-separated, e.g. `1.1.1.1:53`. Set it when your home resolver answers for the domain itself and would never see the public record. |
 | `PAIL_OAUTH_<HOST>_CLIENT_ID` · `_CLIENT_SECRET` | unset | An OAuth app for a git host (`GITHUB`, `GITLAB`, `BITBUCKET`, `GITEA`, `FORGEJO`), which puts "Sign in with …" on New pail. |
 | `PAIL_OAUTH_<HOST>_SERVER` | gitlab.com for GitLab | Where the app is registered, for a host you run. Required for Gitea and Forgejo. |
-| `PAIL_DATA_DIR` | `/var/lib/pail` | Local disk for what microVMs need: root filesystems, work disks, and containers' data volumes. |
+| `PAIL_DATA_DIR` | `/var/lib/pail` | Local disk for what builds, containers and functions need: root filesystems, work disks, and containers' data volumes. |
+| `PAIL_RUNTIME` | `auto` | What builds, containers and functions run in: `firecracker` for microVMs, `container` for the containers of Docker or Podman, or `auto` for microVMs where this machine can run them and containers where it can't. |
 | `PAIL_FIRECRACKER` | `firecracker` | The Firecracker binary. |
 | `PAIL_KERNEL` | `<data dir>/vmlinux` | The guest kernel every microVM boots. |
+| `PAIL_CONTAINER_SOCKET` | `/var/run/docker.sock` | The container engine's API socket: Docker's, or Podman's, which answers the same API. |
+| `PAIL_CONTAINER_NETWORK` | `pail` | The engine's network Pail's containers join, which Pail has to be on too. It also names this Pail's containers, images and volumes among the engine's others. |
 | `PAIL_LISTEN` | `:80` | Address the plain-HTTP listener binds. |
 | `PAIL_LISTEN_TLS` | `:443` | Address the HTTPS listener binds. |
 | `PAIL_TLS` | on | `off` serves everything over plain HTTP: for development, or behind a proxy that terminates TLS itself. Custom hostnames are allowed, since the proxy holds their certificates. |
@@ -229,6 +236,20 @@ Pail runs builds in Firecracker microVMs, so a project's build can't touch the s
 - **Guest init.** Inside a microVM, PID 1 is Pail's own binary, so there is nothing extra to install in an image.
 
 Running microVMs needs Pail to run as root.
+
+## Without KVM: Docker or Podman
+
+Where there is no KVM, a laptop mostly, Pail runs the same things in the containers of a container engine instead. `internal/engine` implements what `internal/microvm` does, the `Machines` interface, over the engine's API socket: Docker's API, which Podman answers too, so there is one implementation and no command-line tool to install. `PAIL_RUNTIME` picks; left alone, Pail uses microVMs where it can and containers where it can't, and the log says which.
+
+- **Siblings, not children.** Pail only ever talks to the socket and never shares a disk with the engine, so Pail can itself be one of the engine's containers. What it starts are its siblings. They join a network Pail is on too (`PAIL_CONTAINER_NETWORK`), and Pail reaches each at its address there. Files go in and out as tar archives over the API.
+- **Builds.** A site builds in a throwaway container from `node:22-slim`, by the same script as in a microVM. A Dockerfile is built by the engine itself.
+- **Containers.** A deploy keeps each container's image as one file, the archive an engine saves and loads, where a microVM's root filesystem would be. An image from a registry is fetched by Pail, not the engine, so the digest check that skips an unchanged image works the same. A data volume is one of the engine's own, named `<network>-vol.<pail>.<container>`; an empty file on Pail's disk stands for it, and when a removed pail's files go, the volume follows.
+- **Functions.** A function's image is its language's image with the function's files and Pail's own binary added. A copy is a container of it, where that binary is the agent: it listens on the network, and speaks the protocol the agent in a microVM speaks over vsock. Each copy has a token of its own that requests must carry, since other containers on the network can reach it. There are no snapshots; a copy starts in a fraction of a second without one. What a deploy keeps is which image the function starts from, by digest, and its files.
+- **Tidying.** Everything Pail makes carries the label `sh.pail.instance=<network>`. At start Pail removes containers an earlier run left, and a while later, the images nothing has asked for since.
+- **What it isn't.** A container shares the machine's kernel, and containers on the network can reach each other and the home network. That is fine for your own code on your own machine. It is not the isolation a microVM gives, so it isn't for running code you don't trust.
+- **Deploys don't move between the two.** What a deploy keeps for a microVM is not what it keeps for a container. A Pail switched from one runtime to the other serves its static files as before, and says of anything else to deploy it again.
+
+`deploy/container/Dockerfile` builds the image: pail-server and versitygw, with `deploy/container/entrypoint.sh` running both and keeping everything under `/data`. `make image` builds it as `pail:dev`. `deploy/container/pail-container.sh` runs it, on Docker or Podman, and `make test-container` runs `scripts/container-smoke`, which does the same from this checkout and deploys one of everything to it.
 
 ## Containers
 
@@ -424,9 +445,12 @@ Pushing a tag like `v0.1.0` to `chrisdmacrae/pail` runs `.github/workflows/relea
 | `pail-server_linux_<arch>.tar.gz` | The server, with the web UI inside, for amd64 and arm64. |
 | `pail_<os>_<arch>.tar.gz` or `.zip` | pail-cli for macOS, Linux and Windows, amd64 and arm64. |
 | `pail-proxmox.sh` | The Proxmox installer. |
+| `pail-container.sh` | Runs Pail in a container, on Docker or Podman. |
 | `checksums.txt` | SHA-256 of each file. |
 
-The release's description opens with how to install that version: the server on Proxmox, and pail-cli with Homebrew. `scripts/release-notes <version>` prints that part, and GitHub's list of what changed follows it.
+It also builds the image `pail-container.sh` runs, for amd64 and arm64, and pushes it to `ghcr.io/chrisdmacrae/pail` as the version and, unless the version is a preview, as `latest`.
+
+The release's description opens with how to install that version: the server on Proxmox or in a container, and pail-cli with Homebrew. `scripts/release-notes <version>` prints that part, and GitHub's list of what changed follows it.
 
 File names carry no version, so `releases/latest/download/<name>` always points at the newest. `make release VERSION=v0.1.0` builds the same files into `dist/release` on your machine.
 
@@ -442,7 +466,7 @@ Pushing to the tap needs a key: the `HOMEBREW_TAP_KEY` secret on this repo holds
 scripts/brew-formula v0.1.0 dist/release/checksums.txt > ../homebrew-tap/Formula/pail.rb
 ```
 
-`.github/workflows/ci.yml` runs `make check` on every push and pull request, builds a release without publishing it, and runs the microVM tests on GitHub's runners, which have KVM.
+`.github/workflows/ci.yml` runs `make check` on every push and pull request, builds a release without publishing it, runs the microVM tests on GitHub's runners, which have KVM, and runs `scripts/container-smoke` against the runners' Docker.
 
 ## Running on Proxmox
 
@@ -453,6 +477,22 @@ bash -c "$(curl -fsSL https://github.com/chrisdmacrae/pail/releases/latest/downl
 ```
 
 It needs a published release to download the server from. The documentation site's "Running on Proxmox" page covers its settings and looking after the container.
+
+## Running on Docker or Podman
+
+`deploy/container/pail-container.sh` runs Pail on the machine you're at, in one container that holds versitygw and pail-server, with the engine's socket mounted so that builds, containers and functions run as containers beside it. With Docker or Podman running:
+
+```bash
+bash -c "$(curl -fsSL https://github.com/chrisdmacrae/pail/releases/latest/download/pail-container.sh)"
+```
+
+Pail answers at http://localhost:8080, with `localhost` as the base domain, so `<name>.localhost:8080` needs no DNS. Running it again updates Pail and keeps its data; `down` as its argument stops and removes it. It needs a published release for the image. To run this checkout instead:
+
+```bash
+make image && PAIL_IMAGE=pail PAIL_VERSION=dev bash deploy/container/pail-container.sh
+```
+
+The documentation site's "Running on Docker" and "Running on Podman" pages cover its settings.
 
 ## Documentation site
 

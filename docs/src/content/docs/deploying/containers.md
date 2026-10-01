@@ -15,7 +15,7 @@ Use a container when the thing you’re hosting is a server that stays up: an ap
 
 Each container runs in a small virtual machine of its own. It can reach the internet, and nothing on your network. The only way in is through Pail.
 
-Containers need `/dev/kvm` on the server. [Running Pail](/running/) covers that.
+Containers need `/dev/kvm` on the server. A Pail on [Docker](/running/docker/) or [Podman](/running/podman/) runs them as containers of that engine instead, without the virtual machine around each. [Running Pail](/running/) covers both.
 
 ## 1. Add a pail.json
 
@@ -163,4 +163,4 @@ Pail keeps the last 2,000 lines.
 | It has no CMD or ENTRYPOINT | Add one to the Dockerfile, or say what to run with `command`. |
 | Its image didn’t arrive | Check the image’s name and tag, and that it is public. |
 | It asks for more memory than this Pail gives | Ask for less, or raise `PAIL_MAX_CONTAINER_MEMORY` on the server. |
-| This Pail can’t run containers | The server has no `/dev/kvm`. See [Running Pail](/running/). |
+| This Pail can’t run containers | The server has no `/dev/kvm`, and no Docker or Podman to use instead. See [Running Pail](/running/). |

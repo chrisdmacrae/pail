@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Runs Pail in a container, as deploy/container/pail-container.sh sets it up,
+# and deploys one of everything to it: a folder, a site that needs a build, a
+# function, a Dockerfile, and an image from a registry. It is the test of the
+# container runtime against a real engine.
+#
+# It builds the image from this checkout, and leaves nothing behind.
+#
+# Usage: scripts/container-smoke          with whichever engine is running
+#        PAIL_ENGINE=podman scripts/container-smoke
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+cd "$repo"
+
+export PAIL_NAME=${PAIL_NAME:-pail-smoke}
+export PAIL_PORT=${PAIL_PORT:-18080}
+export PAIL_IMAGE=localhost/pail-smoke PAIL_VERSION=dev YES=1
+engine=${PAIL_ENGINE:-}
+if [ -z "$engine" ]; then
+  for candidate in docker podman; do
+    if command -v "$candidate" >/dev/null && "$candidate" info >/dev/null 2>&1; then engine=$candidate; break; fi
+  done
+fi
+[ -n "$engine" ] || { echo "container-smoke: neither Docker nor Podman is running." >&2; exit 1; }
+export PAIL_ENGINE=$engine
+
+work=$(mktemp -d)
+finish() {
+  status=$?
+  if [ "$status" != 0 ]; then
+    echo "--- Pail's log" >&2
+    "$engine" logs --tail 60 "$PAIL_NAME" 2>&1 | grep -v ' | vgw | ' >&2 || true
+  fi
+  bash deploy/container/pail-container.sh down >/dev/null 2>&1 || true
+  "$engine" volume rm "$PAIL_NAME-data" >/dev/null 2>&1 || true
+  # shellcheck disable=SC2046
+  "$engine" volume rm $("$engine" volume ls -q --filter "label=sh.pail.instance=$PAIL_NAME") >/dev/null 2>&1 || true
+  # shellcheck disable=SC2046
+  "$engine" rmi -f $("$engine" images -q "pail.local/$PAIL_NAME/*") "$PAIL_IMAGE:$PAIL_VERSION" >/dev/null 2>&1 || true
+  rm -rf "$work"
+  exit "$status"
+}
+trap finish EXIT
+
+step() { printf '\n==> %s\n' "$*"; }
+# Names under localhost are this machine, whether or not its resolver agrees.
+url() { echo "http://localhost:$PAIL_PORT"; }
+site() { curl -fsS -m 10 -H "Host: $1.localhost:$PAIL_PORT" "$(url)$2"; }
+# answers <pail> <path> <text>: the pail answers, within a minute, with text
+# in what it says.
+answers() {
+  for _ in $(seq 1 60); do
+    if got=$(site "$1" "$2" 2>/dev/null) && [[ "$got" == *"$3"* ]]; then echo "    $1.localhost$2 ✓"; return 0; fi
+    sleep 1
+  done
+  echo "container-smoke: $1.localhost$2 didn't answer with \"$3\". It said: ${got:-nothing}" >&2
+  return 1
+}
+
+step "Building the image with $engine"
+"$engine" build -q -f deploy/container/Dockerfile -t "$PAIL_IMAGE:$PAIL_VERSION" . >/dev/null
+go build -o "$work/pail" ./cmd/pail
+
+step "Starting Pail"
+bash deploy/container/pail-container.sh >/dev/null
+case "$("$engine" logs "$PAIL_NAME" 2>&1)" in
+  *"this pail can run containers"*) ;;
+  *) echo "container-smoke: Pail came up without its container runtime." >&2; exit 1 ;;
+esac
+PAIL_TOKEN=$("$engine" exec "$PAIL_NAME" cat /data/token)
+PAIL_URL=$(url)
+export PAIL_TOKEN PAIL_URL PAIL_CONFIG="$work/profiles.toml"
+up() { "$work/pail" up "$work/$1" --name "$1" >"$work/$1.log" 2>&1 || { cat "$work/$1.log" >&2; return 1; }; }
+
+step "A folder"
+mkdir "$work/plain" && echo '<h1>a folder</h1>' >"$work/plain/index.html"
+up plain && answers plain / "a folder"
+
+step "A site that needs a build"
+mkdir "$work/built"
+echo '{ "name": "built", "private": true, "scripts": { "build": "node build.js" } }' >"$work/built/package.json"
+cat >"$work/built/build.js" <<'JS'
+const fs = require('fs');
+fs.mkdirSync('dist', { recursive: true });
+fs.writeFileSync('dist/index.html', '<h1>built by node</h1>');
+JS
+up built && answers built / "built by node"
+
+step "A function"
+mkdir -p "$work/fn/api"
+cat >"$work/fn/api/main.py" <<'PY'
+import os, sys
+body = sys.stdin.read()
+print("Content-Type: text/plain")
+print()
+print(os.environ.get("REQUEST_METHOD"), os.environ.get("PATH_INFO"), "from a function")
+PY
+echo '{ "functions": { "api": { "src": "./api" } } }' >"$work/fn/pail.json"
+up fn && answers fn /some/path "GET /some/path from a function"
+
+step "A Dockerfile, with data that lasts"
+mkdir "$work/app"
+cat >"$work/app/Dockerfile" <<'DOCKERFILE'
+FROM docker.io/library/python:3.13-alpine
+COPY server.py /server.py
+CMD ["python3", "/server.py"]
+DOCKERFILE
+cat >"$work/app/server.py" <<'PY'
+import http.server, os, signal, sys
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        seen = int(open("/data/seen").read()) + 1 if os.path.exists("/data/seen") else 1
+        open("/data/seen", "w").write(str(seen))
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(f"visit {seen} to a container\n".encode())
+http.server.HTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler).serve_forever()
+PY
+echo '{ "containers": { "web": { "port": 3000, "memory": "128MB", "data": "/data" } } }' >"$work/app/pail.json"
+up app && answers app / "visit 1 to a container"
+# The next deploy's container takes over the first one's data.
+up app && answers app / "visit 2 to a container"
+
+step "An image from a registry"
+mkdir "$work/image"
+echo '{ "containers": { "web": { "image": "nginx:1.27-alpine", "port": 80, "memory": "128MB" } } }' >"$work/image/pail.json"
+up image && answers image / "Welcome to nginx"
+
+step "Restarting Pail: what was running comes back"
+"$engine" restart -t 60 "$PAIL_NAME" >/dev/null
+answers app / "to a container"
+answers fn / "from a function"
+
+step "Removing a pail takes its container"
+"$work/pail" rm app --yes >/dev/null
+if [ -n "$("$engine" ps -q --filter "name=$PAIL_NAME-run.app.")" ]; then
+  echo "container-smoke: app's container outlived it." >&2
+  exit 1
+fi
+
+step "Stopping Pail takes everything it started"
+bash deploy/container/pail-container.sh down >/dev/null
+if [ -n "$("$engine" ps -aq --filter "label=sh.pail.instance=$PAIL_NAME")" ]; then
+  echo "container-smoke: containers were left behind." >&2
+  exit 1
+fi
+echo
+echo "Pail runs in containers on $engine."

@@ -51,7 +51,7 @@ func (s *Service) buildFunctions(ctx context.Context, name string, d *Deploy, ar
 	for _, f := range cfg.functionNames() {
 		fc, plan := cfg.functions[f], plans[f]
 		if plan.script != "" {
-			lg.add("step", "→ building %s (%s) in a microVM", f, plan.lang.name)
+			lg.add("step", "→ building %s (%s) in a %s", f, plan.lang.name, s.box())
 		} else {
 			lg.add("step", "→ preparing %s (%s)", f, plan.lang.name)
 		}
@@ -468,7 +468,7 @@ func (s *Service) Invoke(ctx context.Context, live Live, function string, req Fu
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		p.say("error", "%s's microVM failed: %v", function, err)
+		p.say("error", "%s's %s failed: %v", function, s.box(), err)
 		return nil, FunctionFailure{function + " couldn't run."}
 	}
 	// A program that overran or was cut off may have left the copy in a

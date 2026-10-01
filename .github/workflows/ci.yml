@@ -38,6 +38,21 @@ jobs:
       - name: Build everything a release ships
         run: make ui && scripts/release ci
 
+  containers:
+    name: Container runtime
+    # GitHub's Linux runners have Docker. This builds Pail's image, runs it
+    # as pail-container.sh does, and deploys one of everything to it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run Pail in a container and deploy to it
+        run: scripts/container-smoke
+        env:
+          PAIL_ENGINE: docker
+
   microvms:
     name: MicroVM tests
     # GitHub's Linux runners have KVM, so these boot real Firecracker microVMs.

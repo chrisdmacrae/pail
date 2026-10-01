@@ -1,14 +1,17 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds the binaries and publishes a release. The
-# Proxmox installer downloads the server from the newest one, and the
-# Homebrew tap is pointed at it.
+# Pushing a tag like v0.1.0 builds the binaries and the container image, and
+# publishes a release. The Proxmox installer downloads the server from the
+# newest one, pail-container.sh runs the newest image, and the Homebrew tap
+# is pointed at it.
 on:
   push:
     tags: ['v*']
 
 permissions:
   contents: write
+  # The image goes to this repo's packages, at ghcr.io.
+  packages: write
 
 jobs:
   release:
@@ -39,6 +42,26 @@ jobs:
         run: make ui
       - name: Build the release
         run: scripts/release "$GITHUB_REF_NAME"
+      # The image holds pail-server and versitygw, for amd64 and arm64. It is
+      # pushed before the release is published, so pail-container.sh never
+      # finds a release whose image isn't there. A version with a dash, like
+      # v0.2.0-rc1, is a preview and doesn't become "latest".
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push the image
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags=(--tag "$image:$GITHUB_REF_NAME")
+          case "$GITHUB_REF_NAME" in *-*) ;; *) tags+=(--tag "$image:latest") ;; esac
+          docker buildx build --file deploy/container/Dockerfile --platform linux/amd64,linux/arm64 \
+            --build-arg "VERSION=$GITHUB_REF_NAME" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.version=$GITHUB_REF_NAME" \
+            "${tags[@]}" --push .
       # The description opens with how to install this version; GitHub's list
       # of what changed follows it.
       - name: Publish

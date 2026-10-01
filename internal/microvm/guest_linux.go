@@ -256,7 +256,7 @@ func serviceMain() {
 				continue
 			}
 			syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-			time.Sleep(stopGrace)
+			time.Sleep(StopGrace)
 			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 	}()

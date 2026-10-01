@@ -39,7 +39,7 @@ The build runs in a small virtual machine that is thrown away afterwards. It can
 
 A build can make functions too. When it leaves a `pail.json` in its output folder, Pail deploys what that file describes: the files it points `static` at, and the functions it declares. This is how [an Astro site](/deploying/astro/) gets pages rendered on demand.
 
-Builds need `/dev/kvm` on the server. Where there is none, Pail says so, and you can still build on your own machine and send the result with `pail up ./dist`.
+Builds need `/dev/kvm` on the server, or a Pail on [Docker](/running/docker/) or [Podman](/running/podman/), which builds in a container instead. Where there is neither, Pail says so, and you can still build on your own machine and send the result with `pail up ./dist`.
 
 ## pail.json
 
