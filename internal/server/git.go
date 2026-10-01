@@ -1,13 +1,17 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
+	"strings"
+	"time"
 
 	"github.com/chrisdmacrae/pail/internal/config"
 	"github.com/chrisdmacrae/pail/internal/githost"
@@ -24,9 +28,11 @@ type apiGitHost struct {
 	Connected     bool   `json:"connected"`
 	Server        string `json:"server,omitempty"`
 	Account       string `json:"account,omitempty"`
-	// OAuth says "Sign in with ..." is available. It isn't yet: Pail
-	// connects by access token only.
+	// OAuth says "Sign in with ..." is available: the server has an OAuth
+	// app set up for this host.
 	OAuth bool `json:"oauth"`
+	// Via is how the host was connected: "token" or "oauth".
+	Via string `json:"via,omitempty"`
 }
 
 func (s *Server) gitHost(kind githost.Kind) apiGitHost {
@@ -34,8 +40,14 @@ func (s *Server) gitHost(kind githost.Kind) apiGitHost {
 	if kind.SelfHostable() {
 		h.DefaultServer = kind.DefaultServer()
 	}
+	if _, err := s.git.App(kind); err == nil {
+		h.OAuth = true
+	}
 	if conn, ok := s.git.Get(kind); ok {
-		h.Connected, h.Server, h.Account = true, conn.Server, conn.Account
+		h.Connected, h.Server, h.Account, h.Via = true, conn.Server, conn.Account, "token"
+		if conn.OAuth {
+			h.Via = "oauth"
+		}
 	}
 	return h
 }
@@ -81,6 +93,77 @@ func (s *Server) handleConnectGit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.gitHost(kind))
 }
 
+// A sign-in waits this long for the person to come back from the git host.
+const signInWindow = 10 * time.Minute
+
+// signIn is a sign-in under way: which host, and where it sends people back.
+type signIn struct {
+	kind        githost.Kind
+	redirectURI string
+	started     time.Time
+}
+
+// handleStartOAuth begins signing in to a git host. It answers with the
+// host's address to send the browser to. The state it puts in that address
+// is how the callback, which carries no Pail token, is known to be the end
+// of a sign-in someone with the token began.
+func (s *Server) handleStartOAuth(w http.ResponseWriter, r *http.Request) {
+	kind, ok := s.gitKind(w, r)
+	if !ok {
+		return
+	}
+	app, err := s.git.App(kind)
+	if err != nil {
+		s.writeGitError(w, r, kind, err)
+		return
+	}
+	state := randomID()
+	in := signIn{kind: kind, redirectURI: origin(r, hostname(r.Host)) + "/oauth/callback/" + string(kind), started: time.Now()}
+	s.signInsMu.Lock()
+	for old, v := range s.signIns {
+		if time.Since(v.started) > signInWindow {
+			delete(s.signIns, old)
+		}
+	}
+	s.signIns[state] = in
+	s.signInsMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]string{"url": githost.AuthorizeURL(kind, app, in.redirectURI, state)})
+}
+
+// handleOAuthCallback is where a git host sends the browser back after a
+// sign-in. Whatever happens, the person lands on New pail, with the host
+// selected and anything that went wrong said there.
+func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	kind := githost.Kind(r.PathValue("kind"))
+	back := func(problem string) {
+		q := url.Values{"source": {string(kind)}}
+		if problem != "" {
+			q.Set("error", problem)
+		}
+		http.Redirect(w, r, "/new?"+q.Encode(), http.StatusSeeOther)
+	}
+
+	state := r.URL.Query().Get("state")
+	s.signInsMu.Lock()
+	in, ok := s.signIns[state]
+	delete(s.signIns, state) // a state is good once
+	s.signInsMu.Unlock()
+	switch {
+	case !ok || in.kind != kind || time.Since(in.started) > signInWindow:
+		back("That sign-in didn’t start here, or took too long. Try again.")
+		return
+	case r.URL.Query().Get("error") != "":
+		back(kind.Label() + " didn’t sign you in: " + cmp.Or(r.URL.Query().Get("error_description"), r.URL.Query().Get("error")) + ".")
+		return
+	}
+	if _, err := s.git.ConnectOAuth(r.Context(), kind, r.URL.Query().Get("code"), in.redirectURI); err != nil {
+		s.log.Error("oauth sign-in", "host", kind, "err", err)
+		back("Pail couldn’t finish signing in to " + kind.Label() + ": " + err.Error() + ".")
+		return
+	}
+	back("")
+}
+
 func (s *Server) handleDisconnectGit(w http.ResponseWriter, r *http.Request) {
 	kind, ok := s.gitKind(w, r)
 	if !ok {
@@ -98,7 +181,7 @@ func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	client, err := s.git.Client(kind)
+	client, err := s.git.Client(r.Context(), kind)
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
@@ -125,7 +208,7 @@ func (s *Server) handleDetectRepo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "Say which repo and branch: ?repo=owner/name&branch=main.")
 		return
 	}
-	client, err := s.git.Client(kind)
+	client, err := s.git.Client(r.Context(), kind)
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
@@ -142,7 +225,7 @@ func (s *Server) handleDetectRepo(w http.ResponseWriter, r *http.Request) {
 // deploy of it, the same way an upload would.
 func (s *Server) deployFromGit(ctx context.Context, r *http.Request, name string, git pails.GitSource, label string) (pails.Deploy, error) {
 	kind := githost.Kind(git.Host)
-	client, err := s.git.Client(kind)
+	client, err := s.git.Client(ctx, kind)
 	if err != nil {
 		return pails.Deploy{}, err
 	}
@@ -185,7 +268,7 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "name_taken", name+" is already a pail. Pick another name.")
 		return
 	}
-	client, err := s.git.Client(kind)
+	client, err := s.git.Client(r.Context(), kind)
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
@@ -266,7 +349,7 @@ func (s *Server) removeHook(ctx context.Context, git *pails.GitSource) {
 	if git == nil || git.HookID == "" {
 		return
 	}
-	client, err := s.git.Client(githost.Kind(git.Host))
+	client, err := s.git.Client(ctx, githost.Kind(git.Host))
 	if err != nil {
 		return
 	}
@@ -280,6 +363,9 @@ func (s *Server) writeGitError(w http.ResponseWriter, r *http.Request, kind gith
 	switch {
 	case errors.Is(err, githost.ErrNotConnected):
 		writeError(w, http.StatusConflict, "not_connected", label+" isn’t connected. Connect it from New pail with an access token.")
+	case errors.Is(err, githost.ErrNoOAuth):
+		prefix := "PAIL_OAUTH_" + strings.ToUpper(string(kind))
+		writeError(w, http.StatusConflict, "no_oauth", "This Pail has no OAuth app for "+label+". Set "+prefix+"_CLIENT_ID and "+prefix+"_CLIENT_SECRET on the server, or connect with a token.")
 	case errors.Is(err, githost.ErrNoServer):
 		writeError(w, http.StatusBadRequest, "no_server", label+" needs its server’s address, like https://git.home.example.")
 	case errors.Is(err, githost.ErrUnauthorized):

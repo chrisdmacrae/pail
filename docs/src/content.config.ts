@@ -11,16 +11,16 @@ const docs = defineCollection({
     // lead is the sentence or two under the title; also the page's description.
     lead: z.string(),
     // section is the sidebar group the page sits in.
-    section: z.enum(['Start here', 'Custom domains']),
+    section: z.enum(['Start here', 'Git providers', 'Custom domains']),
     // order sorts pages inside their section.
     order: z.number(),
     // navLabel is a shorter name for the sidebar, when the title is long.
     navLabel: z.string().optional(),
-    // provider marks a DNS provider's guide and holds the value
-    // PAIL_ACME_DNS_PROVIDER takes for it. These pages nest under their
-    // section's first page in the sidebar.
+    // provider marks the guide for one provider, a DNS host or a git host,
+    // and holds the name Pail's settings use for it. These pages nest under
+    // their section's first page in the sidebar.
     provider: z.string().optional(),
-    // providerTiles lists every provider guide as tiles under the lead.
+    // providerTiles lists the section's provider guides as tiles under the lead.
     providerTiles: z.boolean().default(false),
     // next points at the page to read after this one.
     next: z.object({ href: z.string(), label: z.string() }).optional(),

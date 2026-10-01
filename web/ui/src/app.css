@@ -341,3 +341,38 @@ body,
 .pl-addr .pa-btn {
   margin-left: auto;
 }
+
+/* The repo list: one bounded box, twelve repos at a time. A row is 56px with
+   8px between, so twelve of them are 760px. */
+.pl-repos {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.pl-repos-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+.pl-repos-list.is-paged {
+  min-height: 760px;
+  box-sizing: content-box;
+}
+.pl-repos-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 8px 8px 16px;
+  border-top: 1px solid var(--line);
+}
+.pl-repos-pager .pl-actions {
+  width: auto;
+}
+.pl-repos-pager .pl-actions > * {
+  flex: none;
+}

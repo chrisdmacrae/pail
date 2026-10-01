@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/chrisdmacrae/pail/internal/config"
 	"github.com/chrisdmacrae/pail/internal/githost"
@@ -29,6 +30,10 @@ type Server struct {
 	ui      fs.FS
 	probe   *prober
 	install http.Handler
+
+	// signIns are the OAuth sign-ins under way, by their state.
+	signInsMu sync.Mutex
+	signIns   map[string]signIn
 }
 
 // Certs is what the server needs from whatever issues its certificates.
@@ -60,6 +65,7 @@ type Options struct {
 // one when TLS is off.
 func New(o Options) *Server {
 	s := &Server{cfg: o.Config, pails: o.Pails, certs: o.Certs, git: o.Git, ui: o.UI, probe: newProber(), log: o.Logger, version: o.Version}
+	s.signIns = map[string]signIn{}
 	if s.git == nil {
 		s.git, _ = githost.LoadConnections(context.Background(), storage.NewMemory(), githost.DefaultClient())
 	}

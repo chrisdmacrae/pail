@@ -7,7 +7,10 @@ import { UploadZone } from '../UploadZone';
 import { FromGit } from './FromGit';
 
 export function NewPail({ host, info }: { host: string; info: Info | null }) {
-  const [source, setSource] = useState<string | null>(null);
+  // Coming back from a git host's sign-in, the address says which host it
+  // was and anything that went wrong there.
+  const [arrived] = useState(() => new URLSearchParams(window.location.search));
+  const [source, setSource] = useState<string | null>(arrived.get('source'));
   const [git, setGit] = useState<GitHost[]>([]);
 
   const loadGit = useCallback(() => listGitHosts().then(setGit, () => {}), []);
@@ -33,7 +36,15 @@ export function NewPail({ host, info }: { host: string; info: Info | null }) {
 
       {source === 'cli' && <FromCli />}
       {source === 'upload' && <FromUpload host={host} info={info} />}
-      {gitHost && <FromGit key={gitHost.kind} git={gitHost} host={host} onConnected={loadGit} />}
+      {gitHost && (
+        <FromGit
+          key={gitHost.kind}
+          git={gitHost}
+          host={host}
+          problem={gitHost.kind === arrived.get('source') ? (arrived.get('error') ?? undefined) : undefined}
+          onConnected={loadGit}
+        />
+      )}
     </main>
   );
 }

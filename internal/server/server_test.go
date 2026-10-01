@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -919,4 +920,99 @@ func TestPailsFromAGitHost(t *testing.T) {
 	}
 	wantBody(t, f.site("notes.pail.lan", "/"), 200, "notes")
 	wantBody(t, f.api("POST", "/api/v1/pails/notes/redeploy", nil), http.StatusConflict, "Forgejo isn’t connected")
+}
+
+func TestSigningInToAGitHost(t *testing.T) {
+	store := storage.NewMemory()
+	// A git host that takes a code for a token, and knows that token.
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			r.ParseForm()
+			if r.PostForm.Get("code") != "the-code" || r.PostForm.Get("client_secret") != "app-secret" {
+				json.NewEncoder(w).Encode(map[string]string{"error": "bad_verification_code"})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "signed-in-token", "refresh_token": "r1", "expires_in": 3600})
+		case "/api/v1/user":
+			if r.Header.Get("Authorization") != "token signed-in-token" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"login": "chris"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer host.Close()
+
+	conns, _ := githost.LoadConnections(context.Background(), store, githost.DefaultClient())
+	conns.Apps = map[githost.Kind]githost.App{githost.Forgejo: {ClientID: "app-id", ClientSecret: "app-secret", Server: host.URL}}
+	f := newFixtureWith(t, store, conns)
+	callback := func(query string) *httptest.ResponseRecorder {
+		return f.do("GET", "pail.lan", "/oauth/callback/forgejo?"+query, nil)
+	}
+	landed := func(rec *httptest.ResponseRecorder) string {
+		t.Helper()
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("callback: %d %s", rec.Code, rec.Body)
+		}
+		to, _ := url.Parse(rec.Header().Get("Location"))
+		if to.Path != "/new" || to.Query().Get("source") != "forgejo" {
+			t.Fatalf("callback sent the browser to %s", to)
+		}
+		return to.Query().Get("error")
+	}
+
+	// Only hosts with an app set up offer signing in.
+	list := f.api("GET", "/api/v1/git", nil).Body.String()
+	if !strings.Contains(list, `"kind":"forgejo","label":"Forgejo","self_hostable":true,"default_server":"","connected":false,"oauth":true`) ||
+		!strings.Contains(list, `"kind":"github","label":"GitHub","self_hostable":false,"default_server":"","connected":false,"oauth":false`) {
+		t.Errorf("git hosts: %s", list)
+	}
+	wantBody(t, f.api("POST", "/api/v1/git/github/oauth", nil), http.StatusConflict, "PAIL_OAUTH_GITHUB_CLIENT_ID")
+	// Starting a sign-in takes Pail's token, like every API call.
+	if rec := f.do("POST", "pail.lan", "/api/v1/git/forgejo/oauth", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("starting a sign-in without Pail's token: %d", rec.Code)
+	}
+
+	start := func() string {
+		t.Helper()
+		var out struct{ URL string }
+		rec := f.api("POST", "/api/v1/git/forgejo/oauth", nil)
+		json.Unmarshal(rec.Body.Bytes(), &out)
+		to, err := url.Parse(out.URL)
+		if err != nil || !strings.HasPrefix(out.URL, host.URL+"/login/oauth/authorize?") ||
+			to.Query().Get("client_id") != "app-id" || to.Query().Get("redirect_uri") != "http://pail.lan/oauth/callback/forgejo" {
+			t.Fatalf("sign-in address: %s", rec.Body)
+		}
+		return to.Query().Get("state")
+	}
+
+	// A callback nobody started, a refusal at the host, and a bad code all
+	// land back on New pail saying what went wrong, and connect nothing.
+	if problem := landed(callback("code=the-code&state=made-up")); !strings.Contains(problem, "didn’t start here") {
+		t.Errorf("made-up state: %q", problem)
+	}
+	if problem := landed(callback("error=access_denied&error_description=The+user+said+no&state=" + start())); !strings.Contains(problem, "The user said no") {
+		t.Errorf("refused at the host: %q", problem)
+	}
+	if problem := landed(callback("code=wrong&state=" + start())); !strings.Contains(problem, "couldn’t finish signing in") {
+		t.Errorf("bad code: %q", problem)
+	}
+	wantBody(t, f.api("GET", "/api/v1/git", nil), 200, `"connected":false,"oauth":true`)
+
+	// The real thing: a state Pail issued comes back with a code.
+	state := start()
+	if problem := landed(callback("code=the-code&state=" + state)); problem != "" {
+		t.Fatalf("sign-in: %q", problem)
+	}
+	connected := f.api("GET", "/api/v1/git", nil).Body.String()
+	if !strings.Contains(connected, `"account":"chris"`) || !strings.Contains(connected, `"via":"oauth"`) || strings.Contains(connected, "signed-in-token") {
+		t.Errorf("after signing in: %s", connected)
+	}
+	// A state is good once.
+	if problem := landed(callback("code=the-code&state=" + state)); !strings.Contains(problem, "didn’t start here") {
+		t.Errorf("the same state again: %q", problem)
+	}
 }

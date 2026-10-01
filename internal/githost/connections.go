@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chrisdmacrae/pail/internal/storage"
 )
@@ -27,6 +29,12 @@ type Connection struct {
 	Token  string `json:"token"`
 	// Account is whose token it is, when the host says.
 	Account string `json:"account,omitempty"`
+	// OAuth says the token came from signing in rather than being pasted.
+	// Such a token may run out; Refresh gets the next one, and Expires is
+	// when this one ends (zero if it doesn't).
+	OAuth   bool      `json:"oauth,omitempty"`
+	Refresh string    `json:"refresh,omitempty"`
+	Expires time.Time `json:"expires,omitzero"`
 }
 
 // Connections keeps Pail's git host connections in the object store, beside
@@ -37,6 +45,11 @@ type Connections struct {
 	// BaseURLs says where a host that isn't self-hosted lives, in place of
 	// its real address. It is for tests.
 	BaseURLs map[Kind]string
+	// Apps are the OAuth apps set up on the server, by host.
+	Apps map[Kind]App
+
+	// refreshing lets one token be renewed at a time: a refresh token works once.
+	refreshing sync.Mutex
 
 	mu  sync.RWMutex
 	all map[Kind]Connection
@@ -81,17 +94,97 @@ func (c *Connections) Connect(ctx context.Context, kind Kind, server, token stri
 	if conn.Account, err = client.Account(ctx); err != nil {
 		return conn, err
 	}
+	return conn, c.save(ctx, conn)
+}
+
+func (c *Connections) save(ctx context.Context, conn Connection) error {
 	b, err := json.Marshal(conn)
+	if err != nil {
+		return err
+	}
+	if err := c.store.Put(ctx, connectionKey(conn.Kind), bytes.NewReader(b), int64(len(b)), "application/json"); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.all[conn.Kind] = conn
+	c.mu.Unlock()
+	return nil
+}
+
+// App returns the OAuth app set up for a host, or ErrNoOAuth.
+func (c *Connections) App(kind Kind) (App, error) {
+	app := c.Apps[kind]
+	if !app.Configured() {
+		return app, ErrNoOAuth
+	}
+	return app, nil
+}
+
+// ConnectOAuth finishes a sign-in: it trades the code the host sent back for
+// a token, checks it, and keeps it.
+func (c *Connections) ConnectOAuth(ctx context.Context, kind Kind, code, redirectURI string) (Connection, error) {
+	app, err := c.App(kind)
+	if err != nil {
+		return Connection{}, err
+	}
+	g, err := redeem(ctx, c.hc, kind, app, url.Values{
+		"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirectURI},
+	})
+	if err != nil {
+		return Connection{}, err
+	}
+	conn := Connection{Kind: kind, Token: g.AccessToken, OAuth: true, Refresh: g.RefreshToken, Expires: g.expiry(time.Now())}
+	if kind.SelfHostable() {
+		conn.Server = strings.TrimRight(app.Server, "/")
+	} else {
+		conn.Server = c.BaseURLs[kind]
+	}
+	client, err := New(kind, conn.Server, conn.Token, c.hc)
 	if err != nil {
 		return conn, err
 	}
-	if err := c.store.Put(ctx, connectionKey(kind), bytes.NewReader(b), int64(len(b)), "application/json"); err != nil {
+	if conn.Account, err = client.Account(ctx); err != nil {
 		return conn, err
 	}
-	c.mu.Lock()
-	c.all[kind] = conn
-	c.mu.Unlock()
-	return conn, nil
+	return conn, c.save(ctx, conn)
+}
+
+// fresh returns a connection whose token still has life in it, renewing a
+// signed-in one that is about to run out.
+func (c *Connections) fresh(ctx context.Context, kind Kind) (Connection, error) {
+	conn, ok := c.Get(kind)
+	if !ok {
+		return conn, ErrNotConnected
+	}
+	stale := func(conn Connection) bool {
+		return conn.OAuth && !conn.Expires.IsZero() && time.Until(conn.Expires) < time.Minute
+	}
+	if !stale(conn) {
+		return conn, nil
+	}
+
+	c.refreshing.Lock()
+	defer c.refreshing.Unlock()
+	// Someone else may have renewed it while this waited.
+	if conn, ok = c.Get(kind); !ok {
+		return conn, ErrNotConnected
+	}
+	if !stale(conn) {
+		return conn, nil
+	}
+	app, err := c.App(kind)
+	if err != nil || conn.Refresh == "" {
+		return conn, fmt.Errorf("%w: the sign-in to %s has run out. Sign in again from New pail", ErrUnauthorized, kind.Label())
+	}
+	g, err := redeem(ctx, c.hc, kind, app, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {conn.Refresh}})
+	if err != nil {
+		return conn, fmt.Errorf("%w: %v. Sign in again from New pail", ErrUnauthorized, err)
+	}
+	conn.Token, conn.Expires = g.AccessToken, g.expiry(time.Now())
+	if g.RefreshToken != "" {
+		conn.Refresh = g.RefreshToken
+	}
+	return conn, c.save(ctx, conn)
 }
 
 // Disconnect forgets a host's token.
@@ -110,10 +203,10 @@ func (c *Connections) Get(kind Kind) (Connection, bool) {
 }
 
 // Client returns a client for a connected host, or ErrNotConnected.
-func (c *Connections) Client(kind Kind) (Client, error) {
-	conn, ok := c.Get(kind)
-	if !ok {
-		return nil, ErrNotConnected
+func (c *Connections) Client(ctx context.Context, kind Kind) (Client, error) {
+	conn, err := c.fresh(ctx, kind)
+	if err != nil {
+		return nil, err
 	}
 	return New(kind, conn.Server, conn.Token, c.hc)
 }

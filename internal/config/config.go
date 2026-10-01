@@ -33,7 +33,28 @@ type Config struct {
 
 	S3   S3
 	ACME ACME
+	// OAuth holds the OAuth app for each git host that has one, keyed by
+	// the host: "github", "gitlab", "bitbucket", "gitea", "forgejo".
+	OAuth map[string]OAuthApp
 }
+
+// OAuthApp is an OAuth app registered with a git host
+// (PAIL_OAUTH_<HOST>_CLIENT_ID and _CLIENT_SECRET), so people can sign in
+// instead of pasting a token.
+type OAuthApp struct {
+	ClientID     string
+	ClientSecret string
+	// Server is where the app is registered, for a host you run yourself
+	// (PAIL_OAUTH_<HOST>_SERVER).
+	Server string
+}
+
+// oauthHosts are the hosts an app can be set up for, and whether one needs
+// to be told its server.
+var oauthHosts = []struct {
+	name       string
+	needServer bool
+}{{"github", false}, {"gitlab", false}, {"bitbucket", false}, {"gitea", true}, {"forgejo", true}}
 
 // ACME turns on Let's Encrypt certificates by DNS-01, and with them custom
 // hostnames.
@@ -117,6 +138,25 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if (c.ACME.DNSProvider == "") != (c.ACME.DNSToken == "") {
 		return c, errors.New("PAIL_ACME_DNS_PROVIDER and PAIL_ACME_DNS_TOKEN go together. Set both, or neither")
+	}
+
+	c.OAuth = map[string]OAuthApp{}
+	for _, h := range oauthHosts {
+		prefix := "PAIL_OAUTH_" + strings.ToUpper(h.name) + "_"
+		app := OAuthApp{
+			ClientID:     get(prefix+"CLIENT_ID", ""),
+			ClientSecret: get(prefix+"CLIENT_SECRET", ""),
+			Server:       strings.TrimRight(get(prefix+"SERVER", ""), "/"),
+		}
+		switch {
+		case app.ClientID == "" && app.ClientSecret == "":
+			continue
+		case app.ClientID == "" || app.ClientSecret == "":
+			return c, fmt.Errorf("%sCLIENT_ID and %sCLIENT_SECRET go together. Set both, or neither", prefix, prefix)
+		case h.needServer && app.Server == "":
+			return c, fmt.Errorf("%sSERVER must say where your %s lives, like https://git.home.example", prefix, h.name)
+		}
+		c.OAuth[h.name] = app
 	}
 
 	if c.S3.Endpoint == "" || c.S3.AccessKey == "" || c.S3.SecretKey == "" {

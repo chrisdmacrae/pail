@@ -52,6 +52,11 @@ export interface GitHost {
   default_server: string;
   connected: boolean;
   account?: string;
+  // oauth says the server has an OAuth app for this host, so people can
+  // sign in instead of pasting a token.
+  oauth: boolean;
+  // via is how the host was connected.
+  via?: 'token' | 'oauth';
 }
 
 export interface Repo {
@@ -181,6 +186,9 @@ export const removeHost = async (name: string, host: string) =>
 export const listGitHosts = async () => (await json<{ hosts: GitHost[] }>('GET', '/git')).hosts;
 export const connectGit = (kind: string, token: string, server?: string) =>
   json<GitHost>('PUT', `/git/${kind}`, { token, server });
+// startSignIn begins signing in to a git host and returns the host's address
+// to send the browser to. It comes back to New pail.
+export const startSignIn = async (kind: string) => (await json<{ url: string }>('POST', `/git/${kind}/oauth`)).url;
 export const listRepos = async (kind: string) => (await json<{ repos: Repo[] }>('GET', `/git/${kind}/repos`)).repos;
 export const detectRepo = (kind: string, repo: string, branch: string) =>
   json<Detection>('GET', `/git/${kind}/detect?repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}`);

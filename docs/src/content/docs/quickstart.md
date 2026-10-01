@@ -4,8 +4,8 @@ lead: "From nothing to your first pail. This page is still being written."
 section: Start here
 order: 1
 next:
-  href: /custom-domains/
-  label: Set up a custom domain
+  href: /git-providers/
+  label: Set up a git provider
 ---
 
 > **Not written yet.** The quickstart will walk through installing Pail, starting it, and putting your first site in it with one command.

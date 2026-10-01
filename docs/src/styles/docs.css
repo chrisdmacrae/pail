@@ -260,7 +260,7 @@ a:focus-visible,
   padding: 0;
   list-style: none;
 }
-.dx-tiles li {
+.dx-main .dx-tiles li {
   margin: 0;
 }
 .dx-tile {

@@ -7,6 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -275,7 +277,7 @@ func TestConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := conns.Client(Forgejo); err != ErrNotConnected {
+	if _, err := conns.Client(ctx, Forgejo); err != ErrNotConnected {
 		t.Errorf("before connecting: %v", err)
 	}
 	if _, err := conns.Connect(ctx, Forgejo, "", "fj-x"); err == nil || !strings.Contains(err.Error(), "server") {
@@ -305,5 +307,119 @@ func TestConnections(t *testing.T) {
 	}
 	if keys, _ := store.List(ctx, "git/"); len(keys) != 0 {
 		t.Errorf("disconnecting left %v", keys)
+	}
+}
+
+// oauthHost is a git host's sign-in: it hands out a token for a code, and
+// the next token for a refresh token, which works once.
+type oauthHost struct {
+	t        *testing.T
+	basic    bool // expects the app's credentials as basic auth
+	issued   int
+	lastForm map[string]string
+}
+
+func (o *oauthHost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/user") {
+		// Only the newest token is good.
+		if !strings.HasSuffix(r.Header.Get("Authorization"), fmt.Sprintf("access-%d", o.issued)) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		json.NewEncoder(w).Encode(obj{"login": "chris", "username": "chris"})
+		return
+	}
+	r.ParseForm()
+	o.lastForm = map[string]string{}
+	for k := range r.PostForm {
+		o.lastForm[k] = r.PostForm.Get(k)
+	}
+	id, secret := r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
+	if o.basic {
+		id, secret, _ = r.BasicAuth()
+	}
+	good := id == "app-id" && secret == "app-secret" &&
+		((r.PostForm.Get("grant_type") == "authorization_code" && r.PostForm.Get("code") == "the-code") ||
+			(r.PostForm.Get("grant_type") == "refresh_token" && r.PostForm.Get("refresh_token") == fmt.Sprintf("refresh-%d", o.issued)))
+	if !good || r.Header.Get("Accept") != "application/json" {
+		json.NewEncoder(w).Encode(obj{"error": "bad_verification_code", "error_description": "The code is incorrect or expired."})
+		return
+	}
+	o.issued++
+	json.NewEncoder(w).Encode(obj{
+		"access_token": fmt.Sprintf("access-%d", o.issued), "refresh_token": fmt.Sprintf("refresh-%d", o.issued), "expires_in": 30,
+	})
+}
+
+func TestOAuth(t *testing.T) {
+	ctx := context.Background()
+	redirect := "https://pail.lan/oauth/callback/forgejo"
+
+	// Where each host is sent to sign in, and what it's asked for.
+	for kind, want := range map[Kind]string{
+		GitHub:    "https://github.com/login/oauth/authorize?client_id=app-id&redirect_uri=https%3A%2F%2Fpail.lan%2Fcb&response_type=code&scope=repo&state=xyz",
+		GitLab:    "https://gitlab.com/oauth/authorize?client_id=app-id&redirect_uri=https%3A%2F%2Fpail.lan%2Fcb&response_type=code&scope=api&state=xyz",
+		Bitbucket: "https://bitbucket.org/site/oauth2/authorize?client_id=app-id&redirect_uri=https%3A%2F%2Fpail.lan%2Fcb&response_type=code&state=xyz",
+	} {
+		if got := AuthorizeURL(kind, App{ClientID: "app-id"}, "https://pail.lan/cb", "xyz"); got != want {
+			t.Errorf("%s sign-in address:\n got %s\nwant %s", kind, got, want)
+		}
+	}
+	if got := AuthorizeURL(Forgejo, App{ClientID: "app-id", Server: "https://git.home.example/"}, "https://pail.lan/cb", "xyz"); !strings.HasPrefix(got, "https://git.home.example/login/oauth/authorize?client_id=app-id&") {
+		t.Errorf("Forgejo sign-in address: %s", got)
+	}
+
+	for _, kind := range []Kind{Forgejo, Bitbucket} {
+		t.Run(string(kind), func(t *testing.T) {
+			host := &oauthHost{t: t, basic: kind == Bitbucket}
+			ts := httptest.NewServer(host)
+			defer ts.Close()
+			store := storage.NewMemory()
+			conns, _ := LoadConnections(ctx, store, ts.Client())
+			conns.BaseURLs = map[Kind]string{Bitbucket: ts.URL}
+
+			if _, err := conns.ConnectOAuth(ctx, kind, "the-code", redirect); err != ErrNoOAuth {
+				t.Fatalf("with no app set up: %v", err)
+			}
+			conns.Apps = map[Kind]App{kind: {ClientID: "app-id", ClientSecret: "app-secret", Server: ts.URL}}
+
+			if _, err := conns.ConnectOAuth(ctx, kind, "a-stale-code", redirect); err == nil || !strings.Contains(err.Error(), "incorrect or expired") {
+				t.Errorf("a bad code: %v", err)
+			}
+			if _, ok := conns.Get(kind); ok {
+				t.Fatal("a failed sign-in left a connection")
+			}
+
+			conn, err := conns.ConnectOAuth(ctx, kind, "the-code", redirect)
+			if err != nil || !conn.OAuth || conn.Token != "access-1" || conn.Refresh != "refresh-1" || conn.Account != "chris" || conn.Expires.IsZero() {
+				t.Fatalf("ConnectOAuth: %+v, %v", conn, err)
+			}
+			if host.lastForm["redirect_uri"] != redirect {
+				t.Errorf("the code was redeemed with redirect_uri %q", host.lastForm["redirect_uri"])
+			}
+
+			// The token lasts 30 seconds here, so it is already due: the next
+			// use renews it, and the renewal is kept.
+			client, err := conns.Client(ctx, kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if who, err := client.Account(ctx); err != nil || who != "chris" {
+				t.Errorf("after renewing: %q, %v", who, err)
+			}
+			if host.issued != 2 {
+				t.Errorf("tokens issued: %d, want the first and one renewal", host.issued)
+			}
+			again, _ := LoadConnections(ctx, store, ts.Client())
+			if got, _ := again.Get(kind); got.Token != "access-2" || got.Refresh != "refresh-2" {
+				t.Errorf("the renewed token wasn't kept: %+v", got)
+			}
+
+			// A sign-in that can't be renewed says to sign in again.
+			host.issued = 9
+			if _, err := conns.Client(ctx, kind); !errors.Is(err, ErrUnauthorized) || !strings.Contains(err.Error(), "Sign in again") {
+				t.Errorf("a refresh token the host no longer takes: %v", err)
+			}
+		})
 	}
 }

@@ -65,3 +65,34 @@ func TestACMEGoesTogether(t *testing.T) {
 		t.Fatalf("both: %+v, %v", c.ACME, err)
 	}
 }
+
+func TestOAuthApps(t *testing.T) {
+	base := map[string]string{"PAIL_TOKEN": "t"}
+	for k, v := range s3 {
+		base[k] = v
+	}
+	with := func(extra map[string]string) (Config, error) {
+		vars := map[string]string{}
+		for k, v := range base {
+			vars[k] = v
+		}
+		for k, v := range extra {
+			vars[k] = v
+		}
+		return Load(env(vars))
+	}
+
+	c, err := with(map[string]string{
+		"PAIL_OAUTH_GITHUB_CLIENT_ID": "gh-id", "PAIL_OAUTH_GITHUB_CLIENT_SECRET": "gh-secret",
+		"PAIL_OAUTH_FORGEJO_CLIENT_ID": "fj-id", "PAIL_OAUTH_FORGEJO_CLIENT_SECRET": "fj-secret", "PAIL_OAUTH_FORGEJO_SERVER": "https://git.home.example/",
+	})
+	if err != nil || len(c.OAuth) != 2 || c.OAuth["github"].ClientID != "gh-id" || c.OAuth["forgejo"].Server != "https://git.home.example" {
+		t.Fatalf("apps: %+v, %v", c.OAuth, err)
+	}
+	if _, err := with(map[string]string{"PAIL_OAUTH_GITHUB_CLIENT_ID": "gh-id"}); err == nil || !strings.Contains(err.Error(), "go together") {
+		t.Errorf("an ID with no secret: %v", err)
+	}
+	if _, err := with(map[string]string{"PAIL_OAUTH_GITEA_CLIENT_ID": "x", "PAIL_OAUTH_GITEA_CLIENT_SECRET": "y"}); err == nil || !strings.Contains(err.Error(), "PAIL_OAUTH_GITEA_SERVER") {
+		t.Errorf("Gitea with no server: %v", err)
+	}
+}

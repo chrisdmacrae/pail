@@ -10,10 +10,15 @@ export async function getStaticPaths() {
 const { page } = Astro.props;
 const { Content } = await render(page);
 
-// Guides by provider, for pages that offer the choice.
+// Guides by provider, for pages that offer the choice: the ones in the same
+// section as the page.
 const providers = page.data.providerTiles
-  ? (await getCollection('docs', (p) => !!p.data.provider)).sort((a, b) => a.data.order - b.data.order)
+  ? (await getCollection('docs', (p) => !!p.data.provider && p.data.section === page.data.section)).sort(
+      (a, b) => a.data.order - b.data.order,
+    )
   : [];
+// A git host wears the design system's git icon; a DNS host, the globe.
+const git = page.data.section === 'Git providers';
 ---
 
 <Docs title={page.data.title} description={page.data.lead}>
@@ -22,7 +27,7 @@ const providers = page.data.providerTiles
 
   {
     providers.length > 0 && (
-      <ul class="dx-tiles" aria-label="Guides by DNS provider">
+      <ul class="dx-tiles" aria-label="Guides by provider">
         {providers.map((p) => (
           <li>
             <a class="pa-source dx-tile" href={`/${p.id}/`}>
@@ -38,8 +43,19 @@ const providers = page.data.providerTiles
                 stroke-linejoin="round"
                 aria-hidden="true"
               >
-                <circle cx="12" cy="12" r="9" />
-                <path d="M3 12h18M12 3c2.4 2.6 3.6 5.6 3.6 9s-1.2 6.4-3.6 9c-2.4-2.6-3.6-5.6-3.6-9S9.6 5.6 12 3z" />
+                {git ? (
+                  <>
+                    <circle cx="6" cy="5.5" r="2" />
+                    <circle cx="6" cy="18.5" r="2" />
+                    <circle cx="18" cy="7.5" r="2" />
+                    <path d="M6 7.5v9M18 9.5v.5a4 4 0 0 1-4 4h-5a3 3 0 0 0-3 3" />
+                  </>
+                ) : (
+                  <>
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M3 12h18M12 3c2.4 2.6 3.6 5.6 3.6 9s-1.2 6.4-3.6 9c-2.4-2.6-3.6-5.6-3.6-9S9.6 5.6 12 3z" />
+                  </>
+                )}
               </svg>
               <span class="pa-source-label">{p.data.navLabel ?? p.data.title}</span>
             </a>

@@ -41,6 +41,7 @@ func (s *Server) installation() http.Handler {
 	api.HandleFunc("GET /api/v1/git", s.handleListGit)
 	api.HandleFunc("PUT /api/v1/git/{kind}", s.handleConnectGit)
 	api.HandleFunc("DELETE /api/v1/git/{kind}", s.handleDisconnectGit)
+	api.HandleFunc("POST /api/v1/git/{kind}/oauth", s.handleStartOAuth)
 	api.HandleFunc("GET /api/v1/git/{kind}/repos", s.handleListRepos)
 	api.HandleFunc("GET /api/v1/git/{kind}/detect", s.handleDetectRepo)
 	api.HandleFunc("POST /api/v1/pails/{name}/repo", s.handleCreateFromRepo)
@@ -51,6 +52,8 @@ func (s *Server) installation() http.Handler {
 	mux := http.NewServeMux()
 	// A git host's webhook can't carry Pail's token; it is signed instead.
 	mux.HandleFunc("POST /api/v1/hooks/{name}", s.handleHook)
+	// Nor can the browser coming back from a git host's sign-in.
+	mux.HandleFunc("GET /oauth/callback/{kind}", s.handleOAuthCallback)
 	mux.Handle("/api/", s.requireToken(api))
 	mux.HandleFunc("/", s.serveUI)
 	return mux

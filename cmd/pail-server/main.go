@@ -72,6 +72,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	git.Apps = map[githost.Kind]githost.App{}
+	for host, app := range cfg.OAuth {
+		git.Apps[githost.Kind(host)] = githost.App{ClientID: app.ClientID, ClientSecret: app.ClientSecret, Server: app.Server}
+	}
 	opts := server.Options{Config: cfg, Pails: svc, UI: webui.FS(), Git: git, Logger: logger, Version: version}
 
 	// Certificates: Pail's own authority, or Let's Encrypt when a DNS

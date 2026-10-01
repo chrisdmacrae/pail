@@ -18,8 +18,8 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | 4 | Web UI from the design system | done |
 | 5 | Custom hostnames and the DNS self-check | done |
 | — | TLS: Pail's own certificate authority, and Let's Encrypt by DNS-01 | done |
-| 6 | Git hosts: token first, then OAuth | connecting by token is done; OAuth isn't built |
-| 7 | Firecracker microVMs: the build VM, containers, and the KVM check | |
+| 6 | Git hosts: token first, then OAuth | done |
+| 7 | Firecracker microVMs: the build VM, containers, and the KVM check | next |
 | 8 | pail.json functions: base images, snapshots, sleep when idle, and routing | |
 
 ## Layout
@@ -85,7 +85,7 @@ The base domain serves the UI: your pails, a pail's page, and New pail. It is a 
 - **A pail:** its deploys and their logs (live while building), Upload a deploy (a `.zip` or a folder), Serve this one, Redeploy, Stop or Start, and Remove.
 - **New pail:** the pail-cli commands; Upload, where you drop a folder or a `.zip` (a folder is packed into a `.tar.gz` in the browser); or a git host, where you connect with a token and pick a repo.
 
-Not in the UI yet: signing in to a git host with OAuth, the functions panel (step 8), and real install instructions for pail-cli.
+Not in the UI yet: the functions panel (step 8), and real install instructions for pail-cli.
 
 It's built from `web/design-system/` as published: the components come from its `bundle.js`, and nothing in that folder is edited. Day or Night follows the device.
 
@@ -131,6 +131,8 @@ Everything is an environment variable on the server.
 | `PAIL_ACME_EMAIL` | unset | Optional address for Let's Encrypt's expiry notices. |
 | `PAIL_ACME_DIRECTORY` | Let's Encrypt production | Another ACME directory, such as Let's Encrypt's staging one while you're trying things out. |
 | `PAIL_ACME_RESOLVERS` | the system's | DNS servers to check the challenge record with, comma-separated, e.g. `1.1.1.1:53`. Set it when your home resolver answers for the domain itself and would never see the public record. |
+| `PAIL_OAUTH_<HOST>_CLIENT_ID` · `_CLIENT_SECRET` | unset | An OAuth app for a git host (`GITHUB`, `GITLAB`, `BITBUCKET`, `GITEA`, `FORGEJO`), which puts "Sign in with …" on New pail. |
+| `PAIL_OAUTH_<HOST>_SERVER` | gitlab.com for GitLab | Where the app is registered, for a host you run. Required for Gitea and Forgejo. |
 | `PAIL_LISTEN` | `:80` | Address the plain-HTTP listener binds. |
 | `PAIL_LISTEN_TLS` | `:443` | Address the HTTPS listener binds. |
 | `PAIL_TLS` | on | `off` serves everything over plain HTTP: for development, or behind a proxy that terminates TLS itself. |
@@ -161,6 +163,7 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 | `GET /api/v1/git` | The five git hosts, and which are connected. |
 | `PUT /api/v1/git/{kind}` | Body `{"token": "...", "server": "..."}`. Checks the token with the host, then keeps it. `server` is for GitLab, Gitea and Forgejo. |
 | `DELETE /api/v1/git/{kind}` | Forgets a host's token. Its pails stay, but can't pull. |
+| `POST /api/v1/git/{kind}/oauth` | Begins signing in to a host that has an OAuth app set up. Answers with the address to send the browser to; the host sends it back to `/oauth/callback/{kind}`. |
 | `GET /api/v1/git/{kind}/repos` | The repos the token can see. |
 | `GET /api/v1/git/{kind}/detect?repo=&branch=` | What Pail makes of a repo, and whether it can deploy it. |
 | `POST /api/v1/pails/{name}/repo` | Body `{"host", "repo", "branch"}`. Makes a new pail from a repo, deploys the branch, and adds a webhook so pushes deploy. |
@@ -183,7 +186,10 @@ A pail can come from a repo on GitHub, GitLab, Bitbucket, Gitea or Forgejo. Pail
 - **What Pail deploys.** A repo's files as they are: an `index.html` at the top, or a `pail.json` that says where the files live. A repo whose `package.json` has a build script is recognised and declined, because Pail can't run builds until step 7.
 - **Pushes deploy.** When a pail is made from a repo, Pail adds a webhook to it. Each push to the pail's branch is fetched and deployed like any other deploy. The host has to be able to reach Pail for this; a host on the internet can't reach a Pail that is only on your network.
 - **If the webhook can't be added,** the pail is still made and says so. Redeploy pulls the branch by hand: `pail redeploy <pail>`.
-- **Tokens.** For Bitbucket, an access token, or `username:app-password`. For the others, a personal access token that can read repos and add webhooks.
+- **Tokens.** For Bitbucket, an access token, or `email:api-token`. For the others, a personal access token that can read repos and add webhooks.
+- **Signing in.** With an OAuth app set up for a host (`PAIL_OAUTH_<HOST>_CLIENT_ID` and `_CLIENT_SECRET`), New pail offers "Sign in with …" above the token form. The app's callback address is the one you open Pail at, followed by `/oauth/callback/<host>`. Pail renews a sign-in's token by itself when the host issues ones that run out. Signing in happens in the browser, so it works on a Pail only your network can reach.
+
+The documentation site has a guide for each host under "Set up a git provider".
 
 ## Hostnames and the DNS check
 
