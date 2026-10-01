@@ -11,7 +11,7 @@ const docs = defineCollection({
     // lead is the sentence or two under the title; also the page's description.
     lead: z.string(),
     // section is the sidebar group the page sits in.
-    section: z.enum(['Start here', 'Running Pail', 'Git providers', 'Custom domains']),
+    section: z.enum(['Start here', 'Running Pail', 'Deploying', 'Git providers', 'Custom domains']),
     // order sorts pages inside their section.
     order: z.number(),
     // navLabel is a shorter name for the sidebar, when the title is long.

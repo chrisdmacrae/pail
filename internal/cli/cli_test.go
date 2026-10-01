@@ -187,6 +187,12 @@ func TestLoginUpLsLogs(t *testing.T) {
 	want(t, s.ok("logs", "blog", "--follow", "--json"), `"level":"ok"`)
 	s.fails(ExitNotFound, "logs", "nope")
 	s.fails(ExitNotFound, "logs", "blog", "0000000")
+	// A pail with no containers has printed nothing.
+	if got := s.ok("logs", "blog", "--output"); got != "" {
+		t.Errorf("logs --output for a static pail: %q", got)
+	}
+	s.fails(ExitNotFound, "logs", "nope", "--output")
+	want(t, s.fails(ExitUsage, "logs", "blog", "0000000", "--output"), "takes a pail and no deploy")
 }
 
 func TestUpFailures(t *testing.T) {
@@ -202,7 +208,7 @@ func TestUpFailures(t *testing.T) {
 
 	// The server refuses this one after the upload: the deploy fails.
 	s.write("fn/pail.json", `{"name": "dash", "functions": {"api": {"src": "./api"}}}`)
-	want(t, s.fails(ExitDeployFailed, "up", "./fn"), "functions or containers", "✗ deploy failed")
+	want(t, s.fails(ExitDeployFailed, "up", "./fn"), "this Pail doesn't run functions yet", "✗ deploy failed")
 	want(t, s.fails(ExitDeployFailed, "up", "./fn", "--quiet"), "pail: pail.json declares functions")
 
 	s.write("big/index.html", "x")

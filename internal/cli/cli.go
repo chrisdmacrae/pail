@@ -62,6 +62,7 @@ type flags struct {
 	quiet   bool
 	yes     bool
 	follow  bool
+	output  bool
 	help    bool
 	version bool
 }
@@ -81,6 +82,8 @@ const usage = `pail puts things you host at home on a Pail installation.
   pail ls                        Every pail: name, status, URL, last deploy
   pail logs <pail> [deploy]      A deploy's log; the latest by default
         --follow, -f             Keep reading until the deploy finishes
+  pail logs <pail> --output      What the pail's containers are printing
+        --follow, -f             Keep reading until you press Ctrl-C
   pail deploys <pail>            The kept deploys, marking the one being served
   pail rollback <pail> <deploy>  Serve an older deploy
   pail redeploy <pail>           Deploy the latest good deploy's files again
@@ -115,6 +118,7 @@ func Run(env Env) int {
 	fs.BoolVarP(&a.flags.quiet, "quiet", "q", false, "")
 	fs.BoolVarP(&a.flags.yes, "yes", "y", false, "")
 	fs.BoolVarP(&a.flags.follow, "follow", "f", false, "")
+	fs.BoolVar(&a.flags.output, "output", false, "")
 	fs.BoolVarP(&a.flags.help, "help", "h", false, "")
 	fs.BoolVar(&a.flags.version, "version", false, "")
 
@@ -418,6 +422,12 @@ func (a *app) logs(args []string) error {
 		return err
 	}
 	name := args[0]
+	if a.flags.output {
+		if len(args) == 2 {
+			return usagef("pail logs --output takes a pail and no deploy: it shows what is running now.")
+		}
+		return c.streamOutput(name, a.flags.follow, func(l apiLine) { a.printLine(a.env.Stdout, l) })
+	}
 	var deploy string
 	if len(args) == 2 {
 		deploy = args[1]
@@ -715,6 +725,12 @@ func (a *app) printLine(w io.Writer, l apiLine) {
 	if a.flags.json {
 		b, _ := json.Marshal(l)
 		fmt.Fprintln(w, string(b))
+		return
+	}
+	if l.Source != "" && l.Level == "" {
+		// A container's own lines are marked with its name. What Pail says
+		// about a container names it already.
+		fmt.Fprintf(w, "%s  %s  %s\n", l.Time.Local().Format("15:04:05"), l.Source, l.Text)
 		return
 	}
 	fmt.Fprintf(w, "%s  %s\n", l.Time.Local().Format("15:04:05"), l.Text)

@@ -67,22 +67,27 @@ func run(logger *slog.Logger) error {
 	// Linux with KVM. Without it Pail still serves static files.
 	vms := microvm.New(microvm.Config{Firecracker: cfg.Firecracker, Kernel: cfg.Kernel, Dir: cfg.DataDir}, logger)
 	if ok, why := vms.Available(); ok {
-		logger.Info("this pail can run microVMs: builds are on", "firecracker", cfg.Firecracker, "kernel", cfg.Kernel)
+		logger.Info("this pail can run microVMs: builds and containers are on", "firecracker", cfg.Firecracker, "kernel", cfg.Kernel)
 	} else {
 		logger.Info("this pail serves static files only: " + why)
 	}
 
 	svc := pails.New(pails.Options{
-		Store:           store,
-		BaseDomain:      cfg.BaseDomain,
-		MaxDeploys:      cfg.MaxDeploys,
-		MaxUnpackedSize: cfg.MaxUploadSize * unpackedRatio,
-		Builder:         vms,
-		Logger:          logger,
+		Store:              store,
+		BaseDomain:         cfg.BaseDomain,
+		MaxDeploys:         cfg.MaxDeploys,
+		MaxUnpackedSize:    cfg.MaxUploadSize * unpackedRatio,
+		Builder:            vms,
+		Dir:                cfg.DataDir,
+		MaxContainerMemory: cfg.MaxContainerMemory,
+		Logger:             logger,
 	})
 	if err := svc.Load(ctx); err != nil {
 		return err
 	}
+	// Containers come back up by themselves; nothing waits for them.
+	svc.Resume()
+	defer svc.Close()
 
 	git, err := githost.LoadConnections(ctx, store, githost.DefaultClient())
 	if err != nil {
@@ -151,7 +156,8 @@ func run(logger *slog.Logger) error {
 		return err
 	case <-ctx.Done():
 	}
-	logger.Info("stopping: letting running deploys finish")
+	logger.Info("stopping: letting running deploys finish, then shutting containers down")
+	handler.Close()
 	shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for _, srv := range servers {

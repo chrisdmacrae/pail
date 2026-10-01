@@ -56,6 +56,8 @@ type apiLine struct {
 	Time  time.Time `json:"time"`
 	Text  string    `json:"text"`
 	Level string    `json:"level,omitempty"`
+	// Source is the container that printed the line, in a pail's output.
+	Source string `json:"source,omitempty"`
 }
 
 // client talks to one Pail installation's REST API.
@@ -209,6 +211,34 @@ func (c *client) streamLog(pail, deploy string, follow bool, line func(apiLine))
 		return nil, &exitError{code: ExitUnreachable, msg: fmt.Sprintf("%s closed the log early. The deploy carries on; run pail logs %s.", c.target.URL, pail)}
 	}
 	return nil, nil
+}
+
+// streamOutput reads what a pail's containers print: the lines Pail has
+// kept and, with follow, each new one until the caller stops it.
+func (c *client) streamOutput(pail string, follow bool, line func(apiLine)) error {
+	path := "/api/v1/pails/" + pail + "/output"
+	if !follow {
+		path += "?follow=false"
+	}
+	resp, err := c.do("GET", path, nil, 0, "")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 64<<10), 4<<20)
+	for sc.Scan() {
+		if value, ok := strings.CutPrefix(sc.Text(), "data: "); ok {
+			var l apiLine
+			if json.Unmarshal([]byte(value), &l) == nil {
+				line(l)
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return &exitError{code: ExitUnreachable, msg: fmt.Sprintf("Lost %s partway through: %v. Run pail logs %s --output again.", c.target.URL, err, pail)}
+	}
+	return nil
 }
 
 // unwrapURLError drops the "Get https://...:" prefix net/http adds; the

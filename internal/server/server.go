@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"strings"
 	"sync"
 
@@ -30,11 +31,21 @@ type Server struct {
 	ui      fs.FS
 	probe   *prober
 	install http.Handler
+	// proxy passes requests on to containers.
+	proxy *httputil.ReverseProxy
+	// closing is closed as Pail shuts down, so streams that would otherwise
+	// stay open for ever end and let it.
+	closing     chan struct{}
+	closingOnce sync.Once
 
 	// signIns are the OAuth sign-ins under way, by their state.
 	signInsMu sync.Mutex
 	signIns   map[string]signIn
 }
+
+// Close ends the log streams still open. Call it before shutting the
+// listeners down.
+func (s *Server) Close() { s.closingOnce.Do(func() { close(s.closing) }) }
 
 // Certs is what the server needs from whatever issues its certificates.
 type Certs interface {
@@ -66,10 +77,12 @@ type Options struct {
 func New(o Options) *Server {
 	s := &Server{cfg: o.Config, pails: o.Pails, certs: o.Certs, git: o.Git, ui: o.UI, probe: newProber(), log: o.Logger, version: o.Version}
 	s.signIns = map[string]signIn{}
+	s.closing = make(chan struct{})
 	if s.git == nil {
 		s.git, _ = githost.LoadConnections(context.Background(), storage.NewMemory(), githost.DefaultClient())
 	}
 	s.install = s.installation()
+	s.proxy = s.newProxy()
 	return s
 }
 

@@ -276,7 +276,7 @@ func TestZipFolderWithPailJSON(t *testing.T) {
 		"pail.json":  `{"functions": {"api": {"src": "./fn/api"}}}`,
 		"index.html": "x",
 	}))
-	if withFn.State != "failed" || !strings.Contains(withFn.Error, "functions or containers") {
+	if withFn.State != "failed" || !strings.Contains(withFn.Error, "doesn't run functions yet") {
 		t.Errorf("functions deploy: %+v", withFn)
 	}
 }
@@ -1057,6 +1057,19 @@ func (b *fakeBuilder) BuildSite(_ context.Context, req microvm.BuildRequest) (mi
 	os.WriteFile(filepath.Join(out, "index.html"), []byte("built from "+strings.Join(b.seen, ",")), 0o644)
 	os.WriteFile(filepath.Join(out, "assets", "app.js"), []byte("console.log(1)"), 0o644)
 	return microvm.BuildResult{Dir: out, Output: cmp.Or(req.Static, "dist"), Cleanup: func() { os.RemoveAll(dir) }}, nil
+}
+
+// It runs no containers.
+func (b *fakeBuilder) BuildContainer(context.Context, microvm.ContainerBuild) (microvm.Built, error) {
+	return microvm.Built{}, errors.New("not here")
+}
+
+func (b *fakeBuilder) PullContainer(context.Context, microvm.ContainerPull) (microvm.Built, error) {
+	return microvm.Built{}, errors.New("not here")
+}
+
+func (b *fakeBuilder) Start(context.Context, microvm.MachineSpec) (microvm.Machine, error) {
+	return nil, errors.New("not here")
 }
 
 func TestProjectsThatNeedABuild(t *testing.T) {

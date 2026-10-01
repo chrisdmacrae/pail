@@ -19,7 +19,7 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | 5 | Custom hostnames and the DNS self-check | done |
 | — | TLS: Pail's own certificate authority, and Let's Encrypt by DNS-01 | done |
 | 6 | Git hosts: token first, then OAuth | done |
-| 7 | Firecracker microVMs: the build VM, containers, and the KVM check | the KVM check and the build VM are done; containers are next |
+| 7 | Firecracker microVMs: the build VM, containers, and the KVM check | done |
 | 8 | pail.json functions: base images, snapshots, sleep when idle, and routing | |
 
 ## Layout
@@ -31,7 +31,7 @@ internal/config      environment variables
 internal/storage     the object store: S3 (versitygw) and an in-memory one for tests
 internal/certs       TLS certificates: Pail's own authority, or Let's Encrypt
 internal/githost     git hosts: GitHub, GitLab, Bitbucket, Gitea and Forgejo
-internal/microvm     Firecracker microVMs: base images, networking, builds
+internal/microvm     Firecracker microVMs: base images, networking, builds, containers
 scripts/kvm-host     the KVM host for development: a Lima VM, or a Linux machine over SSH
 scripts/release      builds what a release publishes
 deploy/proxmox       the installer that sets Pail up in a Proxmox container
@@ -103,6 +103,7 @@ It's built from `web/design-system/` as published: the components come from its 
 | `pail up [dir] [--name <pail>]` | Packs `dir` (default `.`), deploys it, follows the log on stderr and prints the URL on stdout. |
 | `pail ls` | Every pail: name, status, URL, last deploy. |
 | `pail logs <pail> [deploy] [--follow]` | A deploy's log; the latest by default. |
+| `pail logs <pail> --output [--follow]` | What the pail's containers are printing. |
 | `pail deploys <pail>` | The kept deploys, newest first, marking the one being served. |
 | `pail rollback <pail> <deploy>` | Serves an older deploy. Nothing is rebuilt. |
 | `pail redeploy <pail>` | Makes a new deploy from the latest good deploy's files and follows its log. |
@@ -132,13 +133,14 @@ Everything is an environment variable on the server.
 | `PAIL_MAX_UPLOAD_SIZE` | `100MB` | Largest archive accepted; bigger ones get a 413. |
 | `PAIL_MAX_DEPLOYS` | `10` | Good deploys kept per pail for rollback. Failed ones don't count. |
 | `PAIL_MAX_FUNCTION_MEMORY` | `1GB` | Reported by `/api/v1/info`; not enforced until functions exist. |
+| `PAIL_MAX_CONTAINER_MEMORY` | `2GB` | The most memory one container may ask for in `pail.json`. A deploy that asks for more fails before anything is built. |
 | `PAIL_ACME_DNS_PROVIDER` · `PAIL_ACME_DNS_TOKEN` | unset | Set both to get certificates from Let's Encrypt by DNS-01, and to allow custom hostnames. The provider is one of `bunny`, `cloudflare`, `desec`, `digitalocean`, `duckdns`, `gandi`, `hetzner`, `netlify`, `njalla`. |
 | `PAIL_ACME_EMAIL` | unset | Optional address for Let's Encrypt's expiry notices. |
 | `PAIL_ACME_DIRECTORY` | Let's Encrypt production | Another ACME directory, such as Let's Encrypt's staging one while you're trying things out. |
 | `PAIL_ACME_RESOLVERS` | the system's | DNS servers to check the challenge record with, comma-separated, e.g. `1.1.1.1:53`. Set it when your home resolver answers for the domain itself and would never see the public record. |
 | `PAIL_OAUTH_<HOST>_CLIENT_ID` · `_CLIENT_SECRET` | unset | An OAuth app for a git host (`GITHUB`, `GITLAB`, `BITBUCKET`, `GITEA`, `FORGEJO`), which puts "Sign in with …" on New pail. |
 | `PAIL_OAUTH_<HOST>_SERVER` | gitlab.com for GitLab | Where the app is registered, for a host you run. Required for Gitea and Forgejo. |
-| `PAIL_DATA_DIR` | `/var/lib/pail` | Local disk for what microVMs need: root filesystems and work disks. |
+| `PAIL_DATA_DIR` | `/var/lib/pail` | Local disk for what microVMs need: root filesystems, work disks, and containers' data volumes. |
 | `PAIL_FIRECRACKER` | `firecracker` | The Firecracker binary. |
 | `PAIL_KERNEL` | `<data dir>/vmlinux` | The guest kernel every microVM boots. |
 | `PAIL_LISTEN` | `:80` | Address the plain-HTTP listener binds. |
@@ -160,6 +162,7 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 | `GET /api/v1/pails/{name}` | One pail. |
 | `POST /api/v1/pails/{name}/deploys` | Body is a `.tar.gz` or `.zip`. Creates the pail on its first deploy. Answers `202` with the deploy as soon as the archive arrives. `?source=cli\|upload`, `?file=<name>` for the history label. |
 | `GET /api/v1/pails/{name}/deploys/{id}/log` | Server-sent events: a `line` event per log line, then one `done` event with the finished deploy. `?follow=false` sends a building deploy's lines so far and stops. |
+| `GET /api/v1/pails/{name}/output` | Server-sent events: a `line` event for each line the pail's containers print, the kept ones first. `?follow=false` sends those and stops. |
 | `GET /api/v1/pails/{name}/deploys` | The kept deploys, newest first, each with `serving: true\|false`. |
 | `POST /api/v1/pails/{name}/serve` | Body `{"deploy": "<id>"}`. Points the pail at a kept deploy that finished; answers with the pail. `409` while a deploy is running or if that deploy failed. |
 | `POST /api/v1/pails/{name}/redeploy` | Starts a deploy that copies the latest good one. Answers `202` like an upload; `409` if no deploy has finished. |
@@ -210,6 +213,59 @@ Pail runs builds in Firecracker microVMs, so a project's build can't touch the s
 - **Guest init.** Inside a microVM, PID 1 is Pail's own binary, so there is nothing extra to install in an image.
 
 Running microVMs needs Pail to run as root.
+
+## Containers
+
+A `pail.json` at the top of a pail's upload can declare containers: Dockerfiles that Pail builds and keeps running, each in a Firecracker microVM of its own.
+
+```json
+{
+  "static": "./public",
+  "containers": {
+    "api": { "dockerfile": "./Dockerfile", "port": 3000, "memory": "512MB", "data": "/data", "env": { "LOG_LEVEL": "info" } },
+    "cache": { "image": "valkey/valkey:8", "port": 6379, "memory": "128MB" }
+  },
+  "routes": [
+    { "path": "/api/*", "to": "container:api" },
+    { "path": "/*", "to": "static", "fallback": "index.html" }
+  ]
+}
+```
+
+| Field | Default | What it sets |
+| --- | --- | --- |
+| `image` | none | An image in a registry to run as it is, like `nginx:1.27` or `ghcr.io/owner/app:latest`. A container has an `image` or a `dockerfile`, not both. |
+| `dockerfile` | `./Dockerfile` | What to build, for a container with no `image`. |
+| `context` | the Dockerfile's folder | The folder the build may `COPY` from. |
+| `port` | none, required | The port the app listens on. It also arrives as `PORT`. The app has to listen on `0.0.0.0`. |
+| `memory` | none, required | The microVM's memory, like `256MB`: the most the container can use. At most `PAIL_MAX_CONTAINER_MEMORY`. |
+| `cpus` | `1` | The microVM's processors. |
+| `data` | none | A folder kept on a volume that survives deploys, for SQLite and the like. |
+| `command` | the image's `CMD` | A list of words to run in place of the image's `CMD`, like `["node", "server.js"]`. The image's `ENTRYPOINT` still goes in front, as with Docker. |
+| `env` | none | Environment variables, on top of the image's own, `PORT`, `PAIL_NAME` and `PAIL_DEPLOY`. |
+
+On each deploy Pail:
+
+1. **Builds** the Dockerfile with Buildah inside a throwaway microVM (2 vCPUs, 2GB, 30 minutes), so a build can't touch the server. `FROM node:22` means Docker Hub's, as it does to Docker. A container with an `image` skips the build: Pail pulls the image for the server's architecture instead.
+2. **Flattens** the image into an ext4 root filesystem and stores it with the deploy.
+3. **Boots** it in a microVM of the size asked for, with the data volume attached. Pail's own binary is PID 1; it runs the image's `ENTRYPOINT` and `CMD` as the image's `USER`, in its `WORKDIR`.
+4. **Waits** up to two minutes for the port to accept connections, then moves the live pointer and stops the old microVM. A deploy that never opens its port fails, and the previous one keeps serving.
+
+What follows from that:
+
+- **Routes.** First match wins. `/api/*` covers `/api` and everything under it; a path with no star covers only itself. A path no route covers is a 404. With one container and nothing else, no routes are needed: it answers everything. Requests pass through with their method, body and `Host`, plus `X-Forwarded-For`, `-Host` and `-Proto`; websockets and event streams pass through too.
+- **Files beside containers.** A deploy with containers serves files only from the folder `static` names. Its source, Dockerfile included, is never served. A `package.json` build script is left to the Dockerfile.
+- **Data.** A volume is 10GB, takes only the space it uses, and lives under `PAIL_DATA_DIR/volumes` on the server: back it up there. One microVM holds it at a time, so a container with `data` is stopped before its replacement starts, which is a few seconds of 503s per deploy. Without `data` the new microVM is answering before the old one stops. The volume goes when the pail is removed.
+- **The root filesystem** is the container's own to write to, and is fresh on every start. Only `data` lasts.
+- **Staying up.** If the app exits, Pail starts its microVM again, waiting a little longer each time it keeps happening. When Pail restarts, containers come back by themselves. `pail stop` shuts them down and `pail start` brings them back.
+- **Images from a registry.** Each deploy asks the registry what the tag points at and keeps exactly that with the deploy, so a rollback runs what ran then even if the tag has moved. When the image hasn't changed since the deploy being served, nothing is fetched. `pail redeploy` asks again, which is how a pail picks up a moved tag such as `latest`. Pail unpacks an image's files on the server but never runs them there, and no link inside an image can make it write outside the image's own folder. There is no setting for registry credentials yet, so images have to be public.
+- **Rollback** boots the root filesystem the older deploy was built with. Nothing is rebuilt.
+- **Output.** stdout and stderr go to the deploy's log while it deploys, and to the pail's output after: `pail logs <pail> --output`, with `--follow` to keep reading, or `GET /api/v1/pails/{name}/output`. Pail keeps the last 2,000 lines, in memory.
+- **Isolation.** As for builds: the internet through NAT, and nothing else. The only way in is through Pail's router.
+
+`GET /api/v1/pails/{name}` lists the serving deploy's containers with their state: `running`, `starting` or `stopped`.
+
+Functions in `pail.json` are not built yet; a deploy that declares them is refused.
 
 ### Developing this on a Mac
 

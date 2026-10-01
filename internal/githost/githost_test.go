@@ -214,7 +214,8 @@ func TestDetect(t *testing.T) {
 		{"vite app", files{"index.html": "x", "package.json": `{"scripts": {"build": "vite build"}, "devDependencies": {"vite": "^5"}}`}, false, "Vite app · needs a build"},
 		{"astro site", files{"package.json": `{"scripts": {"build": "astro build"}, "dependencies": {"astro": "^5", "vite": "^5"}}`}, false, "Astro site · needs a build"},
 		{"some node project", files{"package.json": `{"scripts": {"build": "tsc"}}`}, false, "Node project · needs a build"},
-		{"functions", files{"index.html": "x", "pail.json": `{"functions": {"api": {"src": "./fn"}}}`}, false, "functions or containers"},
+		{"functions", files{"index.html": "x", "pail.json": `{"functions": {"api": {"src": "./fn"}}}`}, false, "functions, which Pail can’t run yet"},
+		{"a container, with nowhere to run it", files{"Dockerfile": "FROM x", "pail.json": `{"containers": {"api": {"port": 80}}}`}, false, "containers, which this Pail can’t run"},
 		{"nothing to serve", files{"README.md": "hello"}, false, "No index.html at the top"},
 	}
 	for _, c := range cases {
@@ -228,6 +229,16 @@ func TestDetect(t *testing.T) {
 	vite := files{"index.html": "x", "package.json": `{"scripts": {"build": "vite build"}, "devDependencies": {"vite": "^5"}}`}
 	if got, err := Detect(context.Background(), vite, "o/r", "main", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "Vite app · Pail builds it") {
 		t.Errorf("a Vite app where builds run: %+v, %v", got, err)
+	}
+	// A project with containers is built by its Dockerfiles, even one whose
+	// package.json has a build script.
+	app := files{"Dockerfile": "FROM x", "package.json": `{"scripts": {"build": "tsc"}}`, "pail.json": `{"containers": {"api": {"port": 80}}}`}
+	if got, err := Detect(context.Background(), app, "o/r", "main", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "A container · Pail builds its Dockerfile") {
+		t.Errorf("a container where microVMs run: %+v, %v", got, err)
+	}
+	image := files{"pail.json": `{"containers": {"web": {"image": "nginx:1.27", "port": 80, "memory": "64MB"}}}`}
+	if got, err := Detect(context.Background(), image, "o/r", "main", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "Pail pulls nginx:1.27 and runs it") {
+		t.Errorf("a container from a registry: %+v, %v", got, err)
 	}
 }
 

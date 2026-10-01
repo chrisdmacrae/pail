@@ -14,6 +14,13 @@ export interface Deploy {
   serving: boolean;
 }
 
+// Container is one container of the deploy a pail is serving.
+export interface Container {
+  name: string;
+  port: number;
+  state: 'running' | 'starting' | 'stopped';
+}
+
 export interface Pail {
   name: string;
   host: string;
@@ -29,6 +36,8 @@ export interface Pail {
   serving: string;
   updated_at: string;
   deploy: Deploy | null;
+  // containers are the microVMs of the deploy being served, if it has any.
+  containers?: Container[];
 }
 
 export interface Info {
@@ -39,7 +48,7 @@ export interface Info {
   // tls is where certificates come from: Pail's own authority ("internal",
   // whose root each device trusts once), Let's Encrypt ("acme"), or none.
   tls: 'off' | 'internal' | 'acme';
-  limits: { max_upload_size: number; max_deploys: number };
+  limits: { max_upload_size: number; max_deploys: number; max_container_memory: number };
 }
 
 // GitHost is a git host a pail can come from, and whether Pail holds a token
@@ -85,6 +94,8 @@ export interface LogLine {
   time: string;
   text: string;
   level?: 'step' | 'ok' | 'error';
+  // source is the container that printed the line, in a pail's output.
+  source?: string;
 }
 
 export class ApiError extends Error {
@@ -271,6 +282,22 @@ export async function streamLog(
     buffer = parseEvents(buffer + chunk.value, (event, data) => {
       if (event === 'line') onLine(JSON.parse(data) as LogLine);
       if (event === 'done') done = JSON.parse(data) as Deploy;
+    });
+  }
+}
+
+// streamOutput reads what a pail's containers print: the lines Pail has kept,
+// then each new one, until the signal aborts it.
+export async function streamOutput(name: string, onLine: (line: LogLine) => void, signal: AbortSignal): Promise<void> {
+  const resp = await call('GET', `${pailPath(name)}/output`, undefined, signal);
+  if (!resp.body) return;
+  const reader = resp.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) return;
+    buffer = parseEvents(buffer + chunk.value, (event, data) => {
+      if (event === 'line') onLine(JSON.parse(data) as LogLine);
     });
   }
 }

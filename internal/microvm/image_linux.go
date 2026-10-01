@@ -25,17 +25,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 )
 
-// Image is a root filesystem a microVM can boot, made from a container image.
-type Image struct {
-	// Path is the ext4 file.
-	Path string `json:"-"`
-	// What the container image says about running it.
-	Env        []string `json:"env"`
-	Entrypoint []string `json:"entrypoint"`
-	Cmd        []string `json:"cmd"`
-	WorkingDir string   `json:"working_dir"`
-}
-
 // imageEntry lets one image be made once, however many ask for it at once.
 type imageEntry struct {
 	once sync.Once
@@ -100,32 +89,46 @@ func (r *Runner) makeImage(ctx context.Context, ref string, log func(string)) (*
 	if err != nil {
 		return nil, fmt.Errorf("can't pull %s: %w", ref, err)
 	}
-	cfg, err := pulled.ConfigFile()
-	if err != nil {
-		return nil, err
+	if err := r.flatten(ctx, pulled, img, 0); err != nil {
+		return nil, fmt.Errorf("can't unpack %s: %w", ref, err)
 	}
-	img.Env, img.Entrypoint, img.Cmd, img.WorkingDir = cfg.Config.Env, cfg.Config.Entrypoint, cfg.Config.Cmd, cfg.Config.WorkingDir
+	meta, _ := json.Marshal(img)
+	return img, os.WriteFile(base+".json", meta, 0o644)
+}
 
-	root := base + ".root"
-	os.RemoveAll(root)
-	defer os.RemoveAll(root)
-	flat := mutate.Extract(pulled)
+// flatten turns a container image into the ext4 file at img.Path, with
+// spareMB of room left to write in, and fills in what the image says about
+// running it.
+func (r *Runner) flatten(ctx context.Context, from v1.Image, img *Image, spareMB int64) error {
+	cfg, err := from.ConfigFile()
+	if err != nil {
+		return err
+	}
+	img.Env, img.Entrypoint, img.Cmd = cfg.Config.Env, cfg.Config.Entrypoint, cfg.Config.Cmd
+	img.WorkingDir, img.User = cfg.Config.WorkingDir, cfg.Config.User
+
+	// The image is unpacked inside a folder only root can enter: until it
+	// is a filesystem in a file, its setuid programs are real ones.
+	holder := img.Path + ".root"
+	os.RemoveAll(holder)
+	defer os.RemoveAll(holder)
+	if err := os.MkdirAll(holder, 0o700); err != nil {
+		return err
+	}
+	root := filepath.Join(holder, "fs")
+	flat := mutate.Extract(from)
 	err = untar(flat, root)
 	flat.Close()
 	if err != nil {
-		return nil, fmt.Errorf("can't unpack %s: %w", ref, err)
+		return err
 	}
 	if err := prepareRoot(root); err != nil {
-		return nil, err
+		return err
 	}
-	if err := makeExt4(ctx, root, img.Path+".tmp", 0); err != nil {
-		return nil, err
+	if err := makeExt4(ctx, root, img.Path+".tmp", 0, spareMB); err != nil {
+		return err
 	}
-	meta, _ := json.Marshal(img)
-	if err := os.WriteFile(base+".json", meta, 0o644); err != nil {
-		return nil, err
-	}
-	return img, os.Rename(img.Path+".tmp", img.Path)
+	return os.Rename(img.Path+".tmp", img.Path)
 }
 
 // buildID names this build of Pail, from the contents of its binary.
@@ -153,10 +156,28 @@ func (r *Runner) buildID() (string, error) {
 }
 
 // prepareRoot adds what every Pail guest needs to an unpacked image: Pail
-// itself as init, the mount points init uses, and name resolution.
+// itself as init, the mount points init uses, and name resolution. An image
+// may have links where these go, pointing anywhere, so nothing here is
+// written through a link.
 func prepareRoot(root string) error {
 	for _, dir := range []string{"proc", "sys", "dev", "tmp", "run", "work", "etc"} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+		path := filepath.Join(root, dir)
+		if info, err := os.Lstat(path); err == nil && info.IsDir() {
+			continue
+		}
+		if dir == "etc" {
+			// A linked /etc is followed, inside the image, to where it leads.
+			real, err := within(root, "/etc")
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(real, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		os.Remove(path)
+		if err := os.Mkdir(path, 0o755); err != nil {
 			return err
 		}
 	}
@@ -165,20 +186,77 @@ func prepareRoot(root string) error {
 	if err != nil {
 		return err
 	}
-	if err := copyFile(self, filepath.Join(root, guestInit), 0o755); err != nil {
+	init := filepath.Join(root, guestInit)
+	os.RemoveAll(init)
+	if err := copyFile(self, init, 0o755); err != nil {
+		return err
+	}
+	etc, err := within(root, "/etc")
+	if err != nil {
 		return err
 	}
 	// An image's resolv.conf is often a link to somewhere that isn't there.
-	resolv := filepath.Join(root, "etc", "resolv.conf")
-	os.Remove(resolv)
-	if err := os.WriteFile(resolv, []byte(guestResolvConf), 0o644); err != nil {
+	if err := writeNew(filepath.Join(etc, "resolv.conf"), guestResolvConf); err != nil {
 		return err
 	}
-	hosts := filepath.Join(root, "etc", "hosts")
+	hosts := filepath.Join(etc, "hosts")
 	if _, err := os.Lstat(hosts); errors.Is(err, fs.ErrNotExist) {
-		return os.WriteFile(hosts, []byte("127.0.0.1 localhost\n::1 localhost\n"), 0o644)
+		return writeNew(hosts, "127.0.0.1 localhost\n::1 localhost\n")
 	}
 	return nil
+}
+
+// writeNew replaces whatever is at path with a new file. It never writes
+// through a link left there.
+func writeNew(path, content string) error {
+	os.RemoveAll(path)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// within resolves a path from an image to a place inside root, the way a
+// chroot would: a link, even an absolute one, leads somewhere under root and
+// never out of it. Images come from anywhere, and Pail unpacks them as root.
+func within(root, path string) (string, error) {
+	current := "/"
+	rest := strings.Split(path, "/")
+	for links := 0; len(rest) > 0; {
+		part := rest[0]
+		rest = rest[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			current = filepath.Dir(current)
+			continue
+		}
+		next := filepath.Join(current, part)
+		info, err := os.Lstat(filepath.Join(root, next))
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			// Not there yet, or really there: either way, no link to follow.
+			current = next
+			continue
+		}
+		if links++; links > 255 {
+			return "", fmt.Errorf("%s has links that go round in circles", path)
+		}
+		to, err := os.Readlink(filepath.Join(root, next))
+		if err != nil {
+			return "", err
+		}
+		if filepath.IsAbs(to) {
+			current = "/"
+		}
+		rest = append(strings.Split(to, "/"), rest...)
+	}
+	return filepath.Join(root, current), nil
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {
@@ -187,7 +265,7 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, mode)
 	if err != nil {
 		return err
 	}
@@ -217,11 +295,22 @@ func untar(r io.Reader, dir string) error {
 		if clean == "/" {
 			continue
 		}
-		target := filepath.Join(dir, clean)
 		mode := os.FileMode(hdr.Mode).Perm()
-		// Something may already sit where this entry goes.
-		if hdr.Typeflag != tar.TypeDir {
-			os.MkdirAll(filepath.Dir(target), 0o755)
+		// Where the entry goes is worked out link by link, so that a link
+		// in the image can't send a later entry outside dir.
+		var target string
+		if hdr.Typeflag == tar.TypeDir {
+			if target, err = within(dir, clean); err != nil {
+				return err
+			}
+		} else {
+			parent, err := within(dir, filepath.Dir(clean))
+			if err != nil {
+				return err
+			}
+			target = filepath.Join(parent, filepath.Base(clean))
+			// Something may already sit where this entry goes.
+			os.MkdirAll(parent, 0o755)
 			os.Remove(target)
 		}
 		switch hdr.Typeflag {
@@ -230,7 +319,7 @@ func untar(r io.Reader, dir string) error {
 				return err
 			}
 		case tar.TypeReg:
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, mode)
 			if err != nil {
 				return err
 			}
@@ -244,7 +333,12 @@ func untar(r io.Reader, dir string) error {
 				return err
 			}
 		case tar.TypeLink:
-			if err := os.Link(filepath.Join(dir, filepath.Clean("/"+hdr.Linkname)), target); err != nil {
+			from := filepath.Clean("/" + hdr.Linkname)
+			parent, err := within(dir, filepath.Dir(from))
+			if err != nil {
+				return err
+			}
+			if err := os.Link(filepath.Join(parent, filepath.Base(from)), target); err != nil {
 				return err
 			}
 		case tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
@@ -258,6 +352,11 @@ func untar(r io.Reader, dir string) error {
 				return err
 			}
 		default:
+			continue
+		}
+		if hdr.Typeflag == tar.TypeLink {
+			// A hard link has the owner and mode of what it links to. Setting
+			// them here could reach through a link to a link.
 			continue
 		}
 		if err := os.Lchown(target, hdr.Uid, hdr.Gid); err != nil {
@@ -287,8 +386,9 @@ func specialBits(mode int64) os.FileMode {
 }
 
 // makeExt4 turns a folder into an ext4 filesystem in a file, with no mount
-// involved. sizeMB of 0 means just big enough for the folder.
-func makeExt4(ctx context.Context, dir, file string, sizeMB int64) error {
+// involved. sizeMB of 0 means just big enough for the folder, plus spareMB.
+// The file is sparse: it takes the space of what's in it.
+func makeExt4(ctx context.Context, dir, file string, sizeMB, spareMB int64) error {
 	if sizeMB == 0 {
 		var bytes int64
 		filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
@@ -300,10 +400,14 @@ func makeExt4(ctx context.Context, dir, file string, sizeMB int64) error {
 			}
 			return nil
 		})
-		sizeMB = bytes/(1<<20)*13/10 + 64
+		sizeMB = bytes/(1<<20)*13/10 + 64 + spareMB
 	}
 	os.Remove(file)
-	out, err := exec.CommandContext(ctx, "mkfs.ext4", "-q", "-F", "-d", dir, "-L", "pail", file, fmt.Sprintf("%dM", sizeMB)).CombinedOutput()
+	// Inode tables and the journal are laid out now, as holes in the file.
+	// Left to the guest, it would write them out in full the first time it
+	// mounts the disk: hundreds of megabytes of zeros on a big, empty one.
+	out, err := exec.CommandContext(ctx, "mkfs.ext4", "-q", "-F", "-d", dir, "-L", "pail", "-m", "0",
+		"-E", "lazy_itable_init=0,lazy_journal_init=0", file, fmt.Sprintf("%dM", sizeMB)).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mkfs.ext4: %v: %s", err, strings.TrimSpace(string(out)))
 	}

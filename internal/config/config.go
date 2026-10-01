@@ -22,6 +22,9 @@ type Config struct {
 	// MaxFunctionMemory is the most memory one function copy may request,
 	// in bytes (PAIL_MAX_FUNCTION_MEMORY).
 	MaxFunctionMemory int64
+	// MaxContainerMemory is the most memory one container may request, in
+	// bytes (PAIL_MAX_CONTAINER_MEMORY).
+	MaxContainerMemory int64
 	// Listen is the address the plain-HTTP listener binds (PAIL_LISTEN).
 	Listen string
 	// ListenTLS is the address the HTTPS listener binds (PAIL_LISTEN_TLS).
@@ -123,6 +126,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if c.MaxFunctionMemory, err = ParseSize(get("PAIL_MAX_FUNCTION_MEMORY", "1GB")); err != nil {
 		return c, fmt.Errorf("PAIL_MAX_FUNCTION_MEMORY: %w", err)
+	}
+	if c.MaxContainerMemory, err = ParseSize(get("PAIL_MAX_CONTAINER_MEMORY", "2GB")); err != nil {
+		return c, fmt.Errorf("PAIL_MAX_CONTAINER_MEMORY: %w", err)
 	}
 	if c.MaxDeploys, err = strconv.Atoi(get("PAIL_MAX_DEPLOYS", "10")); err != nil || c.MaxDeploys < 1 {
 		return c, errors.New("PAIL_MAX_DEPLOYS: use a whole number, 1 or more")

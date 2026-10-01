@@ -30,7 +30,7 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.BaseDomain != "pail.lan" || c.MaxUploadSize != 100<<20 || c.MaxDeploys != 10 || c.MaxFunctionMemory != 1<<30 {
+	if c.BaseDomain != "pail.lan" || c.MaxUploadSize != 100<<20 || c.MaxDeploys != 10 || c.MaxFunctionMemory != 1<<30 || c.MaxContainerMemory != 2<<30 {
 		t.Errorf("defaults: %+v", c)
 	}
 }

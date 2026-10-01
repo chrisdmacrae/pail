@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -23,16 +24,15 @@ type Options struct {
 	MaxDeploys int
 	// MaxUnpackedSize caps what one archive may unpack to, in bytes.
 	MaxUnpackedSize int64
-	// Builder runs builds in microVMs. Nil means this Pail has none.
-	Builder Builder
-	Logger  *slog.Logger
-}
-
-// Builder builds a project that can't be served as it stands.
-type Builder interface {
-	// Available says whether builds can run here and, if not, why.
-	Available() (bool, string)
-	BuildSite(ctx context.Context, req microvm.BuildRequest) (microvm.BuildResult, error)
+	// Builder runs builds and containers in microVMs. Nil means this Pail
+	// has none.
+	Builder microvm.Machines
+	// Dir is local disk for containers' root filesystems and data volumes.
+	Dir string
+	// MaxContainerMemory is the most memory one container may ask for, in
+	// bytes. Zero means no limit.
+	MaxContainerMemory int64
+	Logger             *slog.Logger
 }
 
 // Service is the one writer of a Pail installation's storage. It keeps every
@@ -43,7 +43,9 @@ type Service struct {
 	baseDomain      string
 	maxDeploys      int
 	maxUnpackedSize int64
-	builder         Builder
+	builder         microvm.Machines
+	dir             string
+	maxContainerMem int64
 	log             *slog.Logger
 
 	deploys sync.WaitGroup
@@ -69,6 +71,10 @@ type entry struct {
 	manifest *Manifest       // of rec.Serving, loaded on first request
 	logs     map[string]*Log // deploys still building
 	removed  bool
+	// running is the containers of the deploy being served, or nil.
+	running *runset
+	// output is what the pail's containers print.
+	output *Log
 }
 
 func New(o Options) *Service {
@@ -81,6 +87,8 @@ func New(o Options) *Service {
 		maxDeploys:      o.MaxDeploys,
 		maxUnpackedSize: o.MaxUnpackedSize,
 		builder:         o.Builder,
+		dir:             o.Dir,
+		maxContainerMem: o.MaxContainerMemory,
 		log:             o.Logger,
 		pails:           map[string]*entry{},
 		removing:        map[string]bool{},
@@ -145,6 +153,7 @@ func (s *Service) settleInterrupted(ctx context.Context, e *entry, d *Deploy) {
 		if err := s.store.DeletePrefix(ctx, deployFiles(e.name, d.ID)); err != nil {
 			s.log.Error("clean up interrupted deploy", "pail", e.name, "deploy", d.ID, "err", err)
 		}
+		s.dropRootfs(ctx, e.name, d.ID)
 	}
 	if err := s.writeJSON(ctx, deployKey(e.name, d.ID), d); err != nil {
 		s.log.Error("save deploy", "pail", e.name, "deploy", d.ID, "err", err)
@@ -155,7 +164,7 @@ func (s *Service) settleInterrupted(ctx context.Context, e *entry, d *Deploy) {
 func (s *Service) entry(name string) *entry {
 	e := s.pails[name]
 	if e == nil {
-		e = &entry{name: name, logs: map[string]*Log{}}
+		e = &entry{name: name, logs: map[string]*Log{}, output: newOutput()}
 		s.pails[name] = e
 	}
 	return e
@@ -196,6 +205,12 @@ func (s *Service) view(e *entry) Pail {
 	if e.rec.Off {
 		p.Status = StatusOff
 	}
+	if e.running != nil {
+		for name, u := range e.running.units {
+			p.Containers = append(p.Containers, ContainerStatus{Name: name, Port: u.c.Port, State: u.state()})
+		}
+		sort.Slice(p.Containers, func(i, j int) bool { return p.Containers[i].Name < p.Containers[j].Name })
+	}
 	for _, d := range e.deploys {
 		if d.State == DeployBuilding {
 			p.Status = StatusBuilding
@@ -208,6 +223,17 @@ func (s *Service) view(e *entry) Pail {
 // copy requests read. man, when given, becomes the served manifest in the
 // same step as the pointer that names its deploy.
 func (s *Service) updateRecord(ctx context.Context, e *entry, man *Manifest, change func(*record)) error {
+	return s.change(ctx, e, change, func() {
+		if man != nil {
+			e.manifest = man
+		}
+	})
+}
+
+// change is updateRecord for a caller with more to switch over than the
+// manifest: apply runs once the record is written, in the same step in which
+// requests start to see it.
+func (s *Service) change(ctx context.Context, e *entry, change func(*record), apply func()) error {
 	e.recMu.Lock()
 	defer e.recMu.Unlock()
 	s.mu.RLock()
@@ -222,11 +248,24 @@ func (s *Service) updateRecord(ctx context.Context, e *entry, man *Manifest, cha
 	}
 	s.mu.Lock()
 	e.rec = rec
-	if man != nil {
-		e.manifest = man
-	}
+	apply()
 	s.mu.Unlock()
 	return nil
+}
+
+// manifestOf reads what a deploy serves.
+func (s *Service) manifestOf(ctx context.Context, e *entry, id string) (*Manifest, error) {
+	s.mu.RLock()
+	man := e.manifest
+	if e.rec.Serving != id {
+		man = nil
+	}
+	s.mu.RUnlock()
+	if man != nil {
+		return man, nil
+	}
+	man = &Manifest{}
+	return man, s.readJSON(ctx, manifestKey(e.name, id), man)
 }
 
 // CanBuild says whether this Pail can build a project before serving it and,
@@ -270,20 +309,36 @@ func (s *Service) Git(name string) (*GitSource, error) {
 }
 
 // SetOff stops a pail or starts it again. A stopped pail keeps its deploys
-// and its pointer; its host just answers nothing until it is started.
+// and its pointer; its host just answers nothing until it is started, and
+// its containers are shut down.
 func (s *Service) SetOff(ctx context.Context, name string, off bool) (Pail, error) {
 	s.mu.RLock()
 	e := s.pails[name]
+	building := e != nil && len(e.logs) > 0
 	s.mu.RUnlock()
 	if e == nil {
 		return Pail{}, ErrNoPail
 	}
+	// A deploy in flight starts containers of its own when it finishes.
+	if building {
+		return Pail{}, ErrBuilding
+	}
+	e.work.Lock()
 	err := s.updateRecord(ctx, e, nil, func(r *record) { r.Off = off })
+	s.mu.RLock()
+	running := e.running
+	s.mu.RUnlock()
+	e.work.Unlock()
 	if errors.Is(err, errRemoved) {
 		return Pail{}, ErrNoPail
 	}
 	if err != nil {
 		return Pail{}, err
+	}
+	if off {
+		running.halt()
+	} else {
+		go s.revive(e)
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -382,8 +437,19 @@ func (s *Service) Serve(ctx context.Context, name, id string) (Pail, error) {
 		if err := s.readJSON(ctx, manifestKey(name, id), man); err != nil {
 			return Pail{}, err
 		}
-		err := s.updateRecord(ctx, e, man, func(r *record) { r.Serving, r.ServedAt = id, time.Now().UTC() })
-		if err != nil {
+		// A deploy with containers has them booted from the root filesystems
+		// it was built with, and answering, before the pointer moves. That
+		// outlasts a caller who hangs up.
+		var lg *Log
+		if len(man.Containers) > 0 {
+			lg = e.output
+			lg.add("step", "→ serving %s again", id)
+		}
+		if err := s.goLive(context.WithoutCancel(ctx), e, id, man, lg); err != nil {
+			var ue userError
+			if errors.As(err, &ue) {
+				return Pail{}, ErrCantStart{Reason: ue.msg}
+			}
 			return Pail{}, err
 		}
 	}
@@ -422,6 +488,16 @@ type Live struct {
 	Pail     string
 	Deploy   string
 	Manifest *Manifest
+	// backends is where each of the deploy's containers answers, "" for
+	// one that isn't up.
+	backends map[string]string
+}
+
+// Backend is the address a container answers at. up is false while the
+// container is starting, or stopped and on its way back.
+func (l Live) Backend(container string) (addr string, up bool) {
+	addr = l.backends[container]
+	return addr, addr != ""
 }
 
 // Live reads the pail's live pointer. Everything a request then serves comes
@@ -435,6 +511,12 @@ func (s *Service) Live(ctx context.Context, name string) (Live, error) {
 	}
 	live := Live{Pail: name, Deploy: e.rec.Serving, Manifest: e.manifest}
 	off := e.rec.Off
+	if rs := e.running; rs != nil && rs.deploy == live.Deploy {
+		live.backends = make(map[string]string, len(rs.units))
+		for c, u := range rs.units {
+			live.backends[c] = u.addr()
+		}
+	}
 	s.mu.RUnlock()
 
 	if off {
@@ -484,7 +566,12 @@ func (s *Service) Remove(ctx context.Context, name string) error {
 	defer e.work.Unlock()
 	e.recMu.Lock()
 	defer e.recMu.Unlock()
+	// Its containers stop, and their root filesystems and data go with it.
+	e.running.halt()
 	err := s.removeObjects(ctx, name)
+	if s.dir != "" {
+		err = errors.Join(err, os.RemoveAll(s.rootfsDir(name)), os.RemoveAll(s.volumeDir(name)))
+	}
 
 	s.mu.Lock()
 	delete(s.removing, name)

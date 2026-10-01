@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import {
   type Deploy,
   getPail,
@@ -12,6 +12,7 @@ import {
   startPail,
   stopPail,
   streamLog,
+  streamOutput,
 } from '../api';
 import { BuildLog, Button, Command, Status } from '../ds';
 import { message, usePoll } from '../hooks';
@@ -30,6 +31,19 @@ const SOURCES: Record<string, string> = {
   forgejo: 'Forgejo',
 };
 
+const CONTAINER_STATES = { running: 'Running', starting: 'Starting', stopped: 'Stopped' };
+
+// How many lines of output the page keeps on screen.
+const OUTPUT_LINES = 300;
+
+// terminalCommand is how to deploy this pail again from a terminal. A pail
+// with containers is deployed from its project's folder, not a built one.
+function terminalCommand(pail: Pail): string {
+  if (pail.repo) return `pail redeploy ${pail.name}`;
+  if (pail.containers?.length) return `pail up --name ${pail.name}`;
+  return `pail up ./dist --name ${pail.name}`;
+}
+
 const BackButton = () => (
   <button type="button" className="pl-back" onClick={() => navigate('/')}>
     ← All pails
@@ -43,7 +57,8 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
       const [pail, deploys] = await Promise.all([getPail(name), listDeploys(name)]);
       return { pail, deploys };
     },
-    ({ pail }: { pail: Pail }) => pail.status === 'building',
+    // A container on its way up changes without anyone pressing anything.
+    ({ pail }: { pail: Pail }) => pail.status === 'building' || !!pail.containers?.some((c) => c.state === 'starting'),
   );
   const [selected, setSelected] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(() => !!routeState<{ confirm?: boolean }>()?.confirm);
@@ -194,6 +209,18 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
             ))}
           </div>
           {sel && <DeployLog key={sel.id} pail={name} deploy={sel} onFinished={refresh} />}
+          {!!pail.containers?.length && (
+            <>
+              <h2 className="pl-h2" style={{ marginTop: 16 }}>
+                Output
+              </h2>
+              <p className="pl-small" style={{ margin: 0 }}>
+                What {pail.containers.length === 1 ? pail.containers[0].name : 'the containers'} printed lately, as it
+                happens.
+              </p>
+              <Output pail={name} many={pail.containers.length > 1} />
+            </>
+          )}
         </section>
 
         <aside style={{ display: 'flex', flexDirection: 'column', gap: 32, minWidth: 0 }}>
@@ -218,13 +245,19 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
             <dd className="pl-mono" style={{ fontSize: 13 }}>
               {pail.serving || '—'}
             </dd>
+            {pail.containers?.map((c) => (
+              <Fragment key={c.name}>
+                <dt>{c.name}</dt>
+                <dd>{`${CONTAINER_STATES[c.state]} · port ${c.port}`}</dd>
+              </Fragment>
+            ))}
           </dl>
 
           <section className="pl-stack" style={{ gap: 8 }}>
             <h2 className="pl-h2" style={{ fontSize: 16, lineHeight: '22px' }}>
               Same thing, from a terminal
             </h2>
-            <Command>{pail.repo ? `pail redeploy ${pail.name}` : `pail up ./dist --name ${pail.name}`}</Command>
+            <Command>{terminalCommand(pail)}</Command>
           </section>
         </aside>
       </div>
@@ -318,4 +351,28 @@ function DeployLog(props: { pail: string; deploy: Deploy; onFinished: () => void
   }, [pail, deploy.id]);
 
   return <BuildLog lines={lines.map((l) => ({ time: clock(l.time), text: l.text, level: l.level }))} />;
+}
+
+// Output shows what a pail's containers print, live. With more than one
+// container, each line says whose it is.
+function Output({ pail, many }: { pail: string; many: boolean }) {
+  const [lines, setLines] = useState<LogLine[]>([]);
+
+  useEffect(() => {
+    const stop = new AbortController();
+    setLines([]);
+    streamOutput(pail, (line) => setLines((prev) => [...prev, line].slice(-OUTPUT_LINES)), stop.signal).catch(() => {});
+    return () => stop.abort();
+  }, [pail]);
+
+  if (lines.length === 0) return <p className="pl-muted">Nothing printed yet.</p>;
+  return (
+    <BuildLog
+      lines={lines.map((l) => ({
+        time: clock(l.time),
+        text: many && l.source && !l.level ? `${l.source}: ${l.text}` : l.text,
+        level: l.level,
+      }))}
+    />
+  );
 }

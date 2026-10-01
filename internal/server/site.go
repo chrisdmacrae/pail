@@ -14,11 +14,6 @@ import (
 
 // serveSite answers a request for a pail's own host from its live deploy.
 func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, name string) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "This pail only serves files.", http.StatusMethodNotAllowed)
-		return
-	}
 
 	// The live pointer is read here, once. The rest of the request is served
 	// from this deploy even if a newer one goes live meanwhile.
@@ -38,13 +33,29 @@ func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, name string) 
 		http.Error(w, "Pail couldn't read this pail's files.", http.StatusInternalServerError)
 		return
 	}
+	// Routes decide what answers: a container, or the deploy's files.
+	target, ok := live.Manifest.Match(path.Clean("/" + r.URL.Path))
+	if !ok {
+		s.notFound(w, r, "Nothing at "+r.URL.Path+" in "+name+".")
+		return
+	}
+	if target.Container != "" {
+		s.serveContainer(w, r, live, target.Container)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "This path only serves files.", http.StatusMethodNotAllowed)
+		return
+	}
 	files := live.Manifest.Files
 
 	p := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 	wantsDir := p == "" || strings.HasSuffix(r.URL.Path, "/")
 
 	status := http.StatusOK
-	file, ok := "", false
+	file := ""
+	ok = false
 	switch {
 	case wantsDir:
 		file = path.Join(p, "index.html")

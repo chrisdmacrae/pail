@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -34,6 +35,39 @@ func Detect(ctx context.Context, c Client, repo, branch string, canBuild bool) (
 		return b, err == nil, err
 	}
 
+	// pail.json's server code decides first: a project with containers is
+	// built by its Dockerfiles, whatever its package.json says.
+	manifest, hasManifest, err := read("pail.json")
+	if err != nil {
+		return Detection{}, err
+	}
+	var m struct {
+		Static     string                     `json:"static"`
+		Functions  map[string]json.RawMessage `json:"functions"`
+		Containers map[string]struct {
+			Image string `json:"image"`
+		} `json:"containers"`
+	}
+	if hasManifest {
+		switch {
+		case json.Unmarshal(manifest, &m) != nil:
+			return Detection{Summary: "pail.json isn’t valid JSON"}, nil
+		case len(m.Functions) > 0:
+			return Detection{Summary: "pail.json has functions, which Pail can’t run yet"}, nil
+		case len(m.Containers) > 0 && !canBuild:
+			return Detection{Summary: "pail.json has containers, which this Pail can’t run"}, nil
+		case len(m.Containers) == 1:
+			for _, c := range m.Containers {
+				if c.Image != "" {
+					return Detection{Deployable: true, Summary: "A container · Pail pulls " + c.Image + " and runs it"}, nil
+				}
+			}
+			return Detection{Deployable: true, Summary: "A container · Pail builds its Dockerfile and runs it"}, nil
+		case len(m.Containers) > 1:
+			return Detection{Deployable: true, Summary: fmt.Sprintf("%d containers · Pail builds or pulls each one and runs them", len(m.Containers))}, nil
+		}
+	}
+
 	pkg, hasPkg, err := read("package.json")
 	if err != nil {
 		return Detection{}, err
@@ -59,22 +93,7 @@ func Detect(ctx context.Context, c Client, repo, branch string, canBuild bool) (
 		}
 	}
 
-	manifest, hasManifest, err := read("pail.json")
-	if err != nil {
-		return Detection{}, err
-	}
 	if hasManifest {
-		var m struct {
-			Static     string                     `json:"static"`
-			Functions  map[string]json.RawMessage `json:"functions"`
-			Containers map[string]json.RawMessage `json:"containers"`
-		}
-		switch {
-		case json.Unmarshal(manifest, &m) != nil:
-			return Detection{Summary: "pail.json isn’t valid JSON"}, nil
-		case len(m.Functions) > 0 || len(m.Containers) > 0:
-			return Detection{Summary: "pail.json has functions or containers, which Pail can’t run yet"}, nil
-		}
 		static := strings.TrimSpace(m.Static)
 		if static == "" || static == "." || static == "./" {
 			static = "the top folder"

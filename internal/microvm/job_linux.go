@@ -50,6 +50,109 @@ type Finished struct {
 // ended: it crashed, ran out of memory, or was killed.
 var ErrNoExit = errors.New("the microVM stopped before the job finished")
 
+// drive is one disk of a microVM. The first is its root.
+type drive struct {
+	id, path string
+	readOnly bool
+}
+
+// bootSpec is everything Firecracker is told about one microVM.
+type bootSpec struct {
+	// dir holds the microVM's config and Firecracker's own log.
+	dir    string
+	drives []drive
+	// args are added to the kernel's command line.
+	args  string
+	vcpus int
+	memMB int
+	// tap is the microVM's network, or nil for none.
+	tap *tap
+	// log receives the guest's console a line at a time.
+	log func(line string)
+	// tied makes the microVM die with Pail rather than outlive it.
+	tied bool
+}
+
+// booted is a microVM that was started.
+type booted struct {
+	// done closes when Firecracker has exited and the console is drained.
+	done chan struct{}
+	// What follows is safe to read once done is closed.
+	waitErr  error
+	problems strings.Builder
+}
+
+// boot starts Firecracker. Cancelling ctx kills the microVM.
+func (r *Runner) boot(ctx context.Context, b bootSpec) (*booted, error) {
+	root := b.drives[0]
+	mode := "ro"
+	if !root.readOnly {
+		mode = "rw"
+	}
+	bootArgs := "console=ttyS0 reboot=k panic=1 quiet loglevel=1 root=/dev/vda " + mode + " init=" + guestInit
+	var drives []map[string]any
+	for i, d := range b.drives {
+		drives = append(drives, map[string]any{"drive_id": d.id, "path_on_host": d.path, "is_root_device": i == 0, "is_read_only": d.readOnly})
+	}
+	config := map[string]any{
+		"drives":         drives,
+		"machine-config": map[string]any{"vcpu_count": b.vcpus, "mem_size_mib": b.memMB},
+	}
+	if b.tap != nil {
+		bootArgs += " " + b.tap.bootParam
+		config["network-interfaces"] = []map[string]any{{"iface_id": "eth0", "guest_mac": b.tap.GuestMAC, "host_dev_name": b.tap.Name}}
+	}
+	if b.args != "" {
+		bootArgs += " " + b.args
+	}
+	config["boot-source"] = map[string]any{"kernel_image_path": r.cfg.Kernel, "boot_args": bootArgs}
+	configFile := filepath.Join(b.dir, "vm.json")
+	raw, _ := json.Marshal(config)
+	if err := os.WriteFile(configFile, raw, 0o644); err != nil {
+		return nil, err
+	}
+
+	// Firecracker's own log goes to a file, leaving its stdout to the guest.
+	// It wants the file to be there already.
+	if err := os.WriteFile(filepath.Join(b.dir, "firecracker.log"), nil, 0o644); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, r.cfg.Firecracker, "--no-api", "--config-file", configFile,
+		"--log-path", filepath.Join(b.dir, "firecracker.log"), "--level", "Warning")
+	cmd.Dir = b.dir
+	// A group of its own, so killing it can't reach Pail.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if b.tied {
+		cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+	}
+	cmd.WaitDelay = 5 * time.Second
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	vm := &booted{done: make(chan struct{})}
+	cmd.Stderr = &vm.problems
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("can't start firecracker: %w", err)
+	}
+	go func() {
+		// The guest's serial console is Firecracker's stdout.
+		console := bufio.NewReaderSize(stdout, 64<<10)
+		for {
+			line, err := console.ReadString('\n')
+			if line = cleanLine(line); line != "" && b.log != nil {
+				b.log(line)
+			}
+			if err != nil {
+				break
+			}
+		}
+		vm.waitErr = cmd.Wait()
+		close(vm.done)
+	}()
+	return vm, nil
+}
+
 // Run boots a microVM, runs the job in it, and waits for it to power off.
 // Cancelling ctx kills the microVM.
 func (r *Runner) Run(ctx context.Context, job Job) (Finished, error) {
@@ -62,18 +165,14 @@ func (r *Runner) Run(ctx context.Context, job Job) (Finished, error) {
 		return Finished{}, err
 	}
 	work := filepath.Join(dir, "work.ext4")
-	if err := makeExt4(ctx, job.Stage, work, job.WorkMB); err != nil {
+	if err := makeExt4(ctx, job.Stage, work, job.WorkMB, 0); err != nil {
 		return Finished{}, err
 	}
 
-	bootArgs := "console=ttyS0 reboot=k panic=1 quiet loglevel=1 root=/dev/vda ro init=" + guestInit
-	config := map[string]any{
-		"boot-source": map[string]any{"kernel_image_path": r.cfg.Kernel},
-		"drives": []map[string]any{
-			{"drive_id": "rootfs", "path_on_host": job.Image.Path, "is_root_device": true, "is_read_only": true},
-			{"drive_id": "work", "path_on_host": work, "is_root_device": false, "is_read_only": false},
-		},
-		"machine-config": map[string]any{"vcpu_count": job.VCPUs, "mem_size_mib": job.MemMB},
+	b := bootSpec{
+		dir:    dir,
+		drives: []drive{{"rootfs", job.Image.Path, true}, {"work", work, false}},
+		vcpus:  job.VCPUs, memMB: job.MemMB, log: job.Log,
 	}
 	if job.Network {
 		t, err := r.net.acquire()
@@ -81,56 +180,21 @@ func (r *Runner) Run(ctx context.Context, job Job) (Finished, error) {
 			return Finished{}, fmt.Errorf("can't set up the microVM's network: %w", err)
 		}
 		defer t.release()
-		bootArgs += " " + t.bootParam
-		config["network-interfaces"] = []map[string]any{{"iface_id": "eth0", "guest_mac": t.GuestMAC, "host_dev_name": t.Name}}
+		b.tap = t
 	}
-	config["boot-source"].(map[string]any)["boot_args"] = bootArgs
-	configFile := filepath.Join(dir, "vm.json")
-	raw, _ := json.Marshal(config)
-	if err := os.WriteFile(configFile, raw, 0o644); err != nil {
-		return Finished{}, err
-	}
-
-	// Firecracker's own log goes to a file, leaving its stdout to the guest.
-	// It wants the file to be there already.
-	if err := os.WriteFile(filepath.Join(dir, "firecracker.log"), nil, 0o644); err != nil {
-		return Finished{}, err
-	}
-	cmd := exec.CommandContext(ctx, r.cfg.Firecracker, "--no-api", "--config-file", configFile,
-		"--log-path", filepath.Join(dir, "firecracker.log"), "--level", "Warning")
-	cmd.Dir = dir
-	// A group of its own, so killing it can't reach Pail.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = 5 * time.Second
-	stdout, err := cmd.StdoutPipe()
+	vm, err := r.boot(ctx, b)
 	if err != nil {
 		return Finished{}, err
 	}
-	var problems strings.Builder
-	cmd.Stderr = &problems
-	if err := cmd.Start(); err != nil {
-		return Finished{}, fmt.Errorf("can't start firecracker: %w", err)
-	}
-	// The guest's serial console is Firecracker's stdout.
-	console := bufio.NewReaderSize(stdout, 64<<10)
-	for {
-		line, err := console.ReadString('\n')
-		if line = cleanLine(line); line != "" && job.Log != nil {
-			job.Log(line)
-		}
-		if err != nil {
-			break
-		}
-	}
-	waitErr := cmd.Wait()
+	<-vm.done
 	if ctx.Err() != nil {
 		return Finished{}, ctx.Err()
 	}
 
 	code, err := r.read(work, "/.pail/exit")
 	if err != nil || code == "" {
-		if waitErr != nil && problems.Len() > 0 {
-			return Finished{}, fmt.Errorf("%w: %s", ErrNoExit, strings.TrimSpace(problems.String()))
+		if vm.waitErr != nil && vm.problems.Len() > 0 {
+			return Finished{}, fmt.Errorf("%w: %s", ErrNoExit, strings.TrimSpace(vm.problems.String()))
 		}
 		return Finished{}, ErrNoExit
 	}
@@ -165,6 +229,19 @@ func (r *Runner) read(disk, path string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// dump copies one file out of a work disk to file on this machine. path is
+// as the guest saw it under /work.
+func (r *Runner) dump(disk, path, file string) error {
+	out, err := exec.Command("debugfs", "-R", fmt.Sprintf("dump %q %q", path, file), disk).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("debugfs: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if info, err := os.Stat(file); err != nil || info.Size() == 0 {
+		return fmt.Errorf("the microVM left no %s", path)
+	}
+	return nil
 }
 
 // Extract copies a folder out of a work disk into dir on this machine,

@@ -34,6 +34,7 @@ func (s *Server) installation() http.Handler {
 	api.HandleFunc("POST /api/v1/pails/{name}/stop", s.handleSetOff(true))
 	api.HandleFunc("POST /api/v1/pails/{name}/start", s.handleSetOff(false))
 	api.HandleFunc("GET /api/v1/pails/{name}/deploys/{id}/log", s.handleDeployLog)
+	api.HandleFunc("GET /api/v1/pails/{name}/output", s.handleOutput)
 	api.HandleFunc("GET /api/v1/pails/{name}/hosts", s.handleListHosts)
 	api.HandleFunc("POST /api/v1/pails/{name}/hosts", s.handleAddHost)
 	api.HandleFunc("DELETE /api/v1/pails/{name}/hosts/{host}", s.handleRemoveHost)
@@ -115,9 +116,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		// code, in microVMs; where it can't, reason says why.
 		"builds": s.buildsInfo(),
 		"limits": map[string]any{
-			"max_upload_size":     s.cfg.MaxUploadSize,
-			"max_deploys":         s.cfg.MaxDeploys,
-			"max_function_memory": s.cfg.MaxFunctionMemory,
+			"max_upload_size":      s.cfg.MaxUploadSize,
+			"max_deploys":          s.cfg.MaxDeploys,
+			"max_function_memory":  s.cfg.MaxFunctionMemory,
+			"max_container_memory": s.cfg.MaxContainerMemory,
 		},
 	})
 }
@@ -412,11 +414,11 @@ func (s *Server) handleDeployLog(w http.ResponseWriter, r *http.Request) {
 
 	sent := 0
 	for {
-		lines, done, wake := lg.Since(sent)
+		lines, next, done, wake := lg.Since(sent)
 		for _, line := range lines {
 			event("line", line)
 		}
-		sent += len(lines)
+		sent = next
 		if done {
 			// The pail may have been removed under us; say so with what's left.
 			d, _ := s.pails.Deploy(name, id)
@@ -434,6 +436,44 @@ func (s *Server) handleDeployLog(w http.ResponseWriter, r *http.Request) {
 		case <-wake:
 		case <-r.Context().Done():
 			return
+		case <-s.closing:
+			return
+		}
+	}
+}
+
+// handleOutput streams what a pail's containers print: the lines Pail has
+// kept, then each new one as it comes. It only ends when the caller leaves,
+// or at once with ?follow=false.
+func (s *Server) handleOutput(w http.ResponseWriter, r *http.Request) {
+	follow := r.URL.Query().Get("follow") != "false"
+	lg, err := s.pails.Output(r.PathValue("name"))
+	if err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher := http.NewResponseController(w)
+	sent := 0
+	for {
+		lines, next, _, wake := lg.Since(sent)
+		for _, line := range lines {
+			b, _ := json.Marshal(line)
+			fmt.Fprintf(w, "event: line\ndata: %s\n\n", b)
+		}
+		sent = next
+		flusher.Flush()
+		if !follow {
+			return
+		}
+		select {
+		case <-wake:
+		case <-r.Context().Done():
+			return
+		case <-s.closing:
+			return
 		}
 	}
 }
@@ -441,7 +481,10 @@ func (s *Server) handleDeployLog(w http.ResponseWriter, r *http.Request) {
 func (s *Server) writePailError(w http.ResponseWriter, r *http.Request, err error) {
 	name := r.PathValue("name")
 	var taken pails.ErrHostTaken
+	var cantStart pails.ErrCantStart
 	switch {
+	case errors.As(err, &cantStart):
+		writeError(w, http.StatusConflict, "cant_start", cantStart.Reason+" "+name+" is still serving what it was.")
 	case errors.Is(err, pails.ErrNoPail):
 		writeError(w, http.StatusNotFound, "no_pail", "No pail called "+name+".")
 	case errors.Is(err, pails.ErrNoDeploy):

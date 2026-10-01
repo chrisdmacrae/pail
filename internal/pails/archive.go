@@ -42,6 +42,14 @@ func sniffArchive(file string) (archiveFormat, error) {
 // walkArchive calls fn for every regular file in the archive, in order. r is
 // only valid until fn returns.
 func walkArchive(file string, format archiveFormat, fn func(name string, size int64, r io.Reader) error) error {
+	return walkArchiveModes(file, format, func(name string, size int64, _ fs.FileMode, r io.Reader) error {
+		return fn(name, size, r)
+	})
+}
+
+// walkArchiveModes is walkArchive for a caller that needs to know which
+// files may be run.
+func walkArchiveModes(file string, format archiveFormat, fn func(name string, size int64, mode fs.FileMode, r io.Reader) error) error {
 	if format == formatZip {
 		zr, err := zip.OpenReader(file)
 		if err != nil {
@@ -56,7 +64,7 @@ func walkArchive(file string, format archiveFormat, fn func(name string, size in
 			if err != nil {
 				return userErrorf("That .zip can't be read: %v.", err)
 			}
-			err = fn(zf.Name, int64(zf.UncompressedSize64), rc)
+			err = fn(zf.Name, int64(zf.UncompressedSize64), zf.Mode().Perm(), rc)
 			rc.Close()
 			if err != nil {
 				return err
@@ -86,7 +94,7 @@ func walkArchive(file string, format archiveFormat, fn func(name string, size in
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		if err := fn(hdr.Name, hdr.Size, tr); err != nil {
+		if err := fn(hdr.Name, hdr.Size, fs.FileMode(hdr.Mode).Perm(), tr); err != nil {
 			return err
 		}
 	}

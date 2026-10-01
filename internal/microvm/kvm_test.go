@@ -6,11 +6,14 @@
 package microvm
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -259,5 +262,263 @@ func TestBuildSite(t *testing.T) {
 	}})
 	if err == nil || !strings.Contains(err.Error(), "found no index.html") {
 		t.Errorf("a build with its site somewhere unusual: %v", err)
+	}
+}
+
+// A Dockerfile app that answers on a port, keeps a count on its data volume,
+// and says goodbye when it's asked to stop.
+var testApp = map[string]string{
+	// A short name, as Dockerfiles have: it means Docker Hub's.
+	"Dockerfile": `FROM alpine:3
+RUN apk add --no-cache busybox-extras && adduser -D -u 1234 app
+COPY app/ /srv/
+RUN chmod +x /srv/run.sh /srv/www/cgi-bin/info
+ENV GREETING=hello
+WORKDIR /srv
+USER app
+CMD ["./run.sh"]
+`,
+	"app/run.sh": `#!/bin/sh
+trap 'echo "goodbye from the app"; exit 0' TERM
+echo "starting as $(id -un) in $(pwd), greeting $GREETING, port $PORT"
+n=$(cat /data/boots 2>/dev/null || echo 0); n=$((n + 1)); echo $n > /data/boots
+echo "boot $n"
+touch /tmp/scratch && echo "root is writable"
+httpd -f -p "$PORT" -h /srv/www &
+wait $!
+`,
+	"app/www/index.html": "the app's page\n",
+	"app/www/cgi-bin/info": `#!/bin/sh
+printf 'Content-Type: text/plain\r\n\r\n'
+echo "boots=$(cat /data/boots) host=$(hostname)"
+`,
+}
+
+func fillWith(files map[string]string) func(string) error {
+	return func(dir string) error {
+		for name, body := range files {
+			path := filepath.Join(dir, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// fetch asks a machine for a page, waiting for its port to open.
+func fetch(t *testing.T, m Machine, port int, path string) string {
+	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		resp, err := http.Get("http://" + m.Addr(port) + path)
+		if err == nil {
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			return string(body)
+		}
+		select {
+		case <-m.Done():
+			t.Fatalf("the machine stopped before it answered on %d", port)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing answered on %d: %v", port, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func TestContainerBuildsRunsAndStops(t *testing.T) {
+	r := testRunner(t)
+	out := &lines{}
+	start := time.Now()
+	built, err := r.BuildContainer(context.Background(), ContainerBuild{Fill: fillWith(testApp), Dockerfile: "Dockerfile", Context: ".", Log: out.add})
+	if err != nil {
+		t.Fatalf("BuildContainer: %v\n%s", err, out)
+	}
+	defer built.Cleanup()
+	t.Logf("the build took %s and logged:\n%s", time.Since(start).Round(time.Millisecond), out)
+	img := built.Image
+	if len(img.Cmd) != 1 || img.Cmd[0] != "./run.sh" || img.User != "app" || img.WorkingDir != "/srv" {
+		t.Fatalf("what the image says about running it: %+v", img)
+	}
+
+	dir := t.TempDir()
+	volume := filepath.Join(dir, "volume.ext4")
+	spec := MachineSpec{
+		Dir: filepath.Join(dir, "run"), Rootfs: img.Path,
+		Data: volume, DataPath: "/data", DataMB: 64,
+		Argv: append(append([]string{}, img.Entrypoint...), img.Cmd...),
+		Env:  append(append([]string{}, img.Env...), "PORT=8080"), WorkingDir: img.WorkingDir, User: img.User,
+		Hostname: "api", VCPUs: 1, MemMB: 128,
+	}
+	boot := func() (Machine, *lines) {
+		said := &lines{}
+		spec.Log = said.add
+		m, err := r.Start(context.Background(), spec)
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		return m, said
+	}
+
+	m, said := boot()
+	start = time.Now()
+	if got := fetch(t, m, 8080, "/"); got != "the app's page\n" {
+		t.Errorf("the app's page: %q", got)
+	}
+	t.Logf("the app answered %s after its machine started", time.Since(start).Round(time.Millisecond))
+	if got := fetch(t, m, 8080, "/cgi-bin/info"); got != "boots=1 host=api\n" {
+		t.Errorf("the first boot: %q", got)
+	}
+	start = time.Now()
+	m.Stop()
+	t.Logf("stopping took %s; the machine said:\n%s", time.Since(start).Round(time.Millisecond), said)
+	for _, want := range []string{"starting as app in /srv, greeting hello, port 8080", "root is writable", "goodbye from the app"} {
+		if !strings.Contains(said.String(), want) {
+			t.Errorf("the machine's output is missing %q", want)
+		}
+	}
+	if _, err := os.Stat(spec.Dir); !os.IsNotExist(err) {
+		t.Errorf("the machine's folder outlived it: %v", err)
+	}
+
+	// The data volume outlasts the machine; the root filesystem doesn't.
+	m, said = boot()
+	if got := fetch(t, m, 8080, "/cgi-bin/info"); got != "boots=2 host=api\n" {
+		t.Errorf("the second boot: %q\n%s", got, said)
+	}
+	m.Stop()
+
+	// A machine whose app exits stops by itself and says how.
+	spec.Argv, spec.Data, spec.DataPath = []string{"/bin/sh", "-c", "echo bye; exit 3"}, "", ""
+	m, said = boot()
+	select {
+	case <-m.Done():
+	case <-time.After(60 * time.Second):
+		t.Fatal("a machine whose app exited is still running")
+	}
+	if !strings.Contains(said.String(), "exited with status 3") {
+		t.Errorf("how the app ended:\n%s", said)
+	}
+	if out, _ := exec.Command("sh", "-c", "ip -o link show | grep -c pailvm").Output(); strings.TrimSpace(string(out)) != "0" {
+		t.Errorf("tap devices left behind: %s", out)
+	}
+}
+
+// An image can be made by anyone. However its links are laid out, unpacking
+// it must leave everything outside its own folder alone.
+func TestUnpackingAnImageStaysInsideItsFolder(t *testing.T) {
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	os.WriteFile(victim, []byte("untouched"), 0o600)
+	os.Mkdir(filepath.Join(outside, "dir"), 0o700)
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	add := func(h tar.Header, body string) {
+		h.Size = int64(len(body))
+		if h.Mode == 0 {
+			h.Mode = 0o777
+		}
+		tw.WriteHeader(&h)
+		tw.Write([]byte(body))
+	}
+	// Links out of the image: to a file, to a folder, absolute and relative.
+	add(tar.Header{Name: "file-link", Typeflag: tar.TypeSymlink, Linkname: victim}, "")
+	add(tar.Header{Name: "dir-link", Typeflag: tar.TypeSymlink, Linkname: outside}, "")
+	add(tar.Header{Name: "up-link", Typeflag: tar.TypeSymlink, Linkname: "../../../../../../../../../../" + outside}, "")
+	// Then entries that go through them.
+	add(tar.Header{Name: "dir-link/dropped", Typeflag: tar.TypeReg}, "through an absolute link")
+	add(tar.Header{Name: "up-link/dropped-too", Typeflag: tar.TypeReg}, "through a relative link")
+	add(tar.Header{Name: "dir-link/dir", Typeflag: tar.TypeDir}, "")
+	add(tar.Header{Name: "hard", Typeflag: tar.TypeLink, Linkname: "file-link"}, "")
+	add(tar.Header{Name: "file-link", Typeflag: tar.TypeReg}, "replaces the link, not what it pointed at")
+	// And links where Pail puts its own files.
+	add(tar.Header{Name: "pail-init", Typeflag: tar.TypeSymlink, Linkname: filepath.Join(outside, "init")}, "")
+	add(tar.Header{Name: "etc", Typeflag: tar.TypeSymlink, Linkname: outside}, "")
+	add(tar.Header{Name: "proc", Typeflag: tar.TypeSymlink, Linkname: filepath.Join(outside, "proc")}, "")
+	// An honest image's links still work: a merged /usr, as most have.
+	add(tar.Header{Name: "usr/lib", Typeflag: tar.TypeDir, Mode: 0o755}, "")
+	add(tar.Header{Name: "lib", Typeflag: tar.TypeSymlink, Linkname: "/usr/lib"}, "")
+	add(tar.Header{Name: "lib/libc.so", Typeflag: tar.TypeReg, Mode: 0o644}, "a library")
+	tw.Close()
+
+	root := filepath.Join(t.TempDir(), "root")
+	if err := untar(&buf, root); err != nil {
+		t.Fatalf("untar: %v", err)
+	}
+	if err := prepareRoot(root); err != nil {
+		t.Fatalf("prepareRoot: %v", err)
+	}
+
+	if b, _ := os.ReadFile(victim); string(b) != "untouched" {
+		t.Errorf("a file outside the image was written: %q", b)
+	}
+	if info, _ := os.Stat(victim); info.Mode().Perm() != 0o600 {
+		t.Errorf("a file outside the image had its mode changed to %v", info.Mode().Perm())
+	}
+	if info, _ := os.Stat(filepath.Join(outside, "dir")); info.Mode().Perm() != 0o700 {
+		t.Errorf("a folder outside the image had its mode changed to %v", info.Mode().Perm())
+	}
+	left, _ := os.ReadDir(outside)
+	if len(left) != 2 {
+		names := []string{}
+		for _, e := range left {
+			names = append(names, e.Name())
+		}
+		t.Errorf("unpacking left things outside the image: %v", names)
+	}
+	if b, err := os.ReadFile(filepath.Join(root, "usr/lib/libc.so")); err != nil || string(b) != "a library" {
+		t.Errorf("a file behind an honest link: %q, %v", b, err)
+	}
+	if info, err := os.Lstat(filepath.Join(root, "pail-init")); err != nil || !info.Mode().IsRegular() {
+		t.Errorf("init isn't a real file in the image: %v", err)
+	}
+}
+
+// An image from a registry boots as it is, with nothing built. This one has
+// no shell, no users and no /etc: a single program in an empty filesystem.
+func TestContainerFromARegistry(t *testing.T) {
+	r := testRunner(t)
+	const ref = "traefik/whoami:v1.10"
+	out := &lines{}
+	start := time.Now()
+	built, err := r.PullContainer(context.Background(), ContainerPull{Ref: ref, Log: out.add})
+	if err != nil {
+		t.Fatalf("PullContainer: %v", err)
+	}
+	defer built.Cleanup()
+	t.Logf("pulling took %s and logged:\n%s", time.Since(start).Round(time.Millisecond), out)
+	img := built.Image
+	if !strings.HasPrefix(built.Digest, "sha256:") || len(img.Entrypoint)+len(img.Cmd) == 0 {
+		t.Fatalf("what came back: digest %q, image %+v", built.Digest, img)
+	}
+
+	// Asked again with the digest it has, nothing is fetched.
+	same, err := r.PullContainer(context.Background(), ContainerPull{Ref: ref, Unless: built.Digest})
+	if err != nil || same.Image != nil || same.Digest != built.Digest {
+		t.Errorf("pulling what we already have: %+v, %v", same, err)
+	}
+	if _, err := r.PullContainer(context.Background(), ContainerPull{Ref: "traefik/whoami:no-such-tag"}); err == nil || !strings.Contains(err.Error(), "can't pull traefik/whoami:no-such-tag") {
+		t.Errorf("an image that isn't there: %v", err)
+	}
+
+	said := &lines{}
+	m, err := r.Start(context.Background(), MachineSpec{
+		Dir: filepath.Join(t.TempDir(), "run"), Rootfs: img.Path,
+		Argv: append(append([]string{}, img.Entrypoint...), img.Cmd...), Env: img.Env,
+		WorkingDir: img.WorkingDir, User: img.User, Hostname: "whoami", VCPUs: 1, MemMB: 128, Log: said.add,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+	if got := fetch(t, m, 80, "/"); !strings.Contains(got, "Hostname: whoami") {
+		t.Errorf("what the image answered: %q\n%s", got, said)
 	}
 }

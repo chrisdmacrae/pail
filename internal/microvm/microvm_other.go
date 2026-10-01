@@ -24,6 +24,18 @@ func (r *Runner) BuildSite(context.Context, BuildRequest) (BuildResult, error) {
 	return BuildResult{}, errNotLinux
 }
 
+func (r *Runner) BuildContainer(context.Context, ContainerBuild) (Built, error) {
+	return Built{}, errNotLinux
+}
+
+func (r *Runner) PullContainer(context.Context, ContainerPull) (Built, error) {
+	return Built{}, errNotLinux
+}
+
+func (r *Runner) Start(context.Context, MachineSpec) (Machine, error) {
+	return nil, errNotLinux
+}
+
 // IsGuestInit is never true off Linux.
 func IsGuestInit() bool { return false }
 

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/chrisdmacrae/pail/internal/microvm"
 	"io"
 	"io/fs"
 	"os"
@@ -16,6 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/chrisdmacrae/pail/internal/config"
+	"github.com/chrisdmacrae/pail/internal/microvm"
 )
 
 // maxFiles caps how many files one deploy may hold.
@@ -171,6 +173,31 @@ func (s *Service) recopy(ctx context.Context, e *entry, d *Deploy, lg *Log) (*Ma
 		}
 	}
 	d.Files, d.Bytes = src.Files, src.Bytes
+	// Its containers run again from the root filesystems already built. One
+	// that runs a registry's image is asked for afresh, so a redeploy picks
+	// up a tag that has moved.
+	containers := map[string]Container{}
+	for c, cc := range man.Containers {
+		if cc.Image != "" {
+			if err := s.canRun(); err != nil {
+				return nil, err
+			}
+			pulled, err := s.pullContainer(ctx, e.name, d.ID, c, cc, src.ID, &cc, lg)
+			if err != nil {
+				return nil, err
+			}
+			cc = pulled
+		} else if err := s.shareRootfs(ctx, e.name, src.ID, d.ID, c); err != nil {
+			return nil, err
+		}
+		containers[c] = cc
+	}
+	if len(containers) > 0 {
+		// The manifest read above may be the one being served; leave it be.
+		next := *man
+		next.Containers = containers
+		man = &next
+	}
 	return man, nil
 }
 
@@ -219,6 +246,7 @@ func (s *Service) run(e *entry, d Deploy, lg *Log, j job) {
 		if err := s.store.DeletePrefix(ctx, deployFiles(e.name, d.ID)); err != nil {
 			s.log.Error("clean up failed deploy", "pail", e.name, "deploy", d.ID, "err", err)
 		}
+		s.dropRootfs(ctx, e.name, d.ID)
 	}
 
 	s.mu.Lock()
@@ -279,9 +307,9 @@ func (s *Service) build(ctx context.Context, e *entry, d *Deploy, lg *Log, j job
 		return err
 	}
 
-	// Cutover: one write moves the live pointer.
-	lg.add("step", "→ swapping %s to %s", s.host(e.name), d.ID)
-	return s.updateRecord(ctx, e, man, func(r *record) { r.Serving, r.ServedAt = d.ID, time.Now().UTC() })
+	// Cutover: containers up and answering, then one write moves the live
+	// pointer.
+	return s.goLive(ctx, e, d.ID, man, lg)
 }
 
 // plan is what the first pass over an archive decides.
@@ -310,7 +338,7 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 		return nil, err
 	}
 
-	var cfg staticConfig
+	cfg := deployConfig{files: true}
 	found := "index.html"
 	if p.pailJSON != nil {
 		found = "pail.json"
@@ -318,7 +346,8 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 			return nil, err
 		}
 	}
-	if needsBuild(p.packageJSON) {
+	// A project with containers is built by its Dockerfiles, not by Pail.
+	if needsBuild(p.packageJSON) && len(cfg.containers) == 0 {
 		return s.buildAndStore(ctx, name, d, archive, format, p, cfg, lg)
 	}
 	static := "./" + strings.TrimSuffix(cfg.root, "/")
@@ -328,10 +357,25 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 	case cfg.fallback != "" && !p.names[cfg.root+cfg.fallback]:
 		return nil, userErrorf("pail.json falls back to %s, but %s has no such file.", cfg.fallback, static)
 	}
+	if len(cfg.containers) > 0 {
+		// Refused before anything is stored or built.
+		if err := s.canRun(); err != nil {
+			return nil, err
+		}
+		for _, c := range cfg.names() {
+			if most := s.maxContainerMem >> 20; most > 0 && int64(cfg.containers[c].MemoryMB) > most {
+				return nil, userErrorf("pail.json: %s asks for %s of memory, and this Pail gives a container at most %s. Ask for less, or raise PAIL_MAX_CONTAINER_MEMORY on the server.",
+					c, config.FormatSize(int64(cfg.containers[c].MemoryMB)<<20), config.FormatSize(s.maxContainerMem))
+			}
+			if file := cfg.containers[c].dockerfile; file != "" && !p.names[file] {
+				return nil, userErrorf("pail.json builds %s from ./%s, and the upload has no such file.", c, file)
+			}
+		}
+	}
 
 	lg.add("", "unpacking %d %s · found %s", len(p.names), plural(len(p.names), "file"), found)
 
-	man := &Manifest{Root: cfg.root, Fallback: cfg.fallback, Files: map[string]File{}}
+	man := &Manifest{Root: cfg.root, Fallback: cfg.fallback, Files: map[string]File{}, Routes: cfg.routes}
 	prefix := deployFiles(name, d.ID)
 	err = walkArchive(archive, format, func(raw string, size int64, r io.Reader) error {
 		file, skip, err := cleanName(raw)
@@ -343,7 +387,7 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 		if err != nil {
 			return err
 		}
-		if served, ok := strings.CutPrefix(file, cfg.root); ok && file != "pail.json" {
+		if served, ok := strings.CutPrefix(file, cfg.root); ok && cfg.files && file != "pail.json" {
 			man.Files[served] = stored
 		}
 		return nil
@@ -351,10 +395,182 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 	if err != nil {
 		return nil, err
 	}
-	if len(man.Files) == 0 {
+	if cfg.files && len(man.Files) == 0 {
 		return nil, userErrorf("pail.json points static at %s, but the upload has no files there.", static)
 	}
+	if len(cfg.containers) > 0 {
+		if err := s.buildContainers(ctx, name, d, archive, format, p, cfg, man, lg); err != nil {
+			return nil, err
+		}
+	}
 	return man, nil
+}
+
+// buildContainers builds each of a deploy's Dockerfiles in a throwaway
+// microVM and keeps the root filesystem each one makes with the deploy.
+func (s *Service) buildContainers(ctx context.Context, name string, d *Deploy, archive string, format archiveFormat, p plan, cfg deployConfig, man *Manifest, lg *Log) error {
+	man.Containers = map[string]Container{}
+	for _, c := range cfg.names() {
+		cc := cfg.containers[c]
+		if cc.Image != "" {
+			// The image the pail is serving now, if it runs this one too.
+			prevID, prev := s.servingContainer(ctx, name, c)
+			pulled, err := s.pullContainer(ctx, name, d.ID, c, cc.Container, prevID, prev, lg)
+			if err != nil {
+				return err
+			}
+			man.Containers[c] = pulled
+			continue
+		}
+		lg.add("step", "→ building %s from ./%s in a microVM", c, cc.dockerfile)
+		built, err := s.builder.BuildContainer(ctx, microvm.ContainerBuild{
+			Fill:       extractTo(archive, format, p.strip),
+			Dockerfile: cc.dockerfile,
+			Context:    cc.context,
+			Log:        func(line string) { lg.add("", "%s", line) },
+		})
+		if err != nil {
+			var ue userError
+			if errors.As(err, &ue) {
+				return err
+			}
+			return userErrorf("%s didn't build: %v.", c, err)
+		}
+		img := built.Image
+		cc.Entrypoint, cc.Cmd = img.Entrypoint, img.Cmd
+		cc.ImageEnv, cc.WorkingDir, cc.User = img.Env, img.WorkingDir, img.User
+		if len(cc.argv()) == 0 {
+			built.Cleanup()
+			return userErrorf("%s's Dockerfile has no CMD or ENTRYPOINT, so Pail doesn't know what to run. Add one, or say what with \"command\" in pail.json.", c)
+		}
+		lg.add("", "built %s · keeping its root filesystem with the deploy", c)
+		err = s.keepRootfs(ctx, name, d.ID, c, img.Path)
+		built.Cleanup()
+		if err != nil {
+			return err
+		}
+		man.Containers[c] = cc.Container
+	}
+	return nil
+}
+
+// servingContainer is a container of the deploy a pail is serving, and that
+// deploy's ID, or nil.
+func (s *Service) servingContainer(ctx context.Context, name, c string) (string, *Container) {
+	s.mu.RLock()
+	e := s.pails[name]
+	s.mu.RUnlock()
+	if e == nil {
+		return "", nil
+	}
+	id := s.serving(e)
+	if id == "" {
+		return "", nil
+	}
+	man, err := s.manifestOf(ctx, e, id)
+	if err != nil {
+		return "", nil
+	}
+	if prev, ok := man.Containers[c]; ok {
+		return id, &prev
+	}
+	return "", nil
+}
+
+// pullContainer gives a deploy the root filesystem of a container that runs
+// an image from a registry. The registry is asked what the image is now, so
+// a tag that has moved is followed; when it is what an earlier deploy
+// (prevID) already pulled, that deploy's root filesystem is used again.
+func (s *Service) pullContainer(ctx context.Context, name, id, c string, cc Container, prevID string, prev *Container, lg *Log) (Container, error) {
+	lg.add("step", "→ pulling %s for %s", cc.Image, c)
+	req := microvm.ContainerPull{Ref: cc.Image, Log: func(line string) { lg.add("", "%s", line) }}
+	if prev != nil && prev.Image == cc.Image {
+		req.Unless = prev.Digest
+	}
+	for {
+		built, err := s.builder.PullContainer(ctx, req)
+		if err != nil {
+			return cc, userErrorf("%s's image didn't arrive: %v.", c, err)
+		}
+		cc.Digest = built.Digest
+		if built.Image == nil {
+			if err := s.shareRootfs(ctx, name, prevID, id, c); err != nil {
+				// What the earlier deploy kept is gone: fetch it after all.
+				req.Unless = ""
+				continue
+			}
+			cc.Entrypoint, cc.Cmd = prev.Entrypoint, prev.Cmd
+			cc.ImageEnv, cc.WorkingDir, cc.User = prev.ImageEnv, prev.WorkingDir, prev.User
+			lg.add("", "%s hasn't changed since %s · using the root filesystem from then", cc.Image, prevID)
+			return cc, nil
+		}
+		img := built.Image
+		cc.Entrypoint, cc.Cmd = img.Entrypoint, img.Cmd
+		cc.ImageEnv, cc.WorkingDir, cc.User = img.Env, img.WorkingDir, img.User
+		if len(cc.argv()) == 0 {
+			built.Cleanup()
+			return cc, userErrorf("%s has no CMD or ENTRYPOINT, so Pail doesn't know what to run. Say what with \"command\" in pail.json.", cc.Image)
+		}
+		lg.add("", "pulled %s · keeping its root filesystem with the deploy", c)
+		err = s.keepRootfs(ctx, name, id, c, img.Path)
+		built.Cleanup()
+		return cc, err
+	}
+}
+
+// shareRootfs gives one deploy the root filesystem another already keeps.
+func (s *Service) shareRootfs(ctx context.Context, name, from, to, c string) error {
+	if err := s.store.Copy(ctx, rootfsKey(name, from, c), rootfsKey(name, to, c)); err != nil {
+		return err
+	}
+	if s.dir != "" {
+		local := s.rootfsFile(name, to, c)
+		if err := os.MkdirAll(filepath.Dir(local), 0o755); err == nil {
+			os.Link(s.rootfsFile(name, from, c), local) // if it can't, it is fetched from storage
+		}
+	}
+	return nil
+}
+
+// dropRootfs deletes the root filesystems kept for a deploy.
+func (s *Service) dropRootfs(ctx context.Context, name, id string) {
+	if s.dir != "" {
+		os.RemoveAll(filepath.Join(s.rootfsDir(name), id))
+	}
+	if err := s.store.DeletePrefix(ctx, deployMeta(name, id)+"rootfs."); err != nil {
+		s.log.Error("delete root filesystems", "pail", name, "deploy", id, "err", err)
+	}
+}
+
+// extractTo returns a function that unpacks an archive's files into a
+// folder on local disk, for a build to work on. Files that may be run stay
+// that way.
+func extractTo(archive string, format archiveFormat, strip string) func(dir string) error {
+	return func(dir string) error {
+		return walkArchiveModes(archive, format, func(raw string, _ int64, mode fs.FileMode, r io.Reader) error {
+			file, skip, err := cleanName(raw)
+			if err != nil || skip {
+				return err
+			}
+			target := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(file, strip)))
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			perm := fs.FileMode(0o644)
+			if mode&0o111 != 0 {
+				perm = 0o755
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(f, r); err != nil {
+				f.Close()
+				return err
+			}
+			return f.Close()
+		})
+	}
 }
 
 // storeFile puts one of a deploy's files in storage, counting it.
@@ -372,7 +588,7 @@ func (s *Service) storeFile(ctx context.Context, key string, r io.Reader, size i
 // buildAndStore is for a project that has to be built first. The source is
 // built in a throwaway microVM, and what the build leaves is what the deploy
 // stores and serves.
-func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, archive string, format archiveFormat, p plan, cfg staticConfig, lg *Log) (*Manifest, error) {
+func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, archive string, format archiveFormat, p plan, cfg deployConfig, lg *Log) (*Manifest, error) {
 	if ok, why := s.CanBuild(); !ok {
 		return nil, userErrorf("This project needs a build, and this Pail can’t run one: %s. Build it yourself and deploy the result with pail up ./dist.", why)
 	}
@@ -383,27 +599,7 @@ func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, arc
 		// With a build, pail.json's static is where the result lands.
 		Static: strings.TrimSuffix(cfg.root, "/"),
 		Log:    func(line string) { lg.add("", "%s", line) },
-		Fill: func(dir string) error {
-			return walkArchive(archive, format, func(raw string, _ int64, r io.Reader) error {
-				file, skip, err := cleanName(raw)
-				if err != nil || skip {
-					return err
-				}
-				target := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(file, p.strip)))
-				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-					return err
-				}
-				f, err := os.Create(target)
-				if err != nil {
-					return err
-				}
-				if _, err := io.Copy(f, r); err != nil {
-					f.Close()
-					return err
-				}
-				return f.Close()
-			})
-		},
+		Fill:   extractTo(archive, format, p.strip),
 	})
 	if err != nil {
 		var ue userError
@@ -550,6 +746,9 @@ func (s *Service) prune(ctx context.Context, e *entry) {
 			s.store.DeletePrefix(ctx, deployMeta(e.name, id)),
 			s.store.DeletePrefix(ctx, deployFiles(e.name, id)),
 		)
+		if s.dir != "" {
+			os.RemoveAll(filepath.Join(s.rootfsDir(e.name), id))
+		}
 		if err != nil {
 			s.log.Error("prune deploy", "pail", e.name, "deploy", id, "err", err)
 		}

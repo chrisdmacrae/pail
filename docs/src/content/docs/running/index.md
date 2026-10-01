@@ -5,8 +5,8 @@ section: Running Pail
 order: 2
 providerTiles: true
 next:
-  href: /git-providers/
-  label: Set up a git provider
+  href: /deploying/
+  label: What Pail deploys
 ---
 
 ## What Pail is made of
@@ -16,7 +16,7 @@ A Pail installation is two programs on one Linux machine.
 - **pail-server** is Pail itself: the web UI, the API that `pail-cli` talks to, and every pail’s site, all from one listener on ports 80 and 443.
 - **versitygw** is where Pail keeps everything: each deploy’s files, its own records, certificates and git connections. It is a small S3 gateway over an ordinary folder.
 
-For builds, Pail also uses **Firecracker**, which runs each build in a small virtual machine of its own so it can’t touch the server.
+For builds and containers, Pail also uses **Firecracker**, which runs each one in a small virtual machine of its own so it can’t touch the server.
 
 ## What the machine needs
 
@@ -25,8 +25,8 @@ For builds, Pail also uses **Firecracker**, which runs each build in a small vir
 | Linux, on amd64 or arm64 | A container, a virtual machine or a real machine. |
 | Ports 80 and 443 | Pail serves every pail from them. Nothing else on the machine can hold them. |
 | An address on your network that doesn’t change | Names point at it. |
-| `/dev/kvm` | Only for builds. Without it Pail still serves sites you build yourself. |
-| Root | Pail gives each build’s virtual machine a network of its own, which only root may do. |
+| `/dev/kvm` | Only for builds and containers. Without it Pail still serves sites you build yourself. |
+| Root | Pail gives each virtual machine a network of its own, which only root may do. |
 
 Pail does not need to be reachable from the internet.
 
@@ -56,7 +56,8 @@ Pail is configured entirely by environment variables. There is no settings scree
 | `PAIL_S3_ACCESS_KEY`, `PAIL_S3_SECRET_KEY` | none, required | versitygw’s credentials. |
 | `PAIL_MAX_UPLOAD_SIZE` | `100MB` | The largest upload, or repo, Pail accepts. |
 | `PAIL_MAX_DEPLOYS` | `10` | How many good deploys each pail keeps to roll back to. |
-| `PAIL_DATA_DIR` | `/var/lib/pail` | Local disk for what builds need. |
+| `PAIL_MAX_CONTAINER_MEMORY` | `2GB` | The most memory one container may ask for. |
+| `PAIL_DATA_DIR` | `/var/lib/pail` | Local disk for what builds and containers need, and where containers’ data is kept. |
 | `PAIL_FIRECRACKER`, `PAIL_KERNEL` | `firecracker`, `<data dir>/vmlinux` | The Firecracker binary and the kernel its virtual machines boot. |
 | `PAIL_TLS` | on | `off` serves plain HTTP only, for running behind a proxy that handles HTTPS itself. |
 

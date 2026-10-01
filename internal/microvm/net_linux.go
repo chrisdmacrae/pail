@@ -29,6 +29,10 @@ type network struct {
 	mu    sync.Mutex
 	ready bool
 	used  map[int]bool
+	// next is where the search for a free /30 starts. It moves on each
+	// time, so an address a guest just gave up isn't handed straight to
+	// another while something may still be talking to it.
+	next int
 }
 
 // tap is one guest's network.
@@ -118,13 +122,15 @@ func (n *network) acquire() (*tap, error) {
 	if n.used == nil {
 		n.used = map[int]bool{}
 	}
-	index := 0
-	for n.used[index] {
-		index++
-	}
-	if index >= 1<<14 {
+	const slots = 1 << 14
+	if len(n.used) >= slots {
 		return nil, fmt.Errorf("too many microVMs at once")
 	}
+	index := n.next % slots
+	for n.used[index] {
+		index = (index + 1) % slots
+	}
+	n.next = index + 1
 	// The index picks a /30: .0 is the network, .1 this machine, .2 the guest.
 	hi, lo := index/64, index%64*4
 	t := &tap{

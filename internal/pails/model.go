@@ -40,6 +40,9 @@ type Pail struct {
 	Revision string `json:"revision,omitempty"`
 	// Hosts are the custom hostnames it also answers at.
 	Hosts []string `json:"hosts"`
+	// Containers are the containers of the deploy being served, and how
+	// each is doing.
+	Containers []ContainerStatus `json:"containers,omitempty"`
 	// Serving is the ID of the deploy requests are answered from, or "".
 	Serving   string    `json:"serving"`
 	CreatedAt time.Time `json:"created_at"`
@@ -98,6 +101,50 @@ type Manifest struct {
 	Fallback string `json:"fallback,omitempty"`
 	// Files is keyed by path relative to Root.
 	Files map[string]File `json:"files"`
+	// Containers are the microVMs the deploy runs, by name.
+	Containers map[string]Container `json:"containers,omitempty"`
+	// Routes say what answers each path. None means files answer them all.
+	Routes []Route `json:"routes,omitempty"`
+}
+
+// Route sends the paths it covers to files or to a container. To is
+// "static" or "container:<name>".
+type Route struct {
+	Path string `json:"path"`
+	To   string `json:"to"`
+}
+
+// Container is one container of a deploy: what pail.json asked for, and what
+// the image built from its Dockerfile says about running it.
+type Container struct {
+	// Image is the registry image the container runs, for one that isn't
+	// built from a Dockerfile, and Digest the exact contents that was
+	// pulled for this deploy.
+	Image  string `json:"image,omitempty"`
+	Digest string `json:"digest,omitempty"`
+
+	Port     int               `json:"port"`
+	CPUs     int               `json:"cpus"`
+	MemoryMB int               `json:"memory_mb"`
+	Data     string            `json:"data,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	// Command, when set, runs in place of the image's CMD. The image's
+	// ENTRYPOINT still goes in front of it, as it does with Docker.
+	Command []string `json:"command,omitempty"`
+
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
+	ImageEnv   []string `json:"image_env,omitempty"`
+	WorkingDir string   `json:"working_dir,omitempty"`
+	User       string   `json:"user,omitempty"`
+}
+
+// ContainerStatus is a container as the API reports it.
+type ContainerStatus struct {
+	Name string `json:"name"`
+	Port int    `json:"port"`
+	// State is "running", "starting" or "stopped".
+	State string `json:"state"`
 }
 
 type File struct {
@@ -119,6 +166,12 @@ var (
 	ErrNoSource    = errors.New("pail has no finished deploy to redeploy")
 )
 
+// ErrCantStart means a deploy's containers didn't come up, so the pail went
+// on serving what it was serving.
+type ErrCantStart struct{ Reason string }
+
+func (e ErrCantStart) Error() string { return e.Reason }
+
 // A pail name is one DNS label.
 var nameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
@@ -132,6 +185,7 @@ func ValidName(name string) bool { return nameRE.MatchString(name) }
 //	meta/<name>/deploys/<id>.json               Deploy
 //	meta/<name>/deploys/<id>.log                log lines, one JSON per line
 //	meta/<name>/deploys/<id>.manifest.json      Manifest
+//	meta/<name>/deploys/<id>.rootfs.<c>.gz      a container's root filesystem
 const metaRoot = "meta/"
 
 func metaPrefix(name string) string      { return metaRoot + name + "/" }
@@ -140,5 +194,8 @@ func deployMeta(name, id string) string  { return metaPrefix(name) + "deploys/" 
 func deployKey(name, id string) string   { return deployMeta(name, id) + "json" }
 func logKey(name, id string) string      { return deployMeta(name, id) + "log" }
 func manifestKey(name, id string) string { return deployMeta(name, id) + "manifest.json" }
+func rootfsKey(name, id, container string) string {
+	return deployMeta(name, id) + "rootfs." + container + ".gz"
+}
 func pailFiles(name string) string       { return "pails/" + name + "/" }
 func deployFiles(name, id string) string { return pailFiles(name) + "deploys/" + id + "/" }
