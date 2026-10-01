@@ -61,3 +61,4 @@ pail hosts add blog blog.example.com
 ```
 
 If something goes wrong, [When it doesn’t work](/custom-domains/#when-it-doesnt-work) lists the usual causes.
+
