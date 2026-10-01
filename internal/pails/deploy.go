@@ -40,6 +40,17 @@ func userErrorf(format string, args ...any) error {
 
 var errRemoved = userError{"The pail was removed while this deploy was running."}
 
+// job is the part of a deploy that depends on where its files come from.
+type job struct {
+	// url is the pail's address as the person who asked reaches it.
+	url string
+	// fill puts the deploy's files in its folder, fills in d's file count
+	// and size, and returns what the deploy serves.
+	fill func(ctx context.Context, e *entry, d *Deploy, lg *Log) (*Manifest, error)
+	// done, if set, runs when the deploy is over, however it went.
+	done func()
+}
+
 // StartDeploy records a new deploy of name, creating the pail if this is its
 // first, and runs it in the background. Follow it with Log.
 func (s *Service) StartDeploy(name string, up Upload) (Deploy, error) {
@@ -65,21 +76,97 @@ func (s *Service) StartDeploy(name string, up Upload) (Deploy, error) {
 		e = s.entry(name)
 		e.rec = record{Name: name, CreatedAt: now}
 	}
-	d := Deploy{ID: newDeployID(), State: DeployBuilding, Source: up.Source, Label: up.Label, CreatedAt: now}
+	d, lg := s.begin(e, up.Source, up.Label)
+	s.mu.Unlock()
+
+	s.launch(e, d, lg, job{
+		url:  up.URL,
+		done: func() { os.Remove(up.Path) },
+		fill: func(ctx context.Context, e *entry, d *Deploy, lg *Log) (*Manifest, error) {
+			return s.unpack(ctx, e.name, d, up.Path, format, lg)
+		},
+	})
+	return d, nil
+}
+
+// Redeploy makes a new deploy from the files of the pail's latest good one
+// and puts it live, as a fresh deploy of the same source would be. url is
+// the pail's address, for the log.
+func (s *Service) Redeploy(name, url string) (Deploy, error) {
+	s.mu.Lock()
+	e := s.pails[name]
+	if e == nil {
+		s.mu.Unlock()
+		return Deploy{}, ErrNoPail
+	}
+	src := e.latestGood()
+	if src == nil {
+		s.mu.Unlock()
+		return Deploy{}, ErrNoSource
+	}
+	d, lg := s.begin(e, src.Source, "redeploy of "+src.ID)
+	s.mu.Unlock()
+
+	s.launch(e, d, lg, job{url: url, fill: s.recopy})
+	return d, nil
+}
+
+// begin adds a building deploy to the pail's history. The caller holds mu.
+func (s *Service) begin(e *entry, source, label string) (Deploy, *Log) {
+	d := Deploy{ID: newDeployID(), State: DeployBuilding, Source: source, Label: label, CreatedAt: time.Now().UTC()}
 	for e.hasDeploy(d.ID) {
 		d.ID = newDeployID()
 	}
 	lg := newLog()
 	e.deploys = append([]Deploy{d}, e.deploys...)
 	e.logs[d.ID] = lg
-	s.mu.Unlock()
+	return d, lg
+}
 
+func (s *Service) launch(e *entry, d Deploy, lg *Log, j job) {
 	s.deploys.Add(1)
 	go func() {
 		defer s.deploys.Done()
-		s.run(e, d, up, format, lg)
+		s.run(e, d, lg, j)
 	}()
-	return d, nil
+}
+
+// latestGood is the newest deploy that finished, or nil. The caller holds mu.
+func (e *entry) latestGood() *Deploy {
+	for i := range e.deploys {
+		if e.deploys[i].State == DeployOK {
+			d := e.deploys[i]
+			return &d
+		}
+	}
+	return nil
+}
+
+// recopy fills a deploy with a copy of the latest good deploy's files.
+func (s *Service) recopy(ctx context.Context, e *entry, d *Deploy, lg *Log) (*Manifest, error) {
+	s.mu.RLock()
+	src := e.latestGood()
+	s.mu.RUnlock()
+	if src == nil {
+		return nil, userErrorf("There's no finished deploy left to redeploy. Run pail up to send the files again.")
+	}
+	man := &Manifest{}
+	if err := s.readJSON(ctx, manifestKey(e.name, src.ID), man); err != nil {
+		return nil, err
+	}
+	from, to := deployFiles(e.name, src.ID), deployFiles(e.name, d.ID)
+	keys, err := s.store.List(ctx, from)
+	if err != nil {
+		return nil, err
+	}
+	lg.add("", "copying %d %s from %s", len(keys), plural(len(keys), "file"), src.ID)
+	for _, key := range keys {
+		if err := s.store.Copy(ctx, key, to+strings.TrimPrefix(key, from)); err != nil {
+			return nil, err
+		}
+	}
+	d.Files, d.Bytes = src.Files, src.Bytes
+	return man, nil
 }
 
 func (e *entry) hasDeploy(id string) bool {
@@ -91,23 +178,25 @@ func (e *entry) hasDeploy(id string) bool {
 	return false
 }
 
-// run takes one deploy from archive to live. Nothing a request can see
+// run takes one deploy from its files to live. Nothing a request can see
 // changes until cutover; any failure before it leaves the previous deploy
 // serving.
-func (s *Service) run(e *entry, d Deploy, up Upload, format archiveFormat, lg *Log) {
+func (s *Service) run(e *entry, d Deploy, lg *Log, j job) {
 	e.work.Lock()
 	defer e.work.Unlock()
-	defer os.Remove(up.Path)
+	if j.done != nil {
+		defer j.done()
+	}
 	ctx := context.Background()
 
 	lg.add("step", "→ %s (%s)", d.Label, d.ID)
-	err := s.build(ctx, e, &d, up, format, lg)
+	err := s.build(ctx, e, &d, lg, j)
 
 	now := time.Now().UTC()
 	d.FinishedAt = &now
 	if err == nil {
 		d.State = DeployOK
-		lg.add("ok", "✓ live at %s", up.URL)
+		lg.add("ok", "✓ live at %s", j.url)
 	} else {
 		d.State = DeployFailed
 		d.Error = err.Error()
@@ -164,24 +253,12 @@ func (s *Service) serving(e *entry) string {
 	return e.rec.Serving
 }
 
-func (s *Service) isRemoved(e *entry) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return e.removed
-}
-
-// build unpacks, checks and cuts over. It fills in d's file count and size.
-func (s *Service) build(ctx context.Context, e *entry, d *Deploy, up Upload, format archiveFormat, lg *Log) error {
-	if s.isRemoved(e) {
-		return errRemoved
-	}
+// build fills the deploy's folder, checks it and cuts over.
+func (s *Service) build(ctx context.Context, e *entry, d *Deploy, lg *Log, j job) error {
 	// The pail and the deploy exist in storage from here, so a restart
 	// mid-deploy finds them and settles the deploy as failed.
-	s.mu.RLock()
-	rec := e.rec
-	s.mu.RUnlock()
-	if rec.Serving == "" {
-		if err := s.writeJSON(ctx, stateKey(e.name), rec); err != nil {
+	if s.serving(e) == "" {
+		if err := s.updateRecord(ctx, e, nil, func(*record) {}); err != nil {
 			return err
 		}
 	}
@@ -189,7 +266,7 @@ func (s *Service) build(ctx context.Context, e *entry, d *Deploy, up Upload, for
 		return err
 	}
 
-	man, err := s.unpack(ctx, e.name, d, up.Path, format, lg)
+	man, err := j.fill(ctx, e, d, lg)
 	if err != nil {
 		return err
 	}
@@ -199,18 +276,7 @@ func (s *Service) build(ctx context.Context, e *entry, d *Deploy, up Upload, for
 
 	// Cutover: one write moves the live pointer.
 	lg.add("step", "→ swapping %s to %s", s.host(e.name), d.ID)
-	if s.isRemoved(e) {
-		return errRemoved
-	}
-	rec.Serving = d.ID
-	if err := s.writeJSON(ctx, stateKey(e.name), rec); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	e.rec.Serving = d.ID
-	e.manifest = man
-	s.mu.Unlock()
-	return nil
+	return s.updateRecord(ctx, e, man, func(r *record) { r.Serving, r.ServedAt = d.ID, time.Now().UTC() })
 }
 
 // plan is what the first pass over an archive decides.
@@ -337,13 +403,29 @@ func (s *Service) survey(archive string, format archiveFormat) (plan, error) {
 }
 
 // prune deletes deploys past the limit, oldest first, never the one being
-// served.
+// served. Good and failed deploys are counted apart, each against the limit:
+// a failed deploy holds no files and can't be rolled back to, so it never
+// takes the place of one that can.
 func (s *Service) prune(ctx context.Context, e *entry) {
 	s.mu.Lock()
+	good, failed := 0, 0
+	for _, d := range e.deploys {
+		switch d.State {
+		case DeployOK:
+			good++
+		case DeployFailed:
+			failed++
+		}
+	}
 	var gone []string
-	for i := len(e.deploys) - 1; i >= 0 && len(e.deploys) > s.maxDeploys; i-- {
+	for i := len(e.deploys) - 1; i >= 0; i-- {
 		d := e.deploys[i]
-		if d.ID == e.rec.Serving || d.State == DeployBuilding {
+		switch {
+		case d.State == DeployOK && good > s.maxDeploys && d.ID != e.rec.Serving:
+			good--
+		case d.State == DeployFailed && failed > s.maxDeploys:
+			failed--
+		default:
 			continue
 		}
 		gone = append(gone, d.ID)

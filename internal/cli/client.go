@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -39,6 +40,7 @@ type apiDeploy struct {
 	FinishedAt *time.Time `json:"finished_at"`
 	Error      string     `json:"error"`
 	URL        string     `json:"url"`
+	Serving    bool       `json:"serving"`
 }
 
 type apiLine struct {
@@ -76,7 +78,7 @@ func (a *app) newClient(t target) (*client, error) {
 
 // do sends one request and turns anything but a 2xx into an exitError with
 // the right exit code.
-func (c *client) do(method, path string, body io.Reader, size int64) (*http.Response, error) {
+func (c *client) do(method, path string, body io.Reader, size int64, contentType string) (*http.Response, error) {
 	req, err := http.NewRequest(method, c.target.URL+path, body)
 	if err != nil {
 		return nil, usagef("%s isn't a URL Pail can use: %v.", c.target.URL, err)
@@ -84,7 +86,7 @@ func (c *client) do(method, path string, body io.Reader, size int64) (*http.Resp
 	req.Header.Set("Authorization", "Bearer "+c.target.Token)
 	if body != nil {
 		req.ContentLength = size
-		req.Header.Set("Content-Type", "application/gzip")
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -118,10 +120,32 @@ func (c *client) do(method, path string, body io.Reader, size int64) (*http.Resp
 }
 
 func (c *client) get(path string, v any) error {
-	resp, err := c.do("GET", path, nil, 0)
+	resp, err := c.do("GET", path, nil, 0, "")
 	if err != nil {
 		return err
 	}
+	return c.decode(resp, v)
+}
+
+// post sends in as JSON, if there is one, and reads the answer into out.
+func (c *client) post(path string, in, out any) error {
+	var body io.Reader
+	var size int64
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body, size = bytes.NewReader(b), int64(len(b))
+	}
+	resp, err := c.do("POST", path, body, size, "application/json")
+	if err != nil {
+		return err
+	}
+	return c.decode(resp, out)
+}
+
+func (c *client) decode(resp *http.Response, v any) error {
 	defer resp.Body.Close()
 	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
 		return &exitError{code: ExitUnreachable, msg: fmt.Sprintf("%s answered, but not as Pail's API. Check the URL.", c.target.URL)}
@@ -137,7 +161,7 @@ func (c *client) streamLog(pail, deploy string, follow bool, line func(apiLine))
 	if !follow {
 		path += "?follow=false"
 	}
-	resp, err := c.do("GET", path, nil, 0)
+	resp, err := c.do("GET", path, nil, 0, "")
 	if err != nil {
 		return nil, err
 	}

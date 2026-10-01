@@ -27,6 +27,9 @@ func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, name string) 
 	case errors.Is(err, pails.ErrNoPail):
 		s.notFound(w, r, "No pail called "+name+".")
 		return
+	case errors.Is(err, pails.ErrOff):
+		s.plainPage(w, r, http.StatusServiceUnavailable, name+" is off. Start it with pail start "+name+".")
+		return
 	case errors.Is(err, pails.ErrNothingLive):
 		s.notFound(w, r, name+" has nothing live yet.")
 		return

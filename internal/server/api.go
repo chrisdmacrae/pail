@@ -24,7 +24,12 @@ func (s *Server) installation() http.Handler {
 	api.HandleFunc("GET /api/v1/pails", s.handleListPails)
 	api.HandleFunc("GET /api/v1/pails/{name}", s.handleGetPail)
 	api.HandleFunc("DELETE /api/v1/pails/{name}", s.handleRemovePail)
+	api.HandleFunc("GET /api/v1/pails/{name}/deploys", s.handleListDeploys)
 	api.HandleFunc("POST /api/v1/pails/{name}/deploys", s.handleCreateDeploy)
+	api.HandleFunc("POST /api/v1/pails/{name}/serve", s.handleServe)
+	api.HandleFunc("POST /api/v1/pails/{name}/redeploy", s.handleRedeploy)
+	api.HandleFunc("POST /api/v1/pails/{name}/stop", s.handleSetOff(true))
+	api.HandleFunc("POST /api/v1/pails/{name}/start", s.handleSetOff(false))
 	api.HandleFunc("GET /api/v1/pails/{name}/deploys/{id}/log", s.handleDeployLog)
 	api.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "No such API path: "+r.URL.Path+".")
@@ -72,6 +77,12 @@ type apiDeploy struct {
 	Pail string `json:"pail"`
 	// URL is the pail's address, where this deploy is or will be live.
 	URL string `json:"url"`
+	// Serving says this is the deploy requests are answered from.
+	Serving bool `json:"serving"`
+}
+
+func (s *Server) deployJSON(r *http.Request, name string, d pails.Deploy, serving string) apiDeploy {
+	return apiDeploy{Deploy: d, Pail: name, URL: origin(r, name+"."+s.cfg.BaseDomain), Serving: d.ID == serving}
 }
 
 func (s *Server) pailJSON(r *http.Request, p pails.Pail) apiPail {
@@ -113,6 +124,63 @@ func (s *Server) handleRemovePail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListDeploys lists the deploys a pail keeps, newest first.
+func (s *Server) handleListDeploys(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	deploys, serving, err := s.pails.Deploys(name)
+	if err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	list := []apiDeploy{}
+	for _, d := range deploys {
+		list = append(list, s.deployJSON(r, name, d, serving))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deploys": list, "serving": serving})
+}
+
+// handleServe points the pail at one of its kept deploys: {"deploy": id}.
+func (s *Server) handleServe(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Deploy string `json:"deploy"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || body.Deploy == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", `Say which deploy to serve: {"deploy": "<id>"}.`)
+		return
+	}
+	r.SetPathValue("id", body.Deploy)
+	p, err := s.pails.Serve(r.Context(), r.PathValue("name"), body.Deploy)
+	if err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.pailJSON(r, p))
+}
+
+// handleRedeploy starts a new deploy from the pail's latest good one. Like
+// an upload, it answers at once and the deploy's log says how it went.
+func (s *Server) handleRedeploy(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	d, err := s.pails.Redeploy(name, origin(r, name+"."+s.cfg.BaseDomain))
+	if err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, s.deployJSON(r, name, d, ""))
+}
+
+// handleSetOff stops a pail (off) or starts it again.
+func (s *Server) handleSetOff(off bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, err := s.pails.SetOff(r.Context(), r.PathValue("name"), off)
+		if err != nil {
+			s.writePailError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.pailJSON(r, p))
+	}
 }
 
 // handleCreateDeploy takes a .tar.gz or .zip as the request body and starts a
@@ -177,7 +245,7 @@ func (s *Server) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 		s.writePailError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, apiDeploy{Deploy: d, Pail: name, URL: url})
+	writeJSON(w, http.StatusAccepted, s.deployJSON(r, name, d, ""))
 }
 
 // handleDeployLog streams a deploy's log as server-sent events: a "line"
@@ -214,7 +282,8 @@ func (s *Server) handleDeployLog(w http.ResponseWriter, r *http.Request) {
 			// The pail may have been removed under us; say so with what's left.
 			d, _ := s.pails.Deploy(name, id)
 			d.ID = id
-			event("done", apiDeploy{Deploy: d, Pail: name, URL: origin(r, name+"."+s.cfg.BaseDomain)})
+			_, serving, _ := s.pails.Deploys(name)
+			event("done", s.deployJSON(r, name, d, serving))
 			flusher.Flush()
 			return
 		}
@@ -241,6 +310,12 @@ func (s *Server) writePailError(w http.ResponseWriter, r *http.Request, err erro
 		writeError(w, http.StatusBadRequest, "bad_name", "Pail names are lowercase letters, numbers and dashes, like my-site.")
 	case errors.Is(err, pails.ErrNotArchive):
 		writeError(w, http.StatusUnsupportedMediaType, "not_an_archive", "That isn't a .tar.gz or a .zip. Pack the folder and send it again.")
+	case errors.Is(err, pails.ErrBuilding):
+		writeError(w, http.StatusConflict, "building", name+" has a deploy running. Wait for it to finish, then try again.")
+	case errors.Is(err, pails.ErrNotServable):
+		writeError(w, http.StatusConflict, "not_servable", "Deploy "+r.PathValue("id")+" didn't finish, so there's nothing to serve. Pick one that did.")
+	case errors.Is(err, pails.ErrNoSource):
+		writeError(w, http.StatusConflict, "nothing_to_redeploy", name+" has no finished deploy to redeploy. Send the files again with pail up.")
 	case errors.Is(err, pails.ErrBusy):
 		writeError(w, http.StatusConflict, "being_removed", name+" is still being removed. Try again in a moment.")
 	default:

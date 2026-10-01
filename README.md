@@ -14,8 +14,8 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | --- | --- | --- |
 | 1 | API, versitygw storage and Host-header routing for static pails | done |
 | 2 | pail-cli with profiles: login, up, ls, logs | done |
-| 3 | Deploy history and rollback | next |
-| 4 | Web UI from the design system | |
+| 3 | Deploy history and rollback | done |
+| 4 | Web UI from the design system | next |
 | 5 | Custom hostnames and the DNS self-check | |
 | 6 | Git hosts: token first, then OAuth | |
 | 7 | Firecracker microVMs: the build VM, containers, and the KVM check | |
@@ -68,6 +68,12 @@ pail up ./dist --name blog
 | `pail up [dir] [--name <pail>]` | Packs `dir` (default `.`), deploys it, follows the log on stderr and prints the URL on stdout. |
 | `pail ls` | Every pail: name, status, URL, last deploy. |
 | `pail logs <pail> [deploy] [--follow]` | A deploy's log; the latest by default. |
+| `pail deploys <pail>` | The kept deploys, newest first, marking the one being served. |
+| `pail rollback <pail> <deploy>` | Serves an older deploy. Nothing is rebuilt. |
+| `pail redeploy <pail>` | Makes a new deploy from the latest good deploy's files and follows its log. |
+| `pail stop <pail>` · `pail start <pail>` | Turns a pail Off or back on. It keeps its deploys. |
+| `pail open <pail>` | Opens the pail's URL in a browser, and prints it. |
+| `pail rm <pail> [--yes]` | Removes a pail and all its deploys; asks first unless `--yes`. |
 
 Every command takes `--profile`/`-p`, `--json`, `--quiet`/`-q` and `--yes`/`-y`.
 
@@ -86,7 +92,7 @@ Everything is an environment variable on the server.
 | `PAIL_TOKEN` | none (required) | The installation's secret access token. Pail refuses to start without it. |
 | `PAIL_BASE_DOMAIN` | `pail.lan` | The domain every pail gets a name under. |
 | `PAIL_MAX_UPLOAD_SIZE` | `100MB` | Largest archive accepted; bigger ones get a 413. |
-| `PAIL_MAX_DEPLOYS` | `10` | Deploys kept per pail. |
+| `PAIL_MAX_DEPLOYS` | `10` | Good deploys kept per pail for rollback. Failed ones don't count. |
 | `PAIL_MAX_FUNCTION_MEMORY` | `1GB` | Reported by `/api/v1/info`; not enforced until functions exist. |
 | `PAIL_LISTEN` | `:80` | Address the listener binds. |
 | `PAIL_S3_ENDPOINT` | none (required) | versitygw's URL, e.g. `http://versitygw:7070`. |
@@ -105,6 +111,10 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 | `GET /api/v1/pails/{name}` | One pail. |
 | `POST /api/v1/pails/{name}/deploys` | Body is a `.tar.gz` or `.zip`. Creates the pail on its first deploy. Answers `202` with the deploy as soon as the archive arrives. `?source=cli\|upload`, `?file=<name>` for the history label. |
 | `GET /api/v1/pails/{name}/deploys/{id}/log` | Server-sent events: a `line` event per log line, then one `done` event with the finished deploy. `?follow=false` sends a building deploy's lines so far and stops. |
+| `GET /api/v1/pails/{name}/deploys` | The kept deploys, newest first, each with `serving: true\|false`. |
+| `POST /api/v1/pails/{name}/serve` | Body `{"deploy": "<id>"}`. Points the pail at a kept deploy that finished; answers with the pail. `409` while a deploy is running or if that deploy failed. |
+| `POST /api/v1/pails/{name}/redeploy` | Starts a deploy that copies the latest good one. Answers `202` like an upload; `409` if no deploy has finished. |
+| `POST /api/v1/pails/{name}/stop` · `/start` | Turns the pail Off or back on; answers with the pail. |
 | `DELETE /api/v1/pails/{name}` | Removes the pail and every deploy. |
 
 ## How a request is routed
@@ -112,6 +122,7 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 - `<name>.<base domain>` is that pail's site, served from its live deploy.
 - The base domain itself, an IP or `localhost` is the installation: the API.
 - Any other host gets a plain 404 naming the installation.
+- A pail that is Off answers every request with a plain 503 saying so.
 
 On a pail's site, `/` and `/dir/` serve `index.html`, `/dir` redirects to `/dir/`, `/about` serves `about.html` if there is one, and a miss serves the deploy's `404.html` or, with a `fallback` in `pail.json`, that file.
 
@@ -125,7 +136,9 @@ meta/<name>/deploys/<id>.log              its log
 meta/<name>/deploys/<id>.manifest.json    what it serves
 ```
 
-Going live is one write of `state.json`. If anything fails before it, the pointer never moves.
+Going live is one write of `state.json`. If anything fails before it, the pointer never moves. A rollback is the same write, aimed at an older deploy.
+
+Pail keeps the newest `PAIL_MAX_DEPLOYS` good deploys per pail for rollback and deletes the rest oldest first. The deploy being served is never deleted, however old. Failed deploys are counted apart and never take a good deploy's place: they hold no files, only a record and a log, and Pail keeps the newest `PAIL_MAX_DEPLOYS` of those too. A pail whose latest deploy failed shows Failed until a deploy succeeds or you roll back.
 
 ## Test
 

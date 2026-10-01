@@ -18,6 +18,8 @@ type Store interface {
 	// Open returns an object for streaming. A missing object may only
 	// surface as an error on the first Read or Seek.
 	Open(ctx context.Context, key string) (io.ReadSeekCloser, error)
+	// Copy duplicates one object inside the store.
+	Copy(ctx context.Context, src, dst string) error
 	// List returns every key under prefix.
 	List(ctx context.Context, prefix string) ([]string, error)
 	// DeletePrefix removes every object under prefix.

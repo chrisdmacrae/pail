@@ -16,7 +16,8 @@ type Config struct {
 	BaseDomain string
 	// MaxUploadSize is the largest archive accepted, in bytes (PAIL_MAX_UPLOAD_SIZE).
 	MaxUploadSize int64
-	// MaxDeploys is how many deploys are kept per pail (PAIL_MAX_DEPLOYS).
+	// MaxDeploys is how many good deploys are kept per pail for rollback
+	// (PAIL_MAX_DEPLOYS). Failed ones are counted apart, to the same limit.
 	MaxDeploys int
 	// MaxFunctionMemory is the most memory one function copy may request,
 	// in bytes (PAIL_MAX_FUNCTION_MEMORY).

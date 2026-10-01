@@ -77,6 +77,13 @@ func (s *S3) Open(ctx context.Context, key string) (io.ReadSeekCloser, error) {
 	return s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 }
 
+func (s *S3) Copy(ctx context.Context, src, dst string) error {
+	_, err := s.client.CopyObject(ctx,
+		minio.CopyDestOptions{Bucket: s.bucket, Object: dst},
+		minio.CopySrcOptions{Bucket: s.bucket, Object: src})
+	return err
+}
+
 func (s *S3) List(ctx context.Context, prefix string) ([]string, error) {
 	var keys []string
 	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {

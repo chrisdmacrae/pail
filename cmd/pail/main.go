@@ -4,6 +4,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 
 	"golang.org/x/term"
 
@@ -20,6 +22,7 @@ func main() {
 
 	os.Exit(cli.Run(cli.Env{
 		Args:    os.Args[1:],
+		Stdin:   os.Stdin,
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
 		Getenv:  os.Getenv,
@@ -27,6 +30,7 @@ func main() {
 		Cwd:     cwd,
 		TTY:     term.IsTerminal(stdin) && term.IsTerminal(int(os.Stderr.Fd())),
 		Version: version,
+		OpenURL: openURL,
 		ReadSecret: func(prompt string) (string, error) {
 			fmt.Fprint(os.Stderr, prompt)
 			b, err := term.ReadPassword(stdin)
@@ -34,4 +38,15 @@ func main() {
 			return string(b), err
 		},
 	}))
+}
+
+// openURL hands a URL to the system's default browser.
+func openURL(url string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url).Run()
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Run()
+	}
+	return exec.Command("xdg-open", url).Run()
 }

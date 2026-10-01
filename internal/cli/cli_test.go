@@ -44,6 +44,10 @@ type shell struct {
 	cwd  string
 	env  map[string]string
 	tty  bool
+	// typed is what the person types when asked a question.
+	typed string
+	// opened collects the URLs handed to the browser.
+	opened []string
 }
 
 func newShell(t *testing.T) *shell {
@@ -61,7 +65,9 @@ func (s *shell) run(args ...string) (code int, stdout, stderr string) {
 		Home:       s.home,
 		Cwd:        s.cwd,
 		TTY:        s.tty,
+		Stdin:      strings.NewReader(s.typed),
 		ReadSecret: func(string) (string, error) { return s.env["typed"], nil },
+		OpenURL:    func(u string) error { s.opened = append(s.opened, u); return nil },
 		Version:    "test",
 	})
 	return code, out.String(), errb.String()
@@ -305,4 +311,109 @@ func TestUsage(t *testing.T) {
 	want(t, s.fails(ExitUsage, "frobnicate"), "No command called frobnicate.")
 	want(t, s.fails(ExitUsage, "ls", "--nope"), "Unknown flag: --nope")
 	want(t, s.fails(ExitUsage, "ls", "--name", "x"), "--name only goes with pail up.")
+}
+
+func TestDeploysAndRollback(t *testing.T) {
+	ts := installation(t)
+	s := newShell(t)
+	s.env["PAIL_URL"], s.env["PAIL_TOKEN"] = ts.URL, token
+
+	s.write("dist/index.html", "v1")
+	s.ok("up", "./dist", "--name", "blog")
+	s.write("dist/index.html", "v2")
+	s.ok("up", "./dist", "--name", "blog")
+
+	ids := strings.Fields(s.ok("deploys", "blog", "--quiet"))
+	if len(ids) != 2 {
+		t.Fatalf("deploys --quiet: %q", ids)
+	}
+	newest, oldest := ids[0], ids[1]
+	table := strings.Split(s.ok("deploys", "blog"), "\n")
+	want(t, table[0], "DEPLOY", "WHEN", "WHAT")
+	want(t, table[1], newest, "just now", "pail up from 127.0.0.1", "Serving")
+	if strings.Contains(table[2], "Serving") {
+		t.Errorf("only one deploy is served:\n%s", strings.Join(table, "\n"))
+	}
+
+	want(t, s.ok("rollback", "blog", oldest), "blog is serving "+oldest+".", "http://blog.pail.lan")
+	if got := fetch(t, ts, "blog.pail.lan", "/"); got != "v1" {
+		t.Errorf("after rollback the site serves %q", got)
+	}
+	table = strings.Split(s.ok("deploys", "blog"), "\n")
+	want(t, table[2], oldest, "Serving")
+	want(t, s.ok("deploys", "blog", "--json"), `"serving": "`+oldest+`"`)
+	want(t, s.ok("ls"), oldest) // the list shows what's being served
+
+	want(t, s.fails(ExitNotFound, "rollback", "blog", "0000000"), "no deploy 0000000")
+	want(t, s.fails(ExitNotFound, "deploys", "nope"), "No pail called nope.")
+	want(t, s.fails(ExitUsage, "rollback", "blog"), "pail rollback takes a pail and a deploy")
+
+	s.write("bad/pail.json", `{"functions": {"api": {"src": "./api"}}}`)
+	s.fails(ExitDeployFailed, "up", "./bad", "--name", "blog")
+	failed := strings.Fields(s.ok("deploys", "blog", "-q"))[0]
+	want(t, s.ok("deploys", "blog"), "Failed")
+	want(t, s.fails(ExitUsage, "rollback", "blog", failed), "didn't finish")
+}
+
+func TestRedeployStopStartOpenRm(t *testing.T) {
+	ts := installation(t)
+	s := newShell(t)
+	s.env["PAIL_URL"], s.env["PAIL_TOKEN"] = ts.URL, token
+	port := ts.URL[strings.LastIndex(ts.URL, ":"):]
+	url := "http://blog.pail.lan" + port
+
+	s.write("dist/index.html", "v1")
+	s.ok("up", "./dist", "--name", "blog")
+	s.write("dist/index.html", "v2")
+	s.ok("up", "./dist", "--name", "blog")
+	ids := strings.Fields(s.ok("deploys", "blog", "-q"))
+	v2, v1 := ids[0], ids[1]
+
+	// Redeploy makes a new deploy of the latest good files, even after a
+	// rollback, and follows it like pail up does.
+	s.ok("rollback", "blog", v1)
+	code, stdout, stderr := s.run("redeploy", "blog")
+	if code != ExitOK || stdout != url+"\n" {
+		t.Fatalf("redeploy: exit %d, stdout %q\n%s", code, stdout, stderr)
+	}
+	want(t, stderr, "redeploy of "+v2, "copying 1 file from "+v2, "✓ live at "+url)
+	if got := fetch(t, ts, "blog.pail.lan", "/"); got != "v2" {
+		t.Errorf("after redeploy the site serves %q", got)
+	}
+	if ids := strings.Fields(s.ok("deploys", "blog", "-q")); len(ids) != 3 {
+		t.Errorf("redeploy should add a deploy: %v", ids)
+	}
+	want(t, s.fails(ExitNotFound, "redeploy", "nope"), "No pail called nope.")
+
+	// Stop keeps everything but answers nothing; start brings it back.
+	want(t, s.ok("stop", "blog"), "blog is off.", "pail start blog")
+	want(t, s.ok("ls"), "Off")
+	want(t, fetch(t, ts, "blog.pail.lan", "/"), "blog is off. Start it with pail start blog.")
+	want(t, s.ok("start", "blog"), "blog is back on.", url)
+	want(t, s.ok("ls"), "Live")
+	if got := fetch(t, ts, "blog.pail.lan", "/"); got != "v2" {
+		t.Errorf("after start the site serves %q", got)
+	}
+	want(t, s.fails(ExitNotFound, "stop", "nope"), "No pail called nope.")
+
+	if got := s.ok("open", "blog"); got != url+"\n" || len(s.opened) != 1 || s.opened[0] != url {
+		t.Errorf("open: stdout %q, opened %v", got, s.opened)
+	}
+
+	// rm asks first. With no terminal it needs --yes.
+	want(t, s.fails(ExitUsage, "rm", "blog"), "Add --yes.")
+	s.tty = true
+	s.typed = "n\n"
+	_, stdout, stderr = s.run("rm", "blog")
+	want(t, stderr, "Remove blog? "+url+" stops answering, and every deploy is deleted. This can't be undone.")
+	want(t, stdout, "Kept blog.")
+	want(t, s.ok("ls"), "blog")
+	s.typed = "y\n"
+	want(t, s.ok("rm", "blog"), "Removed blog.")
+	want(t, s.ok("ls"), "Nothing in the pail yet.")
+	s.tty = false
+
+	s.ok("up", "./dist", "--name", "blog")
+	want(t, s.ok("rm", "blog", "--yes"), "Removed blog.")
+	want(t, s.fails(ExitNotFound, "rm", "blog", "--yes"), "No pail called blog.")
 }

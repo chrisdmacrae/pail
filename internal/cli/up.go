@@ -65,15 +65,24 @@ func (a *app) up(args []string) error {
 		return err
 	}
 	defer f.Close()
-	resp, err := c.do("POST", "/api/v1/pails/"+name+"/deploys?source=cli", f, size)
+	resp, err := c.do("POST", "/api/v1/pails/"+name+"/deploys?source=cli", f, size, "application/gzip")
 	if err != nil {
 		return err
 	}
 	var started apiDeploy
 	err = json.NewDecoder(resp.Body).Decode(&started)
 	resp.Body.Close()
-	if err != nil || started.ID == "" {
-		return &exitError{code: ExitUnreachable, msg: fmt.Sprintf("%s took the upload but didn't say which deploy it became. Run pail logs %s.", c.target.URL, name)}
+	if err != nil {
+		started = apiDeploy{}
+	}
+	return a.follow(c, name, started)
+}
+
+// follow reads a deploy's log to the end, then prints the pail's URL, or
+// exits 1 if the deploy failed.
+func (a *app) follow(c *client, name string, started apiDeploy) error {
+	if started.ID == "" {
+		return &exitError{code: ExitUnreachable, msg: fmt.Sprintf("%s started a deploy but didn't say which. Run pail logs %s.", c.target.URL, name)}
 	}
 
 	// Progress goes to stderr, so stdout carries only the result.

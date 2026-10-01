@@ -15,6 +15,7 @@ const (
 	StatusLive     Status = "live"
 	StatusBuilding Status = "building"
 	StatusFailed   Status = "failed"
+	StatusOff      Status = "off"
 )
 
 type DeployState string
@@ -56,8 +57,12 @@ type Deploy struct {
 // record is a pail as stored. Serving is the live pointer: moving a pail to
 // another deploy is one write of this object.
 type record struct {
-	Name      string    `json:"name"`
-	Serving   string    `json:"serving"`
+	Name    string `json:"name"`
+	Serving string `json:"serving"`
+	// ServedAt is when the pointer last moved, by a deploy or a rollback.
+	ServedAt time.Time `json:"served_at"`
+	// Off says the pail was stopped: it keeps its deploys but answers nothing.
+	Off       bool      `json:"off,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -84,6 +89,10 @@ var (
 	ErrBadName     = errors.New("bad pail name")
 	ErrNotArchive  = errors.New("not a .tar.gz or .zip")
 	ErrBusy        = errors.New("pail is being removed")
+	ErrBuilding    = errors.New("pail has a deploy running")
+	ErrNotServable = errors.New("deploy didn't finish, so it can't be served")
+	ErrOff         = errors.New("pail is off")
+	ErrNoSource    = errors.New("pail has no finished deploy to redeploy")
 )
 
 // A pail name is one DNS label.

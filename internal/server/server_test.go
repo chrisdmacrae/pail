@@ -316,3 +316,127 @@ func TestRestartAndRemove(t *testing.T) {
 		t.Errorf("remove left objects: %v", keys)
 	}
 }
+
+func TestHistoryAndRollback(t *testing.T) {
+	store := storage.NewMemory()
+	f := newFixture(t, store)
+	serve := func(id string) *httptest.ResponseRecorder {
+		return f.api("POST", "/api/v1/pails/blog/serve", []byte(`{"deploy":"`+id+`"}`))
+	}
+	status := func() string { return f.api("GET", "/api/v1/pails/blog", nil).Body.String() }
+
+	v1, _ := f.deploy("blog", tarGz(t, map[string]string{"index.html": "v1"}))
+	v2, _ := f.deploy("blog", tarGz(t, map[string]string{"index.html": "v2"}))
+	bad, _ := f.deploy("blog", tarGz(t, map[string]string{"nope.txt": "x"}))
+
+	var history struct {
+		Serving string
+		Deploys []struct {
+			ID, State string
+			Serving   bool
+		}
+	}
+	json.Unmarshal(f.api("GET", "/api/v1/pails/blog/deploys", nil).Body.Bytes(), &history)
+	if len(history.Deploys) != 3 || history.Serving != v2.ID {
+		t.Fatalf("history: %+v", history)
+	}
+	for i, want := range []struct {
+		id, state string
+		serving   bool
+	}{{bad.ID, "failed", false}, {v2.ID, "ok", true}, {v1.ID, "ok", false}} {
+		if d := history.Deploys[i]; d.ID != want.id || d.State != want.state || d.Serving != want.serving {
+			t.Errorf("deploy %d: got %+v, want %+v", i, d, want)
+		}
+	}
+	if !strings.Contains(status(), `"status":"failed"`) {
+		t.Errorf("before rollback: %s", status())
+	}
+
+	// Rolling back is choosing what to serve: the pail is live again.
+	wantBody(t, serve(v1.ID), 200, `"serving":"`+v1.ID+`"`)
+	wantBody(t, f.site("blog.pail.lan", "/"), 200, "v1")
+	if !strings.Contains(status(), `"status":"live"`) {
+		t.Errorf("after rollback: %s", status())
+	}
+	wantBody(t, serve(v1.ID), 200, `"serving":"`+v1.ID+`"`) // again: nothing to do
+
+	wantBody(t, serve(bad.ID), http.StatusConflict, "didn't finish")
+	wantBody(t, serve("0000000"), http.StatusNotFound, "no deploy 0000000")
+	wantBody(t, f.api("POST", "/api/v1/pails/blog/serve", []byte(`{}`)), http.StatusBadRequest, "which deploy")
+	wantBody(t, f.api("POST", "/api/v1/pails/nope/serve", []byte(`{"deploy":"x"}`)), http.StatusNotFound, "No pail called nope")
+	wantBody(t, f.site("blog.pail.lan", "/"), 200, "v1")
+
+	// The pointer is in storage, so a restart serves the same deploy.
+	f = newFixture(t, store)
+	wantBody(t, f.site("blog.pail.lan", "/"), 200, "v1")
+
+	// Failed deploys don't count against the good ones: any number of them
+	// leaves every rollback target in place. They have a limit of their own.
+	for range 3 {
+		f.deploy("blog", tarGz(t, map[string]string{"nope.txt": "x"}))
+	}
+	json.Unmarshal(f.api("GET", "/api/v1/pails/blog/deploys", nil).Body.Bytes(), &history)
+	states := map[string]int{}
+	for _, d := range history.Deploys {
+		states[d.State]++
+	}
+	if states["ok"] != 2 || states["failed"] != 3 { // MaxDeploys is 3; four have failed
+		t.Errorf("kept deploys: %v", states)
+	}
+	wantBody(t, f.api("GET", "/api/v1/pails/blog/deploys/"+bad.ID+"/log", nil), http.StatusNotFound, "no deploy")
+	wantBody(t, f.site("blog.pail.lan", "/"), 200, "v1")
+	wantBody(t, serve(v2.ID), 200, `"serving":"`+v2.ID+`"`)
+	wantBody(t, f.site("blog.pail.lan", "/"), 200, "v2")
+
+	// Good deploys past the limit go oldest first, but never the one served.
+	serve(v1.ID)
+	for _, v := range []string{"v3", "v4", "v5"} {
+		f.deploy("blog", tarGz(t, map[string]string{"index.html": v}))
+	}
+	wantBody(t, f.site("blog.pail.lan", "/"), 200, "v5")
+	wantBody(t, serve(v1.ID), http.StatusNotFound, "no deploy")
+	wantBody(t, serve(v2.ID), http.StatusNotFound, "no deploy")
+}
+
+func TestStopStartAndRedeploy(t *testing.T) {
+	store := storage.NewMemory()
+	f := newFixture(t, store)
+	post := func(action string) *httptest.ResponseRecorder {
+		return f.api("POST", "/api/v1/pails/blog/"+action, nil)
+	}
+	f.deploy("blog", tarGz(t, map[string]string{"index.html": "v1", "pail.json": `{"name": "blog"}`}))
+
+	wantBody(t, post("stop"), 200, `"status":"off"`)
+	wantBody(t, f.site("blog.pail.lan", "/"), http.StatusServiceUnavailable, "blog is off.")
+	wantBody(t, post("stop"), 200, `"status":"off"`)
+
+	// A deploy to a stopped pail lands, but the pail stays off, across a
+	// restart too, until it is started.
+	d, _ := f.deploy("blog", tarGz(t, map[string]string{"index.html": "v2"}))
+	if d.State != "ok" {
+		t.Fatalf("deploy to a stopped pail: %+v", d)
+	}
+	f = newFixture(t, store)
+	wantBody(t, f.api("GET", "/api/v1/pails/blog", nil), 200, `"status":"off"`)
+	wantBody(t, f.site("blog.pail.lan", "/"), http.StatusServiceUnavailable, "blog is off.")
+	wantBody(t, post("start"), 200, `"status":"live"`)
+	wantBody(t, f.site("blog.pail.lan", "/"), 200, "v2")
+
+	// Redeploy copies the latest good deploy into a new one.
+	rec := post("redeploy")
+	wantBody(t, rec, http.StatusAccepted, `"label":"redeploy of `+d.ID+`"`)
+	f.svc.Wait()
+	var again deployResult
+	json.Unmarshal(rec.Body.Bytes(), &again)
+	wantBody(t, f.api("GET", "/api/v1/pails/blog", nil), 200, `"serving":"`+again.ID+`"`)
+	wantBody(t, f.site("blog.pail.lan", "/"), 200, "v2")
+	if keys, _ := store.List(context.Background(), "pails/blog/deploys/"+again.ID+"/"); len(keys) != 1 {
+		t.Errorf("redeploy copied %v", keys)
+	}
+
+	// Nothing good to copy: refused before a deploy is recorded.
+	f.deploy("empty", tarGz(t, map[string]string{"nope.txt": "x"}))
+	wantBody(t, f.api("POST", "/api/v1/pails/empty/redeploy", nil), http.StatusConflict, "no finished deploy")
+	wantBody(t, f.api("POST", "/api/v1/pails/nope/redeploy", nil), http.StatusNotFound, "No pail called nope")
+	wantBody(t, f.api("POST", "/api/v1/pails/nope/stop", nil), http.StatusNotFound, "No pail called nope")
+}

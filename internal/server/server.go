@@ -41,6 +41,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.notFound(w, r, "Nothing is hosted at "+host+".")
 }
 
+// notFound is the plain page for a host or path nobody claims.
+func (s *Server) notFound(w http.ResponseWriter, r *http.Request, what string) {
+	s.plainPage(w, r, http.StatusNotFound, what)
+}
+
 // isInstallation reports whether host addresses Pail itself rather than a
 // pail: the base domain, or the server reached by IP or as localhost.
 func (s *Server) isInstallation(host string) bool {
@@ -57,12 +62,12 @@ func hostname(hostport string) string {
 	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
-// notFound is the plain page for a host or path nobody claims. It names the
+// plainPage is what Pail says when it has no site to serve. It names the
 // installation, so it's never mistaken for someone else's site.
-func (s *Server) notFound(w http.ResponseWriter, r *http.Request, what string) {
+func (s *Server) plainPage(w http.ResponseWriter, r *http.Request, status int, what string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusNotFound)
+	w.WriteHeader(status)
 	if r.Method != http.MethodHead {
 		fmt.Fprintf(w, "%s\n\nThis is Pail on %s.\n", what, s.cfg.BaseDomain)
 	}

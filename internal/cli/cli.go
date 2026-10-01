@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,9 +36,13 @@ type Env struct {
 	Cwd    string
 	// TTY says a person is at the terminal. Without one, pail never prompts.
 	TTY bool
+	// Stdin is where an answer to a question is read from.
+	Stdin io.Reader
 	// ReadSecret prompts for a line without echoing it.
 	ReadSecret func(prompt string) (string, error)
-	Version    string
+	// OpenURL opens a URL in the person's browser.
+	OpenURL func(url string) error
+	Version string
 }
 
 type exitError struct {
@@ -73,6 +78,13 @@ const usage = `pail puts things you host at home on a Pail installation.
   pail ls                        Every pail: name, status, URL, last deploy
   pail logs <pail> [deploy]      A deploy's log; the latest by default
         --follow, -f             Keep reading until the deploy finishes
+  pail deploys <pail>            The kept deploys, marking the one being served
+  pail rollback <pail> <deploy>  Serve an older deploy
+  pail redeploy <pail>           Deploy the latest good deploy's files again
+  pail stop <pail>               Turn a pail off; it keeps its deploys
+  pail start <pail>              Turn it back on
+  pail open <pail>               Open the pail's URL in a browser
+  pail rm <pail>                 Remove a pail and all its deploys; asks first
 
 Flags for every command:
   -p, --profile <name>   Pick the installation
@@ -143,6 +155,18 @@ func (a *app) dispatch(args []string) error {
 		return a.ls(args)
 	case "logs":
 		return a.logs(args)
+	case "deploys":
+		return a.deploys(args)
+	case "rollback":
+		return a.rollback(args)
+	case "redeploy":
+		return a.redeploy(args)
+	case "stop", "start":
+		return a.stopStart(cmd, args)
+	case "open":
+		return a.open(args)
+	case "rm":
+		return a.rm(args)
 	}
 	return usagef("No command called %s. Run pail help.", cmd)
 }
@@ -342,7 +366,11 @@ func (a *app) ls(args []string) error {
 		}
 		last := "—"
 		if p.Deploy != nil {
-			last = p.Deploy.ID + " · " + ago(time.Since(p.UpdatedAt))
+			last = p.Deploy.ID + " · " + ago(time.Since(p.Deploy.CreatedAt))
+			// After a rollback or a failure, that isn't what's being served.
+			if p.Serving != "" && p.Serving != p.Deploy.ID {
+				last += " (serving " + p.Serving + ")"
+			}
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.Name, upperFirst(p.Status), p.URL, last)
 	}
@@ -373,6 +401,189 @@ func (a *app) logs(args []string) error {
 	}
 	_, err = c.streamLog(name, deploy, a.flags.follow, func(l apiLine) { a.printLine(a.env.Stdout, l) })
 	return err
+}
+
+// deploys lists the deploys a pail keeps, marking the one being served.
+func (a *app) deploys(args []string) error {
+	if len(args) != 1 {
+		return usagef("pail deploys takes a pail: pail deploys blog.")
+	}
+	c, err := a.connect()
+	if err != nil {
+		return err
+	}
+	var raw struct {
+		Deploys []json.RawMessage `json:"deploys"`
+		Serving string            `json:"serving"`
+	}
+	if err := c.get("/api/v1/pails/"+args[0]+"/deploys", &raw); err != nil {
+		return err
+	}
+	if a.flags.json {
+		return a.printJSON(raw)
+	}
+
+	w := tabwriter.NewWriter(a.env.Stdout, 0, 0, 2, ' ', 0)
+	if !a.flags.quiet {
+		fmt.Fprintln(w, "DEPLOY\tWHEN\tWHAT\t")
+	}
+	for _, r := range raw.Deploys {
+		var d apiDeploy
+		if err := json.Unmarshal(r, &d); err != nil {
+			return err
+		}
+		if a.flags.quiet {
+			fmt.Fprintln(w, d.ID)
+			continue
+		}
+		// One word says where a deploy stands; a good one that isn't being
+		// served needs none.
+		mark := ""
+		switch {
+		case d.Serving:
+			mark = "Serving"
+		case d.State != "ok":
+			mark = upperFirst(d.State)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", d.ID, ago(time.Since(d.CreatedAt)), d.Label, mark)
+	}
+	return w.Flush()
+}
+
+// rollback serves an older deploy. Nothing is rebuilt: the pail's pointer
+// moves to a deploy it already has.
+func (a *app) rollback(args []string) error {
+	if len(args) != 2 {
+		return usagef("pail rollback takes a pail and a deploy: pail rollback blog 9b1e07d. pail deploys blog lists them.")
+	}
+	c, err := a.connect()
+	if err != nil {
+		return err
+	}
+	name, deploy := args[0], args[1]
+	var raw json.RawMessage
+	if err := c.post("/api/v1/pails/"+name+"/serve", map[string]string{"deploy": deploy}, &raw); err != nil {
+		return err
+	}
+	var p apiPail
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return err
+	}
+	switch {
+	case a.flags.json:
+		return a.printJSON(raw)
+	case a.flags.quiet:
+		fmt.Fprintln(a.env.Stdout, p.URL)
+	default:
+		fmt.Fprintf(a.env.Stdout, "%s is serving %s.\n%s\n", p.Name, p.Serving, p.URL)
+	}
+	return nil
+}
+
+// onePail checks a command was given exactly one pail and connects.
+func (a *app) onePail(cmd string, args []string) (*client, string, error) {
+	if len(args) != 1 {
+		return nil, "", usagef("pail %s takes a pail: pail %s blog.", cmd, cmd)
+	}
+	c, err := a.connect()
+	return c, args[0], err
+}
+
+// redeploy deploys the pail's latest good files again and follows the log.
+func (a *app) redeploy(args []string) error {
+	c, name, err := a.onePail("redeploy", args)
+	if err != nil {
+		return err
+	}
+	var started apiDeploy
+	if err := c.post("/api/v1/pails/"+name+"/redeploy", nil, &started); err != nil {
+		return err
+	}
+	return a.follow(c, name, started)
+}
+
+// stopStart turns a pail off or back on.
+func (a *app) stopStart(cmd string, args []string) error {
+	c, name, err := a.onePail(cmd, args)
+	if err != nil {
+		return err
+	}
+	var raw json.RawMessage
+	if err := c.post("/api/v1/pails/"+name+"/"+cmd, nil, &raw); err != nil {
+		return err
+	}
+	var p apiPail
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return err
+	}
+	switch {
+	case a.flags.json:
+		return a.printJSON(raw)
+	case a.flags.quiet:
+		fmt.Fprintln(a.env.Stdout, p.URL)
+	case cmd == "stop":
+		fmt.Fprintf(a.env.Stdout, "%s is off. %s answers nothing until you run pail start %s.\n", p.Name, p.URL, p.Name)
+	default:
+		fmt.Fprintf(a.env.Stdout, "%s is back on.\n%s\n", p.Name, p.URL)
+	}
+	return nil
+}
+
+// open opens the pail's URL in a browser, and prints it either way.
+func (a *app) open(args []string) error {
+	c, name, err := a.onePail("open", args)
+	if err != nil {
+		return err
+	}
+	var p apiPail
+	if err := c.get("/api/v1/pails/"+name, &p); err != nil {
+		return err
+	}
+	fmt.Fprintln(a.env.Stdout, p.URL)
+	if a.env.OpenURL == nil {
+		return nil
+	}
+	if err := a.env.OpenURL(p.URL); err != nil {
+		fmt.Fprintf(a.env.Stderr, "pail: Couldn't open a browser (%v). The URL is above.\n", err)
+	}
+	return nil
+}
+
+// rm removes a pail and all its deploys. It asks first unless --yes.
+func (a *app) rm(args []string) error {
+	c, name, err := a.onePail("rm", args)
+	if err != nil {
+		return err
+	}
+	var p apiPail
+	if err := c.get("/api/v1/pails/"+name, &p); err != nil {
+		return err
+	}
+	if !a.flags.yes {
+		if !a.interactive() {
+			return usagef("pail rm asks before removing, and there's no terminal to ask on. Add --yes.")
+		}
+		fmt.Fprintf(a.env.Stderr, "Remove %s? %s stops answering, and every deploy is deleted. This can't be undone. [y/N] ", p.Name, p.URL)
+		answer, _ := bufio.NewReader(a.env.Stdin).ReadString('\n')
+		if answer = strings.ToLower(strings.TrimSpace(answer)); answer != "y" && answer != "yes" {
+			fmt.Fprintf(a.env.Stdout, "Kept %s.\n", p.Name)
+			return nil
+		}
+	}
+	resp, err := c.do("DELETE", "/api/v1/pails/"+name, nil, 0, "")
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	switch {
+	case a.flags.json:
+		return a.printJSON(map[string]string{"removed": p.Name})
+	case a.flags.quiet:
+		fmt.Fprintln(a.env.Stdout, p.Name)
+	default:
+		fmt.Fprintf(a.env.Stdout, "Removed %s.\n", p.Name)
+	}
+	return nil
 }
 
 // printLine prints one log line: as JSON with --json, else with its time.

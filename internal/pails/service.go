@@ -48,6 +48,8 @@ type entry struct {
 	name string
 	// work lets one deploy (or the removal) run at a time.
 	work sync.Mutex
+	// recMu lets one change to the stored record happen at a time.
+	recMu sync.Mutex
 
 	rec      record
 	deploys  []Deploy        // newest first
@@ -160,9 +162,17 @@ func (s *Service) view(e *entry) Pail {
 		if latest.FinishedAt != nil {
 			p.UpdatedAt = *latest.FinishedAt
 		}
-		if latest.State == DeployFailed {
+		// A failure stands until the pointer next moves: choosing an older
+		// deploy to serve after it makes the pail live again.
+		if latest.State == DeployFailed && p.UpdatedAt.After(e.rec.ServedAt) {
 			p.Status = StatusFailed
 		}
+	}
+	if e.rec.ServedAt.After(p.UpdatedAt) {
+		p.UpdatedAt = e.rec.ServedAt
+	}
+	if e.rec.Off {
+		p.Status = StatusOff
 	}
 	for _, d := range e.deploys {
 		if d.State == DeployBuilding {
@@ -170,6 +180,52 @@ func (s *Service) view(e *entry) Pail {
 		}
 	}
 	return p
+}
+
+// updateRecord changes a pail's stored record and, once that is written, the
+// copy requests read. man, when given, becomes the served manifest in the
+// same step as the pointer that names its deploy.
+func (s *Service) updateRecord(ctx context.Context, e *entry, man *Manifest, change func(*record)) error {
+	e.recMu.Lock()
+	defer e.recMu.Unlock()
+	s.mu.RLock()
+	rec, removed := e.rec, e.removed
+	s.mu.RUnlock()
+	if removed {
+		return errRemoved
+	}
+	change(&rec)
+	if err := s.writeJSON(ctx, stateKey(e.name), rec); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	e.rec = rec
+	if man != nil {
+		e.manifest = man
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// SetOff stops a pail or starts it again. A stopped pail keeps its deploys
+// and its pointer; its host just answers nothing until it is started.
+func (s *Service) SetOff(ctx context.Context, name string, off bool) (Pail, error) {
+	s.mu.RLock()
+	e := s.pails[name]
+	s.mu.RUnlock()
+	if e == nil {
+		return Pail{}, ErrNoPail
+	}
+	err := s.updateRecord(ctx, e, nil, func(r *record) { r.Off = off })
+	if errors.Is(err, errRemoved) {
+		return Pail{}, ErrNoPail
+	}
+	if err != nil {
+		return Pail{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.view(e), nil
 }
 
 // List returns every pail, most recently updated first.
@@ -214,6 +270,66 @@ func (s *Service) Deploy(name, id string) (Deploy, error) {
 	return Deploy{}, ErrNoDeploy
 }
 
+// Deploys returns the deploys a pail keeps, newest first, and the ID of the
+// one being served.
+func (s *Service) Deploys(name string) (deploys []Deploy, serving string, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e := s.pails[name]
+	if e == nil {
+		return nil, "", ErrNoPail
+	}
+	return append([]Deploy{}, e.deploys...), e.rec.Serving, nil
+}
+
+// Serve points a pail at one of its kept deploys: a rollback. It is the same
+// single pointer write a deploy ends with, and nothing is rebuilt.
+func (s *Service) Serve(ctx context.Context, name, id string) (Pail, error) {
+	s.mu.RLock()
+	e := s.pails[name]
+	s.mu.RUnlock()
+	if e == nil {
+		return Pail{}, ErrNoPail
+	}
+	// A deploy in flight would move the pointer again when it finishes.
+	if !e.work.TryLock() {
+		return Pail{}, ErrBuilding
+	}
+	defer e.work.Unlock()
+
+	s.mu.RLock()
+	rec, removed := e.rec, e.removed
+	var target *Deploy
+	for i := range e.deploys {
+		if e.deploys[i].ID == id {
+			target = &e.deploys[i]
+		}
+	}
+	s.mu.RUnlock()
+	switch {
+	case removed:
+		return Pail{}, ErrNoPail
+	case target == nil:
+		return Pail{}, ErrNoDeploy
+	case target.State != DeployOK:
+		return Pail{}, ErrNotServable
+	}
+
+	if rec.Serving != id {
+		man := &Manifest{}
+		if err := s.readJSON(ctx, manifestKey(name, id), man); err != nil {
+			return Pail{}, err
+		}
+		err := s.updateRecord(ctx, e, man, func(r *record) { r.Serving, r.ServedAt = id, time.Now().UTC() })
+		if err != nil {
+			return Pail{}, err
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.view(e), nil
+}
+
 // Log returns a deploy's log: the one being written if it is still building,
 // else the stored one.
 func (s *Service) Log(ctx context.Context, name, id string) (*Log, error) {
@@ -256,7 +372,12 @@ func (s *Service) Live(ctx context.Context, name string) (Live, error) {
 		return Live{}, ErrNoPail
 	}
 	live := Live{Pail: name, Deploy: e.rec.Serving, Manifest: e.manifest}
+	off := e.rec.Off
 	s.mu.RUnlock()
+
+	if off {
+		return live, ErrOff
+	}
 
 	if live.Deploy == "" {
 		return live, ErrNothingLive
@@ -296,6 +417,8 @@ func (s *Service) Remove(ctx context.Context, name string) error {
 
 	e.work.Lock()
 	defer e.work.Unlock()
+	e.recMu.Lock()
+	defer e.recMu.Unlock()
 	err := s.removeObjects(ctx, name)
 
 	s.mu.Lock()

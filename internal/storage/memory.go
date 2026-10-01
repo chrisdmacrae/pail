@@ -52,6 +52,17 @@ func (m *Memory) Open(ctx context.Context, key string) (io.ReadSeekCloser, error
 	return memObject{bytes.NewReader(b)}, nil
 }
 
+func (m *Memory) Copy(_ context.Context, src, dst string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.objects[src]
+	if !ok {
+		return ErrNotFound
+	}
+	m.objects[dst] = b
+	return nil
+}
+
 func (m *Memory) List(_ context.Context, prefix string) ([]string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
