@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { type Info, listPails, type Pail, redeploy } from '../api';
+import { useEffect, useState } from 'react';
+import { checkBaseDomain, type Info, listPails, type Pail, redeploy } from '../api';
 import { Button, Command, PailRow } from '../ds';
 import { message, usePoll } from '../hooks';
 import { navigate, pailPath } from '../router';
@@ -12,6 +12,15 @@ export function PailList({ host, info }: { host: string; info: Info | null }) {
     refresh,
   } = usePoll('pails', listPails, (list: Pail[]) => list.some((p) => p.status === 'building'));
   const [notice, setNotice] = useState('');
+  // Quiet unless names under the base domain don't find their way here.
+  const [dns, setDns] = useState('');
+
+  useEffect(() => {
+    checkBaseDomain().then(
+      (check) => setDns(check.points_here ? '' : (check.detail ?? '')),
+      () => {},
+    );
+  }, []);
 
   const live = pails?.filter((p) => p.status === 'live').length ?? 0;
   const count = pails?.length
@@ -42,6 +51,8 @@ export function PailList({ host, info }: { host: string; info: Info | null }) {
           {notice || error?.message}
         </div>
       )}
+
+      {dns && <div className="pl-note">{dns}</div>}
 
       {pails && pails.length > 0 && (
         <div className="pl-split">

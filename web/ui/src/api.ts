@@ -18,6 +18,8 @@ export interface Pail {
   name: string;
   host: string;
   url: string;
+  // hosts are its custom hostnames, beyond its own name.
+  hosts: string[];
   status: PailStatus;
   source: string;
   serving: string;
@@ -28,7 +30,18 @@ export interface Pail {
 export interface Info {
   version: string;
   base_domain: string;
+  // custom_hostnames says pails can take hostnames beyond the base domain.
+  custom_hostnames: boolean;
   limits: { max_upload_size: number; max_deploys: number };
+}
+
+// Host is one address a pail answers at, and whether its DNS reaches Pail.
+export interface Host {
+  host: string;
+  url: string;
+  default: boolean;
+  points_here: boolean;
+  detail?: string;
 }
 
 export interface LogLine {
@@ -128,6 +141,13 @@ export const redeploy = (name: string) => json<Deploy>('POST', `${pailPath(name)
 export const serveDeploy = (name: string, deploy: string) => json<Pail>('POST', `${pailPath(name)}/serve`, { deploy });
 export const stopPail = (name: string) => json<Pail>('POST', `${pailPath(name)}/stop`);
 export const startPail = (name: string) => json<Pail>('POST', `${pailPath(name)}/start`);
+export const listHosts = async (name: string) =>
+  (await json<{ hosts: Host[] }>('GET', `${pailPath(name)}/hosts`)).hosts;
+export const addHost = (name: string, host: string) => json<Host>('POST', `${pailPath(name)}/hosts`, { host });
+export const removeHost = async (name: string, host: string) =>
+  void (await call('DELETE', `${pailPath(name)}/hosts/${encodeURIComponent(host)}`));
+// checkBaseDomain asks Pail whether names under its base domain reach it.
+export const checkBaseDomain = () => json<{ points_here: boolean; detail?: string }>('GET', '/check');
 export const removePail = async (name: string) => void (await call('DELETE', pailPath(name)));
 
 // uploadDeploy sends an archive as a new deploy of name. It uses

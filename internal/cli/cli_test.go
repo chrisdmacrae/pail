@@ -25,13 +25,24 @@ const token = "test-token"
 // installation runs a real Pail server on in-memory storage.
 func installation(t *testing.T) *httptest.Server {
 	t.Helper()
+	return installationWithDNS(t, false)
+}
+
+func installationWithDNS(t *testing.T, dnsPointsHere bool) *httptest.Server {
+	t.Helper()
 	cfg := config.Config{Token: token, BaseDomain: "pail.lan", MaxUploadSize: 1 << 20, MaxDeploys: 10}
+	cfg.ACME = config.ACME{DNSProvider: "test", DNSToken: "test"}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := pails.New(pails.Options{Store: storage.NewMemory(), BaseDomain: cfg.BaseDomain, MaxDeploys: cfg.MaxDeploys, Logger: logger})
 	if err := svc.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(server.New(cfg, svc, nil, logger, "test"))
+	srv := server.New(cfg, svc, nil, logger, "test")
+	ts := httptest.NewServer(srv)
+	// Stands in for DNS that sends every hostname to this server.
+	if dnsPointsHere {
+		srv.DialProbesAt(ts.Listener.Addr().String())
+	}
 	t.Cleanup(func() { ts.Close(); svc.Wait() })
 	return ts
 }
@@ -416,4 +427,39 @@ func TestRedeployStopStartOpenRm(t *testing.T) {
 	s.ok("up", "./dist", "--name", "blog")
 	want(t, s.ok("rm", "blog", "--yes"), "Removed blog.")
 	want(t, s.fails(ExitNotFound, "rm", "blog", "--yes"), "No pail called blog.")
+}
+
+func TestHosts(t *testing.T) {
+	ts := installationWithDNS(t, true)
+	s := newShell(t)
+	s.env["PAIL_URL"], s.env["PAIL_TOKEN"] = ts.URL, token
+	s.write("dist/index.html", "v1")
+	s.ok("up", "./dist", "--name", "blog")
+
+	want(t, s.ok("hosts", "blog"), "blog.pail.lan", "Default", "Points here")
+	want(t, s.ok("hosts", "add", "blog", "Blog.Home.Example"), "Added blog.home.example to blog. It points here.")
+	if got := fetch(t, ts, "blog.home.example", "/"); got != "v1" {
+		t.Errorf("custom hostname serves %q", got)
+	}
+	lines := strings.Split(strings.TrimSpace(s.ok("hosts", "blog")), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[1], "blog.home.example") || strings.Contains(lines[1], "Default") {
+		t.Errorf("hosts:\n%s", strings.Join(lines, "\n"))
+	}
+	want(t, s.ok("hosts", "blog", "--json"), `"host": "blog.home.example"`, `"points_here": true`)
+
+	want(t, s.fails(ExitUsage, "hosts", "add", "blog", "other.pail.lan"), "Names under pail.lan belong to pails")
+	want(t, s.fails(ExitUsage, "hosts", "add", "blog", "nope"), "isn't a hostname")
+	want(t, s.fails(ExitNotFound, "hosts", "nope"), "No pail called nope.")
+	want(t, s.fails(ExitUsage, "hosts", "add", "blog"), "Try pail hosts blog")
+
+	want(t, s.ok("hosts", "rm", "blog", "blog.home.example"), "Removed blog.home.example from blog.")
+	want(t, s.fails(ExitNotFound, "hosts", "rm", "blog", "blog.home.example"), "blog has no hostname")
+
+	// Where DNS doesn't point at Pail, a hostname is added all the same and
+	// reported as not there yet.
+	elsewhere := installation(t)
+	s.env["PAIL_URL"] = elsewhere.URL
+	s.ok("up", "./dist", "--name", "blog")
+	want(t, s.ok("hosts", "add", "blog", "blog.pail-test.invalid"), "It isn't pointing here yet")
+	want(t, s.ok("hosts", "blog"), "Not pointing here yet")
 }

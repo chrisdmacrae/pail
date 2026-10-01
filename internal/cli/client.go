@@ -43,6 +43,14 @@ type apiDeploy struct {
 	Serving    bool       `json:"serving"`
 }
 
+type apiHost struct {
+	Host       string `json:"host"`
+	URL        string `json:"url"`
+	Default    bool   `json:"default"`
+	PointsHere bool   `json:"points_here"`
+	Detail     string `json:"detail"`
+}
+
 type apiLine struct {
 	Time  time.Time `json:"time"`
 	Text  string    `json:"text"`

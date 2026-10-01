@@ -16,8 +16,8 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | 2 | pail-cli with profiles: login, up, ls, logs | done |
 | 3 | Deploy history and rollback | done |
 | 4 | Web UI from the design system | done |
-| 5 | Custom hostnames and the DNS self-check | next |
-| 6 | Git hosts: token first, then OAuth | |
+| 5 | Custom hostnames and the DNS self-check | done |
+| 6 | Git hosts: token first, then OAuth | next |
 | 7 | Firecracker microVMs: the build VM, containers, and the KVM check | |
 | 8 | pail.json functions: base images, snapshots, sleep when idle, and routing | |
 
@@ -78,7 +78,7 @@ The base domain serves the UI: your pails, a pail's page, and New pail. It is a 
 - **A pail:** its deploys and their logs (live while building), Upload a deploy (a `.zip` or a folder), Serve this one, Redeploy, Stop or Start, and Remove.
 - **New pail:** the pail-cli commands, or Upload: drop a folder or a `.zip`. A folder is packed into a `.tar.gz` in the browser.
 
-Not in the UI yet: the git host tiles (step 6), Add a hostname (step 5), the functions panel (step 8), and real install instructions for pail-cli.
+Not in the UI yet: the git host tiles (step 6), the functions panel (step 8), and real install instructions for pail-cli.
 
 It's built from `web/design-system/` as published: the components come from its `bundle.js`, and nothing in that folder is edited. Day or Night follows the device.
 
@@ -95,6 +95,7 @@ It's built from `web/design-system/` as published: the components come from its 
 | `pail rollback <pail> <deploy>` | Serves an older deploy. Nothing is rebuilt. |
 | `pail redeploy <pail>` | Makes a new deploy from the latest good deploy's files and follows its log. |
 | `pail stop <pail>` · `pail start <pail>` | Turns a pail Off or back on. It keeps its deploys. |
+| `pail hosts <pail>` · `pail hosts add <pail> <hostname>` · `pail hosts rm <pail> <hostname>` | Lists, adds or removes custom hostnames, and says whether each points at the installation yet. |
 | `pail open <pail>` | Opens the pail's URL in a browser, and prints it. |
 | `pail rm <pail> [--yes]` | Removes a pail and all its deploys; asks first unless `--yes`. |
 
@@ -117,6 +118,7 @@ Everything is an environment variable on the server.
 | `PAIL_MAX_UPLOAD_SIZE` | `100MB` | Largest archive accepted; bigger ones get a 413. |
 | `PAIL_MAX_DEPLOYS` | `10` | Good deploys kept per pail for rollback. Failed ones don't count. |
 | `PAIL_MAX_FUNCTION_MEMORY` | `1GB` | Reported by `/api/v1/info`; not enforced until functions exist. |
+| `PAIL_ACME_DNS_PROVIDER` · `PAIL_ACME_DNS_TOKEN` | unset | Set both to allow custom hostnames. Pail doesn't issue certificates yet, so today this is all they do. |
 | `PAIL_LISTEN` | `:80` | Address the listener binds. |
 | `PAIL_S3_ENDPOINT` | none (required) | versitygw's URL, e.g. `http://versitygw:7070`. |
 | `PAIL_S3_ACCESS_KEY` · `PAIL_S3_SECRET_KEY` | none (required) | versitygw credentials. |
@@ -138,16 +140,30 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 | `POST /api/v1/pails/{name}/serve` | Body `{"deploy": "<id>"}`. Points the pail at a kept deploy that finished; answers with the pail. `409` while a deploy is running or if that deploy failed. |
 | `POST /api/v1/pails/{name}/redeploy` | Starts a deploy that copies the latest good one. Answers `202` like an upload; `409` if no deploy has finished. |
 | `POST /api/v1/pails/{name}/stop` · `/start` | Turns the pail Off or back on; answers with the pail. |
+| `GET /api/v1/pails/{name}/hosts` | The pail's addresses, its own first, each with `points_here` from a fresh DNS check. |
+| `POST /api/v1/pails/{name}/hosts` | Body `{"host": "recipes.home.example"}`. Adds a custom hostname and checks it. `409` unless Let's Encrypt mode is on, or if another pail has it. |
+| `DELETE /api/v1/pails/{name}/hosts/{host}` | Removes a custom hostname. |
+| `GET /api/v1/check` | The DNS self-check for the base domain: do names under it reach this Pail? |
 | `DELETE /api/v1/pails/{name}` | Removes the pail and every deploy. |
 
 ## How a request is routed
 
-- `<name>.<base domain>` is that pail's site, served from its live deploy.
+- `<name>.<base domain>` is that pail's site, served from its live deploy. So is any custom hostname added to the pail.
 - The base domain itself, an IP or `localhost` is the installation: the API under `/api/v1`, the web UI everywhere else.
 - Any other host gets a plain 404 naming the installation.
 - A pail that is Off answers every request with a plain 503 saying so.
 
 On a pail's site, `/` and `/dir/` serve `index.html`, `/dir` redirects to `/dir/`, `/about` serves `about.html` if there is one, and a miss serves the deploy's `404.html` or, with a `fallback` in `pail.json`, that file.
+
+## Hostnames and the DNS check
+
+Pail routes by the Host header, so every pail name and custom hostname has to resolve to this server. Pail checks that by asking for a one-time path, `/.well-known/pail/<nonce>`, at the hostname and seeing whether the request comes back to itself. It never needs to know its own outside address, so the check works the same behind Docker port mapping, in an LXC or in a VM.
+
+- **On start**, Pail checks a random name under the base domain and logs whether it arrived.
+- **In the UI**, Your pails shows a note when names under the base domain don't reach Pail, and a pail's Addresses show "Points here" or "Not pointing here yet" for each hostname.
+- **`pail hosts`** reports the same.
+
+A hostname is added whether or not its DNS is ready; it starts answering as soon as it points here. Custom hostnames are refused unless `PAIL_ACME_DNS_PROVIDER` and `PAIL_ACME_DNS_TOKEN` are both set, because the handoff ties them to Let's Encrypt mode. TLS itself isn't built yet.
 
 ## Storage layout
 

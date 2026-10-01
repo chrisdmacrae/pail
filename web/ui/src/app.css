@@ -326,3 +326,18 @@ body,
 .pl-facts dd {
   margin: 0;
 }
+
+/* A long hostname keeps a line to itself; its status and Remove sit below. */
+.pl-addr {
+  flex-wrap: wrap;
+  row-gap: 2px;
+  padding: 6px 0;
+}
+.pl-addr .pl-url {
+  flex: 1 1 170px;
+  min-width: 0;
+  font-size: 13px;
+}
+.pl-addr .pa-btn {
+  margin-left: auto;
+}

@@ -83,6 +83,9 @@ const usage = `pail puts things you host at home on a Pail installation.
   pail redeploy <pail>           Deploy the latest good deploy's files again
   pail stop <pail>               Turn a pail off; it keeps its deploys
   pail start <pail>              Turn it back on
+  pail hosts <pail>              A pail's hostnames, and whether each points here
+  pail hosts add <pail> <host>   Add a custom hostname
+  pail hosts rm <pail> <host>    Remove one
   pail open <pail>               Open the pail's URL in a browser
   pail rm <pail>                 Remove a pail and all its deploys; asks first
 
@@ -163,6 +166,8 @@ func (a *app) dispatch(args []string) error {
 		return a.redeploy(args)
 	case "stop", "start":
 		return a.stopStart(cmd, args)
+	case "hosts":
+		return a.hosts(args)
 	case "open":
 		return a.open(args)
 	case "rm":
@@ -527,6 +532,92 @@ func (a *app) stopStart(cmd string, args []string) error {
 		fmt.Fprintf(a.env.Stdout, "%s is back on.\n%s\n", p.Name, p.URL)
 	}
 	return nil
+}
+
+// pointing says in a word or three whether a hostname's traffic gets here.
+func pointing(h apiHost) string {
+	if h.PointsHere {
+		return "Points here"
+	}
+	return "Not pointing here yet"
+}
+
+// hosts lists, adds or removes a pail's custom hostnames, and reports
+// whether each one resolves to the installation yet.
+func (a *app) hosts(args []string) error {
+	const usage = "Try pail hosts blog, pail hosts add blog blog.home.example or pail hosts rm blog blog.home.example."
+	action := "list"
+	if len(args) == 3 && (args[0] == "add" || args[0] == "rm") {
+		action, args = args[0], args[1:]
+	} else if len(args) != 1 {
+		return usagef(usage)
+	}
+	c, err := a.connect()
+	if err != nil {
+		return err
+	}
+	path := "/api/v1/pails/" + args[0] + "/hosts"
+
+	switch action {
+	case "add":
+		var raw json.RawMessage
+		if err := c.post(path, map[string]string{"host": args[1]}, &raw); err != nil {
+			return err
+		}
+		var h apiHost
+		if err := json.Unmarshal(raw, &h); err != nil {
+			return err
+		}
+		switch {
+		case a.flags.json:
+			return a.printJSON(raw)
+		case a.flags.quiet:
+			fmt.Fprintln(a.env.Stdout, h.URL)
+		case h.PointsHere:
+			fmt.Fprintf(a.env.Stdout, "Added %s to %s. It points here.\n%s\n", h.Host, args[0], h.URL)
+		default:
+			fmt.Fprintf(a.env.Stdout, "Added %s to %s. It isn't pointing here yet: give it a CNAME to this Pail's base domain, or an A record to this server's address.\n", h.Host, args[0])
+		}
+		return nil
+
+	case "rm":
+		resp, err := c.do("DELETE", path+"/"+url.PathEscape(args[1]), nil, 0, "")
+		if err != nil {
+			return err
+		}
+		resp.Body.Close()
+		if !a.flags.quiet && !a.flags.json {
+			fmt.Fprintf(a.env.Stdout, "Removed %s from %s.\n", args[1], args[0])
+		}
+		return nil
+	}
+
+	var raw struct {
+		Hosts []json.RawMessage `json:"hosts"`
+	}
+	if err := c.get(path, &raw); err != nil {
+		return err
+	}
+	if a.flags.json {
+		return a.printJSON(raw)
+	}
+	w := tabwriter.NewWriter(a.env.Stdout, 0, 0, 2, ' ', 0)
+	for _, r := range raw.Hosts {
+		var h apiHost
+		if err := json.Unmarshal(r, &h); err != nil {
+			return err
+		}
+		if a.flags.quiet {
+			fmt.Fprintln(w, h.URL)
+			continue
+		}
+		kind := ""
+		if h.Default {
+			kind = "Default"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\n", h.Host, kind, pointing(h))
+	}
+	return w.Flush()
 }
 
 // open opens the pail's URL in a browser, and prints it either way.

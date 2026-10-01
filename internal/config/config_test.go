@@ -50,3 +50,18 @@ func TestSizes(t *testing.T) {
 		t.Errorf("FormatSize = %q", got)
 	}
 }
+
+func TestACMEGoesTogether(t *testing.T) {
+	vars := map[string]string{"PAIL_TOKEN": "t", "PAIL_ACME_DNS_PROVIDER": "cloudflare"}
+	for k, v := range s3 {
+		vars[k] = v
+	}
+	if _, err := Load(env(vars)); err == nil || !strings.Contains(err.Error(), "go together") {
+		t.Fatalf("one ACME variable alone: got %v", err)
+	}
+	vars["PAIL_ACME_DNS_TOKEN"] = "secret"
+	c, err := Load(env(vars))
+	if err != nil || !c.ACME.Enabled() {
+		t.Fatalf("both: %+v, %v", c.ACME, err)
+	}
+}

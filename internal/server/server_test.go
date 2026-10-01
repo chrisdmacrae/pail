@@ -39,6 +39,7 @@ type fixture struct {
 func newFixture(t *testing.T, store *storage.Memory) *fixture {
 	t.Helper()
 	cfg := config.Config{Token: token, BaseDomain: "pail.lan", MaxUploadSize: 1 << 20, MaxDeploys: 3, MaxFunctionMemory: 1 << 30}
+	cfg.ACME = config.ACME{DNSProvider: "test", DNSToken: "test"}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := pails.New(pails.Options{Store: store, BaseDomain: cfg.BaseDomain, MaxDeploys: cfg.MaxDeploys, MaxUnpackedSize: 10 << 20, Logger: logger})
 	if err := svc.Load(context.Background()); err != nil {
@@ -480,4 +481,76 @@ func TestWebUI(t *testing.T) {
 	f.srv = New(config.Config{Token: token, BaseDomain: "pail.lan"}, f.svc, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	wantBody(t, f.site("pail.lan", "/"), 200, "This build has no web UI")
 	wantBody(t, f.site("pail.lan", "/new"), 404, "This is Pail on pail.lan.")
+}
+
+func TestCustomHostnames(t *testing.T) {
+	store := storage.NewMemory()
+	f := newFixture(t, store)
+	// A real listener, and every name "resolving" to it, stands in for DNS
+	// that points at this Pail.
+	ts := httptest.NewServer(f.srv)
+	defer ts.Close()
+	f.srv.DialProbesAt(ts.Listener.Addr().String())
+	add := func(pail, host string) *httptest.ResponseRecorder {
+		return f.api("POST", "/api/v1/pails/"+pail+"/hosts", []byte(`{"host":"`+host+`"}`))
+	}
+
+	f.deploy("blog", tarGz(t, map[string]string{"index.html": "blog"}))
+	f.deploy("recipes", tarGz(t, map[string]string{"index.html": "recipes"}))
+	wantBody(t, f.site("blog.home.example", "/"), 404, "Nothing is hosted at blog.home.example.")
+
+	wantBody(t, add("blog", "blog.home.example"), http.StatusCreated, `"points_here":true`)
+	wantBody(t, f.site("blog.home.example", "/"), 200, "blog")
+	wantBody(t, f.site("blog.pail.lan", "/"), 200, "blog")
+	// Pasted with a scheme, a path and capitals, it's the same hostname.
+	wantBody(t, add("blog", "HTTPS://Blog.Home.Example/about"), http.StatusCreated, `"host":"blog.home.example"`)
+	wantBody(t, f.api("GET", "/api/v1/pails/blog", nil), 200, `"hosts":["blog.home.example"]`)
+
+	var listed struct {
+		Hosts []struct {
+			Host       string
+			Default    bool
+			PointsHere bool `json:"points_here"`
+		}
+	}
+	json.Unmarshal(f.api("GET", "/api/v1/pails/blog/hosts", nil).Body.Bytes(), &listed)
+	if len(listed.Hosts) != 2 || listed.Hosts[0].Host != "blog.pail.lan" || !listed.Hosts[0].Default ||
+		listed.Hosts[1].Host != "blog.home.example" || listed.Hosts[1].Default || !listed.Hosts[1].PointsHere {
+		t.Errorf("hosts: %+v", listed.Hosts)
+	}
+
+	wantBody(t, add("recipes", "blog.home.example"), http.StatusConflict, "already belongs to blog")
+	wantBody(t, add("recipes", "nope"), http.StatusBadRequest, "isn't a hostname")
+	wantBody(t, add("recipes", "10.0.0.5"), http.StatusBadRequest, "isn't a hostname")
+	wantBody(t, add("recipes", "other.pail.lan"), http.StatusBadRequest, "Names under pail.lan belong to pails")
+	wantBody(t, add("nope", "x.home.example"), http.StatusNotFound, "No pail called nope")
+
+	wantBody(t, f.api("GET", "/api/v1/check", nil), 200, `"points_here":true`)
+	// Only a check in flight is answered; the path is nothing otherwise.
+	wantBody(t, f.site("blog.pail.lan", "/.well-known/pail/guess"), 404, "")
+
+	// Hostnames are in storage: a restart still routes them.
+	f = newFixture(t, store)
+	wantBody(t, f.site("blog.home.example", "/"), 200, "blog")
+	// With no DNS pointing here, the same hostname is listed as not there yet.
+	wantBody(t, add("recipes", "recipes.pail-test.invalid"), http.StatusCreated, `"points_here":false`)
+	wantBody(t, f.api("GET", "/api/v1/check", nil), 200, "don't reach this Pail yet")
+
+	del := f.api("DELETE", "/api/v1/pails/blog/hosts/blog.home.example", nil)
+	if del.Code != http.StatusNoContent {
+		t.Fatalf("remove host: %d %s", del.Code, del.Body)
+	}
+	wantBody(t, f.site("blog.home.example", "/"), 404, "Nothing is hosted")
+	wantBody(t, f.api("DELETE", "/api/v1/pails/blog/hosts/blog.home.example", nil), http.StatusNotFound, "blog has no hostname")
+
+	// Removing a pail frees its hostnames for another.
+	f.api("DELETE", "/api/v1/pails/recipes", nil)
+	wantBody(t, f.site("recipes.pail-test.invalid", "/"), 404, "Nothing is hosted")
+	wantBody(t, add("blog", "recipes.pail-test.invalid"), http.StatusCreated, "recipes.pail-test.invalid")
+
+	// Without Let's Encrypt set up, hostnames are refused, and info says so.
+	plain := New(config.Config{Token: token, BaseDomain: "pail.lan"}, f.svc, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	f.srv = plain
+	wantBody(t, add("blog", "x.home.example"), http.StatusConflict, "PAIL_ACME_DNS_PROVIDER and PAIL_ACME_DNS_TOKEN")
+	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"custom_hostnames":false`)
 }

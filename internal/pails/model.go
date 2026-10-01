@@ -33,6 +33,8 @@ type Pail struct {
 	Status Status `json:"status"`
 	// Source is where the latest deploy came from: "cli" or "upload".
 	Source string `json:"source"`
+	// Hosts are the custom hostnames it also answers at.
+	Hosts []string `json:"hosts"`
 	// Serving is the ID of the deploy requests are answered from, or "".
 	Serving   string    `json:"serving"`
 	CreatedAt time.Time `json:"created_at"`
@@ -62,7 +64,9 @@ type record struct {
 	// ServedAt is when the pointer last moved, by a deploy or a rollback.
 	ServedAt time.Time `json:"served_at"`
 	// Off says the pail was stopped: it keeps its deploys but answers nothing.
-	Off       bool      `json:"off,omitempty"`
+	Off bool `json:"off,omitempty"`
+	// Hosts are the custom hostnames the pail answers at besides its own.
+	Hosts     []string  `json:"hosts,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

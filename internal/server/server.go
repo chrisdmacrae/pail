@@ -1,5 +1,5 @@
 // Package server is Pail's one HTTP listener. It routes by the Host header:
-// <name>.<base domain> is a pail's site; the base domain itself (or the
+// <name>.<base domain>, or a custom hostname, is a pail's site; the base domain itself (or the
 // server's bare address) is the installation, which answers the REST API and
 // serves the web UI.
 package server
@@ -22,24 +22,34 @@ type Server struct {
 	log     *slog.Logger
 	version string
 	ui      fs.FS
+	probe   *prober
 	install http.Handler
 }
 
 // New builds the listener's handler. ui is the built web UI's files, or nil
 // to run without one.
 func New(cfg config.Config, svc *pails.Service, ui fs.FS, logger *slog.Logger, version string) *Server {
-	s := &Server{cfg: cfg, pails: svc, ui: ui, log: logger, version: version}
+	s := &Server{cfg: cfg, pails: svc, ui: ui, probe: newProber(), log: logger, version: version}
 	s.install = s.installation()
 	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := hostname(r.Host)
+	// The self-check's path is Pail's own on every host, so a check can be
+	// answered before anything is known about the name it came in on.
+	if strings.HasPrefix(r.URL.Path, probePath) && s.probe.answer(w, r) {
+		return
+	}
 	if s.isInstallation(host) {
 		s.install.ServeHTTP(w, r)
 		return
 	}
 	if name, ok := strings.CutSuffix(host, "."+s.cfg.BaseDomain); ok && !strings.Contains(name, ".") {
+		s.serveSite(w, r, name)
+		return
+	}
+	if name, ok := s.pails.HostPail(host); ok {
 		s.serveSite(w, r, name)
 		return
 	}

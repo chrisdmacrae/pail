@@ -25,8 +25,20 @@ type Config struct {
 	// Listen is the address Pail's listener binds (PAIL_LISTEN).
 	Listen string
 
-	S3 S3
+	S3   S3
+	ACME ACME
 }
+
+// ACME turns on Let's Encrypt certificates by DNS-01, and with them custom
+// hostnames.
+type ACME struct {
+	DNSProvider string // PAIL_ACME_DNS_PROVIDER
+	DNSToken    string // PAIL_ACME_DNS_TOKEN
+	Email       string // PAIL_ACME_EMAIL, optional
+}
+
+// Enabled reports whether Let's Encrypt mode is on.
+func (a ACME) Enabled() bool { return a.DNSProvider != "" && a.DNSToken != "" }
 
 // S3 points Pail at versitygw (or any S3-compatible gateway).
 type S3 struct {
@@ -71,6 +83,15 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if c.MaxDeploys, err = strconv.Atoi(get("PAIL_MAX_DEPLOYS", "10")); err != nil || c.MaxDeploys < 1 {
 		return c, errors.New("PAIL_MAX_DEPLOYS: use a whole number, 1 or more")
+	}
+
+	c.ACME = ACME{
+		DNSProvider: get("PAIL_ACME_DNS_PROVIDER", ""),
+		DNSToken:    get("PAIL_ACME_DNS_TOKEN", ""),
+		Email:       get("PAIL_ACME_EMAIL", ""),
+	}
+	if (c.ACME.DNSProvider == "") != (c.ACME.DNSToken == "") {
+		return c, errors.New("PAIL_ACME_DNS_PROVIDER and PAIL_ACME_DNS_TOKEN go together. Set both, or neither")
 	}
 
 	if c.S3.Endpoint == "" || c.S3.AccessKey == "" || c.S3.SecretKey == "" {

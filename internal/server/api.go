@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/chrisdmacrae/pail/internal/config"
 	"github.com/chrisdmacrae/pail/internal/pails"
@@ -32,6 +33,10 @@ func (s *Server) installation() http.Handler {
 	api.HandleFunc("POST /api/v1/pails/{name}/stop", s.handleSetOff(true))
 	api.HandleFunc("POST /api/v1/pails/{name}/start", s.handleSetOff(false))
 	api.HandleFunc("GET /api/v1/pails/{name}/deploys/{id}/log", s.handleDeployLog)
+	api.HandleFunc("GET /api/v1/pails/{name}/hosts", s.handleListHosts)
+	api.HandleFunc("POST /api/v1/pails/{name}/hosts", s.handleAddHost)
+	api.HandleFunc("DELETE /api/v1/pails/{name}/hosts/{host}", s.handleRemoveHost)
+	api.HandleFunc("GET /api/v1/check", s.handleCheck)
 	api.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "No such API path: "+r.URL.Path+".")
 	})
@@ -88,6 +93,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":     s.version,
 		"base_domain": s.cfg.BaseDomain,
+		// Custom hostnames need Let's Encrypt mode: the internal CA can only
+		// sign for the base domain.
+		"custom_hostnames": s.cfg.ACME.Enabled(),
 		"limits": map[string]any{
 			"max_upload_size":     s.cfg.MaxUploadSize,
 			"max_deploys":         s.cfg.MaxDeploys,
@@ -152,6 +160,78 @@ func (s *Server) handleServe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.pailJSON(r, p))
+}
+
+// apiHost is one address a pail answers at, and whether it reaches Pail yet.
+type apiHost struct {
+	Check
+	// Default marks the pail's own name under the base domain.
+	Default bool   `json:"default"`
+	URL     string `json:"url"`
+}
+
+func (s *Server) checkHost(r *http.Request, host string, isDefault bool) apiHost {
+	return apiHost{Check: s.probe.check(r.Context(), probeBase(r, host), host), Default: isDefault, URL: origin(r, host)}
+}
+
+// handleListHosts lists the pail's addresses, its own first, checking each
+// one's DNS as it goes.
+func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
+	p, err := s.pails.Get(r.PathValue("name"))
+	if err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	names := append([]string{p.Host}, p.Hosts...)
+	hosts := make([]apiHost, len(names))
+	var wg sync.WaitGroup
+	for i, host := range names {
+		wg.Go(func() { hosts[i] = s.checkHost(r, host, i == 0) })
+	}
+	wg.Wait()
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts})
+}
+
+// handleAddHost adds a custom hostname: {"host": "recipes.home.example"}.
+func (s *Server) handleAddHost(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Host string `json:"host"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || strings.TrimSpace(body.Host) == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", `Say which hostname to add: {"host": "recipes.home.example"}.`)
+		return
+	}
+	if !s.cfg.ACME.Enabled() {
+		writeError(w, http.StatusConflict, "needs_acme", "Custom hostnames need a domain you own and a DNS token. Set PAIL_ACME_DNS_PROVIDER and PAIL_ACME_DNS_TOKEN on the server.")
+		return
+	}
+	r.SetPathValue("host", pails.CleanHost(body.Host))
+	host, err := s.pails.AddHost(r.Context(), r.PathValue("name"), body.Host)
+	if err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.checkHost(r, host, false))
+}
+
+func (s *Server) handleRemoveHost(w http.ResponseWriter, r *http.Request) {
+	if err := s.pails.RemoveHost(r.Context(), r.PathValue("name"), r.PathValue("host")); err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleCheck runs the DNS self-check for the base domain: does a name under
+// it reach this Pail, by the address the caller used?
+func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
+	host := "check-" + randomID()[:8] + "." + s.cfg.BaseDomain
+	c := s.probe.check(r.Context(), probeBase(r, host), host)
+	c.Host = "*." + s.cfg.BaseDomain
+	if !c.PointsHere {
+		c.Detail = "Names under " + s.cfg.BaseDomain + " don't reach this Pail yet, so pails won't open. Point *." + s.cfg.BaseDomain + " at this server on your DNS."
+	}
+	writeJSON(w, http.StatusOK, c)
 }
 
 // handleRedeploy starts a new deploy from the pail's latest good one. Like
@@ -296,6 +376,7 @@ func (s *Server) handleDeployLog(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writePailError(w http.ResponseWriter, r *http.Request, err error) {
 	name := r.PathValue("name")
+	var taken pails.ErrHostTaken
 	switch {
 	case errors.Is(err, pails.ErrNoPail):
 		writeError(w, http.StatusNotFound, "no_pail", "No pail called "+name+".")
@@ -309,6 +390,14 @@ func (s *Server) writePailError(w http.ResponseWriter, r *http.Request, err erro
 		writeError(w, http.StatusConflict, "building", name+" has a deploy running. Wait for it to finish, then try again.")
 	case errors.Is(err, pails.ErrNotServable):
 		writeError(w, http.StatusConflict, "not_servable", "Deploy "+r.PathValue("id")+" didn't finish, so there's nothing to serve. Pick one that did.")
+	case errors.Is(err, pails.ErrBadHost):
+		writeError(w, http.StatusBadRequest, "bad_host", "That isn't a hostname Pail can use. Try one like recipes.home.example.")
+	case errors.Is(err, pails.ErrHostReserved):
+		writeError(w, http.StatusBadRequest, "host_reserved", "Names under "+s.cfg.BaseDomain+" belong to pails. Add a hostname from another domain you own.")
+	case errors.As(err, &taken):
+		writeError(w, http.StatusConflict, "host_taken", taken.Host+" already belongs to "+taken.Pail+". Remove it there first.")
+	case errors.Is(err, pails.ErrNoHost):
+		writeError(w, http.StatusNotFound, "no_host", name+" has no hostname "+r.PathValue("host")+".")
 	case errors.Is(err, pails.ErrNoSource):
 		writeError(w, http.StatusConflict, "nothing_to_redeploy", name+" has no finished deploy to redeploy. Send the files again with pail up.")
 	case errors.Is(err, pails.ErrBusy):

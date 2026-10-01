@@ -12,6 +12,10 @@ PAIL_S3_ENDPOINT   ?= http://$(STORAGE_ADDR)
 PAIL_S3_ACCESS_KEY ?= pail
 PAIL_S3_SECRET_KEY ?= pail-dev-secret
 DEV_DATA           ?= data
+# Both empty: custom hostnames are refused, as on an installation without
+# Let's Encrypt. Set both to try hostnames out.
+PAIL_ACME_DNS_PROVIDER ?=
+PAIL_ACME_DNS_TOKEN    ?=
 
 VERSITYGW := $(shell go env GOPATH)/bin/versitygw
 GOFILES   := $(shell git ls-files '*.go')
@@ -90,6 +94,7 @@ dev-storage: ## Run versitygw on :7070, keeping its files in ./data
 dev-server: ui ## Build the web UI, then run pail-server on :8080 against dev-storage
 	PAIL_TOKEN=$(PAIL_TOKEN) PAIL_BASE_DOMAIN=$(PAIL_BASE_DOMAIN) PAIL_LISTEN=$(PAIL_LISTEN) \
 	PAIL_S3_ENDPOINT=$(PAIL_S3_ENDPOINT) PAIL_S3_ACCESS_KEY=$(PAIL_S3_ACCESS_KEY) PAIL_S3_SECRET_KEY=$(PAIL_S3_SECRET_KEY) \
+	PAIL_ACME_DNS_PROVIDER=$(PAIL_ACME_DNS_PROVIDER) PAIL_ACME_DNS_TOKEN=$(PAIL_ACME_DNS_TOKEN) \
 		go run ./cmd/pail-server
 
 dev-ui: ## Run the web UI with hot reload on :5173, using dev-server's API

@@ -18,6 +18,7 @@ import { message, usePoll } from '../hooks';
 import { navigate, routeState } from '../router';
 import { ago, clock } from '../time';
 import { UploadZone } from '../UploadZone';
+import { Addresses } from './Addresses';
 
 const SOURCES: Record<string, string> = { cli: 'pail-cli', upload: 'Upload' };
 
@@ -186,17 +187,7 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
         </section>
 
         <aside style={{ display: 'flex', flexDirection: 'column', gap: 32, minWidth: 0 }}>
-          <section className="pl-stack">
-            <h2 className="pl-h2">Addresses</h2>
-            <div className="pl-card" style={{ gap: 0, padding: '4px 16px' }}>
-              <div className="pl-addr">
-                <a className="pl-url" style={{ flexGrow: 1, minWidth: 0, fontSize: 13 }} href={pail.url}>
-                  {pail.host}
-                </a>
-                <span className="pl-tag pl-tag-plain">Default</span>
-              </div>
-            </div>
-          </section>
+          <Addresses pail={pail} info={info} />
 
           <dl className="pl-facts">
             <dt>Source</dt>
@@ -220,7 +211,8 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
         {confirming ? (
           <div className="pl-note pl-note-failed pl-stack" style={{ padding: 16 }}>
             <p style={{ margin: 0 }}>
-              <b>Remove {pail.name}?</b> {pail.host} stops answering, and every deploy is deleted. This can’t be undone.
+              <b>Remove {pail.name}?</b>
+              {` ${pail.host}${pail.hosts.length ? ' and its hostnames stop' : ' stops'} answering, and every deploy is deleted. This can’t be undone.`}
             </p>
             <div className="pl-actions">
               <Button variant="danger" disabled={busy} onClick={remove}>

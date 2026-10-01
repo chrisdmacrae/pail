@@ -40,6 +40,8 @@ type Service struct {
 	mu       sync.RWMutex
 	pails    map[string]*entry
 	removing map[string]bool
+	// hosts maps each custom hostname to the pail that answers at it.
+	hosts map[string]string
 }
 
 // entry is one pail in memory. Everything but name and work is guarded by
@@ -70,6 +72,7 @@ func New(o Options) *Service {
 		log:             o.Logger,
 		pails:           map[string]*entry{},
 		removing:        map[string]bool{},
+		hosts:           map[string]string{},
 	}
 }
 
@@ -103,6 +106,9 @@ func (s *Service) Load(ctx context.Context) error {
 			delete(s.pails, name)
 			s.removeObjects(ctx, name)
 			continue
+		}
+		for _, host := range e.rec.Hosts {
+			s.hosts[host] = name
 		}
 		sort.SliceStable(e.deploys, func(i, j int) bool { return e.deploys[i].CreatedAt.After(e.deploys[j].CreatedAt) })
 		for i := range e.deploys {
@@ -149,6 +155,7 @@ func (s *Service) view(e *entry) Pail {
 	p := Pail{
 		Name:      e.name,
 		Host:      s.host(e.name),
+		Hosts:     append([]string{}, e.rec.Hosts...),
 		Status:    StatusLive,
 		Serving:   e.rec.Serving,
 		CreatedAt: e.rec.CreatedAt,
@@ -411,6 +418,9 @@ func (s *Service) Remove(ctx context.Context, name string) error {
 		return ErrNoPail
 	}
 	delete(s.pails, name)
+	for _, host := range e.rec.Hosts {
+		delete(s.hosts, host)
+	}
 	e.removed = true
 	s.removing[name] = true
 	s.mu.Unlock()

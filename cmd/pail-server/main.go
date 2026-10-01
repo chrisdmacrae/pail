@@ -64,14 +64,24 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	handler := server.New(cfg, svc, webui.FS(), logger, version)
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(cfg, svc, webui.FS(), logger, version),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	logger.Info("pail is up", "listen", cfg.Listen, "base_domain", cfg.BaseDomain, "pails", len(svc.List()), "version", version)
+
+	// The DNS self-check: every pail's name has to find its way back here.
+	go func() {
+		if c := handler.CheckBaseDomain(ctx); c.PointsHere {
+			logger.Info("names under the base domain reach this pail", "names", c.Host)
+		} else {
+			logger.Warn("names under the base domain don't reach this pail yet; point them at this server on your DNS", "names", c.Host, "found", c.Detail)
+		}
+	}()
 
 	select {
 	case err := <-errc:
