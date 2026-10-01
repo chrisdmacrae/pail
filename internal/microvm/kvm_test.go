@@ -523,6 +523,160 @@ func TestContainerFromARegistry(t *testing.T) {
 	}
 }
 
+// A pail's containers are a group: each reaches the others by name, and
+// nothing outside the group reaches any of them.
+func TestMachinesInAGroupReachEachOtherByName(t *testing.T) {
+	r := testRunner(t)
+	built, err := r.PullContainer(context.Background(), ContainerPull{Ref: testImage})
+	if err != nil {
+		t.Fatalf("PullContainer: %v", err)
+	}
+	defer built.Cleanup()
+
+	dir := t.TempDir()
+	start := func(name, script string) (Machine, *lines) {
+		t.Helper()
+		said := &lines{}
+		m, err := r.Start(context.Background(), MachineSpec{
+			Dir: filepath.Join(dir, name), Rootfs: built.Image.Path,
+			Argv:     []string{"/bin/sh", "-c", script},
+			Hostname: name, Group: "pair.d1", Peers: []string{"store", "web"},
+			VCPUs: 1, MemMB: 128, Log: said.add,
+		})
+		if err != nil {
+			t.Fatalf("Start %s: %v", name, err)
+		}
+		return m, said
+	}
+	hears := func(said *lines) {
+		t.Helper()
+		deadline := time.Now().Add(90 * time.Second)
+		for !strings.Contains(said.String(), "web heard: kept by store") {
+			if time.Now().After(deadline) {
+				t.Fatalf("web never heard from store. It said:\n%s", said)
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	const ask = `until got=$(nc -w 3 store 6000 </dev/null) && [ -n "$got" ]; do sleep 1; done; echo "web heard: $got"; exec sleep 3600`
+
+	// web starts first, and waits for store by its name.
+	web, said := start("web", ask)
+	defer func() { web.Stop() }()
+	store, _ := start("store", `while true; do echo "kept by store" | nc -l -p 6000; done`)
+	defer store.Stop()
+	hears(said)
+
+	// A guest outside the group can't reach one inside it.
+	at, _, _ := net.SplitHostPort(store.Addr(6000))
+	_, out, _ := sh(t, r, true, fmt.Sprintf("nc -w 3 %s 6000 </dev/null && echo REACHED-A-GROUP; true", at))
+	if strings.Contains(out.String(), "REACHED-A-GROUP") {
+		t.Errorf("isolation is broken: a guest outside the group reached store")
+	}
+
+	// One that restarts comes back at its address, and finds the others.
+	before := web.Addr(80)
+	web.Stop()
+	web, said = start("web", ask)
+	if web.Addr(80) != before {
+		t.Errorf("web came back at %s, and was at %s", web.Addr(80), before)
+	}
+	hears(said)
+
+	// Nothing of the group outlasts it.
+	web.Stop()
+	store.Stop()
+	if out, _ := exec.Command("sh", "-c", "iptables -S PAIL-FWD | grep -c -- '-d 172.30.'").Output(); strings.TrimSpace(string(out)) != "0" {
+		t.Errorf("rules left behind: %s", out)
+	}
+	if out, _ := exec.Command("sh", "-c", "ip -o link show | grep -c pailvm").Output(); strings.TrimSpace(string(out)) != "0" {
+		t.Errorf("tap devices left behind: %s", out)
+	}
+}
+
+// A machine of a pail named in PAIL_ALLOW_LAN reaches the home network, and
+// still neither this machine's own services nor another guest.
+func TestAMachineAllowedTheLANReachesIt(t *testing.T) {
+	r := testRunner(t)
+	gateway := ""
+	if out, err := exec.Command("sh", "-c", "ip route show default | awk '{print $3; exit}'").Output(); err == nil {
+		gateway = strings.TrimSpace(string(out))
+	}
+	// Something on the home network that answers: the gateway's resolver.
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(gateway, "53"), 2*time.Second)
+	if err != nil {
+		t.Skipf("nothing on this machine's network to reach: %v", err)
+	}
+	c.Close()
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	built, err := r.PullContainer(context.Background(), ContainerPull{Ref: testImage})
+	if err != nil {
+		t.Fatalf("PullContainer: %v", err)
+	}
+	defer built.Cleanup()
+	other, err := r.Start(context.Background(), MachineSpec{
+		Dir: filepath.Join(t.TempDir(), "other"), Rootfs: built.Image.Path,
+		Argv: []string{"/bin/sh", "-c", `while true; do echo hello | nc -l -p 6000; done`}, Hostname: "other", VCPUs: 1, MemMB: 128,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer other.Stop()
+	at, _, _ := net.SplitHostPort(other.Addr(6000))
+
+	script := fmt.Sprintf(`
+gw=$(ip route | awk '/default/ {print $3}')
+nc -w 3 %[1]s 53 </dev/null && echo REACHED-HOME-NETWORK
+nc -w 3 $gw %[2]d </dev/null && echo REACHED-HOST-BY-TAP
+nc -w 3 %[3]s 6000 </dev/null && echo REACHED-ANOTHER-GUEST
+echo "network filesystems: $(grep -c nfs /proc/filesystems) nfs"
+echo DONE; exec sleep 3600`, gateway, port, at)
+	try := func(lan bool) string {
+		said := &lines{}
+		m, err := r.Start(context.Background(), MachineSpec{
+			Dir: filepath.Join(t.TempDir(), "run"), Rootfs: built.Image.Path,
+			Argv: []string{"/bin/sh", "-c", script}, Hostname: "nas-user", LAN: lan, VCPUs: 1, MemMB: 128, Log: said.add,
+		})
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer m.Stop()
+		deadline := time.Now().Add(90 * time.Second)
+		for !strings.Contains(said.String(), "DONE") {
+			if time.Now().After(deadline) {
+				t.Fatalf("the machine never finished. It said:\n%s", said)
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		return said.String()
+	}
+
+	got := try(true)
+	t.Logf("the machine saw:\n%s", got)
+	if !strings.Contains(got, "REACHED-HOME-NETWORK") {
+		t.Errorf("a machine allowed the home network didn't reach it:\n%s", got)
+	}
+	for _, bad := range []string{"REACHED-HOST-BY-TAP", "REACHED-ANOTHER-GUEST"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("isolation is broken: %s", bad)
+		}
+	}
+	// The same machine without the allowance reaches none of it.
+	if got := try(false); strings.Contains(got, "REACHED-") {
+		t.Errorf("a machine not allowed the home network reached something:\n%s", got)
+	}
+	other.Stop()
+	if out, _ := exec.Command("sh", "-c", "iptables -S PAIL-FWD | grep -c -- '-s 172.30.'").Output(); strings.TrimSpace(string(out)) != "0" {
+		t.Errorf("rules left behind: %s", out)
+	}
+}
+
 // A function: built, snapshotted, then restored as copies that each run a
 // program per call.
 func TestFunctionSnapshotsAndRuns(t *testing.T) {

@@ -38,6 +38,9 @@ func (s *Server) installation() http.Handler {
 	api.HandleFunc("GET /api/v1/pails/{name}/hosts", s.handleListHosts)
 	api.HandleFunc("POST /api/v1/pails/{name}/hosts", s.handleAddHost)
 	api.HandleFunc("DELETE /api/v1/pails/{name}/hosts/{host}", s.handleRemoveHost)
+	api.HandleFunc("GET /api/v1/pails/{name}/env", s.handleListEnv)
+	api.HandleFunc("PUT /api/v1/pails/{name}/env/{key}", s.handleSetEnv)
+	api.HandleFunc("DELETE /api/v1/pails/{name}/env/{key}", s.handleRemoveEnv)
 	api.HandleFunc("GET /api/v1/check", s.handleCheck)
 	api.HandleFunc("GET /api/v1/git", s.handleListGit)
 	api.HandleFunc("PUT /api/v1/git/{kind}", s.handleConnectGit)
@@ -117,6 +120,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		// builds says whether this Pail can build a project, or run server
 		// code, in microVMs; where it can't, reason says why.
 		"builds": s.buildsInfo(),
+		// secrets says whether a pail's variables can be kept as secrets:
+		// this Pail has a key to seal them with.
+		"secrets": s.pails.CanKeepSecrets(),
 		"limits": map[string]any{
 			"max_upload_size":      s.cfg.MaxUploadSize,
 			"max_deploys":          s.cfg.MaxDeploys,
@@ -281,6 +287,43 @@ func (s *Server) handleRemoveHost(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.certs != nil {
 		s.certs.RemoveHost(r.Context(), pails.CleanHost(r.PathValue("host")))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListEnv lists a pail's variables. A secret comes without its value.
+func (s *Server) handleListEnv(w http.ResponseWriter, r *http.Request) {
+	vars, err := s.pails.Variables(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"variables": vars})
+}
+
+// handleSetEnv sets one variable: {"value": "...", "secret": true}. The pail
+// needn't exist yet, so its first deploy can use it.
+func (s *Server) handleSetEnv(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Value  *string `json:"value"`
+		Secret bool    `json:"secret"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, pails.MaxVariableValue+(1<<16))).Decode(&body); err != nil || body.Value == nil {
+		writeError(w, http.StatusBadRequest, "bad_request", `Say what the variable holds: {"value": "…"}, with "secret": true to keep it sealed.`)
+		return
+	}
+	v, err := s.pails.SetVariable(r.Context(), r.PathValue("name"), r.PathValue("key"), *body.Value, body.Secret)
+	if err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (s *Server) handleRemoveEnv(w http.ResponseWriter, r *http.Request) {
+	if err := s.pails.RemoveVariable(r.Context(), r.PathValue("name"), r.PathValue("key")); err != nil {
+		s.writePailError(w, r, err)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -520,6 +563,14 @@ func (s *Server) writePailError(w http.ResponseWriter, r *http.Request, err erro
 		writeError(w, http.StatusConflict, "host_taken", taken.Host+" already belongs to "+taken.Pail+". Remove it there first.")
 	case errors.Is(err, pails.ErrNoHost):
 		writeError(w, http.StatusNotFound, "no_host", name+" has no hostname "+r.PathValue("host")+".")
+	case errors.Is(err, pails.ErrBadVariable):
+		writeError(w, http.StatusBadRequest, "bad_variable", "A variable's name is letters, numbers and underscores, and doesn't start with a number, like DATABASE_PASSWORD.")
+	case errors.Is(err, pails.ErrNoVariable):
+		writeError(w, http.StatusNotFound, "no_variable", name+" has no variable called "+r.PathValue("key")+".")
+	case errors.Is(err, pails.ErrValueTooLong):
+		writeError(w, http.StatusRequestEntityTooLarge, "value_too_long", "A variable holds up to 64KB.")
+	case errors.Is(err, pails.ErrNoSecretKey):
+		writeError(w, http.StatusConflict, "no_secret_key", "This Pail has no key to seal secrets with, so it can't keep one. Set PAIL_SECRETS_KEY on the server, or give Pail a data folder it can write, and restart it.")
 	case errors.Is(err, pails.ErrNoSource):
 		writeError(w, http.StatusConflict, "nothing_to_redeploy", name+" has no finished deploy to redeploy. Send the files again with pail up.")
 	case errors.Is(err, pails.ErrBusy):

@@ -62,6 +62,8 @@ Pail is configured entirely by environment variables. There is no settings scree
 | `PAIL_MAX_UPLOAD_SIZE` | `100MB` | The largest upload, or repo, Pail accepts. |
 | `PAIL_MAX_DEPLOYS` | `10` | How many good deploys each pail keeps to roll back to. |
 | `PAIL_MAX_CONTAINER_MEMORY` | `2GB` | The most memory one container may ask for. |
+| `PAIL_ALLOW_LAN` | unset | The pails whose containers may [reach your network](/deploying/containers/#reach-your-network), by name with commas between, like `media,backups`. |
+| `PAIL_SECRETS_KEY` | a key Pail makes, in `secrets.key` in its data folder | What pails’ [secrets](/deploying/variables/#how-a-secret-is-kept) are sealed with: a long random text. Back up whichever you use. |
 | `PAIL_DATA_DIR` | `/var/lib/pail` | Local disk for what builds and containers need, and where containers’ data is kept. |
 | `PAIL_RUNTIME` | `auto` | What builds, functions and containers run in: `firecracker` for virtual machines, `container` for Docker or Podman, or `auto` for virtual machines where the machine can run them and containers where it can’t. |
 | `PAIL_FIRECRACKER`, `PAIL_KERNEL` | `firecracker`, `<data dir>/vmlinux` | The Firecracker binary and the kernel its virtual machines boot. |

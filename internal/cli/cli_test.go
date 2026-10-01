@@ -73,7 +73,7 @@ func installationWith(t *testing.T, dnsPointsHere bool, builder microvm.Machines
 	cfg := config.Config{Token: token, BaseDomain: "pail.lan", MaxUploadSize: 1 << 20, MaxDeploys: 10}
 	cfg.ACME = config.ACME{DNSProvider: "test", DNSToken: "test"}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := pails.New(pails.Options{Store: storage.NewMemory(), BaseDomain: cfg.BaseDomain, MaxDeploys: cfg.MaxDeploys, Builder: builder, Logger: logger})
+	svc := pails.New(pails.Options{Store: storage.NewMemory(), BaseDomain: cfg.BaseDomain, MaxDeploys: cfg.MaxDeploys, Builder: builder, SecretKey: []byte("0123456789abcdef0123456789abcdef"), Logger: logger})
 	if err := svc.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -548,6 +548,41 @@ func TestRedeployStopStartOpenRm(t *testing.T) {
 	s.ok("up", "./dist", "--name", "blog")
 	want(t, s.ok("rm", "blog", "--yes"), "Removed blog.")
 	want(t, s.fails(ExitNotFound, "rm", "blog", "--yes"), "No pail called blog.")
+}
+
+func TestEnv(t *testing.T) {
+	ts := installation(t)
+	s := newShell(t)
+	s.env["PAIL_URL"], s.env["PAIL_TOKEN"] = ts.URL, token
+
+	// A pail's variables can be set before it exists.
+	want(t, s.ok("env", "shop"), "shop has no variables. Set one with: pail env set shop NAME=value")
+	want(t, s.ok("env", "set", "shop", "GREETING=hello there", "MODE=a=b"), "Set the variable GREETING on shop.", "Set the variable MODE on shop.", "pail redeploy shop")
+	want(t, s.ok("env", "set", "shop", "DB_PASSWORD=hunter2", "--secret"), "Set the secret DB_PASSWORD on shop.")
+
+	// A value left off the command line comes from stdin, or a prompt.
+	s.typed = "from a pipe\n"
+	s.ok("env", "set", "shop", "API_KEY", "--secret", "--quiet")
+	s.tty, s.env["typed"] = true, "typed in"
+	s.ok("env", "set", "shop", "PIN")
+	s.tty = false
+	want(t, s.fails(ExitUsage, "env", "set", "shop", "ONE", "TWO"), "Give ONE a value")
+
+	listed := s.ok("env", "shop")
+	want(t, listed, "API_KEY", "(secret)", "GREETING", "hello there", "MODE", "a=b", "PIN", "typed in")
+	if strings.Contains(listed, "hunter2") || strings.Contains(listed, "from a pipe") {
+		t.Errorf("a secret was shown:\n%s", listed)
+	}
+	want(t, s.ok("env", "shop", "--json"), `"name": "DB_PASSWORD"`, `"secret": true`)
+	if got := s.ok("env", "shop", "--quiet"); got != "API_KEY\nDB_PASSWORD\nGREETING\nMODE\nPIN\n" {
+		t.Errorf("--quiet: %q", got)
+	}
+
+	want(t, s.ok("env", "rm", "shop", "MODE", "PIN"), "Removed MODE from shop.", "Removed PIN from shop.")
+	want(t, s.fails(ExitNotFound, "env", "rm", "shop", "MODE"), "shop has no variable called MODE.")
+	want(t, s.fails(ExitUsage, "env", "set", "shop", "1BAD=x"), "A variable's name is letters, numbers and underscores")
+	want(t, s.fails(ExitUsage, "env"), "Try pail env blog")
+	want(t, s.fails(ExitUsage, "ls", "--secret"), "--secret only goes with pail env set.")
 }
 
 func TestHosts(t *testing.T) {

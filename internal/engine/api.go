@@ -180,6 +180,15 @@ func (a *api) create(ctx context.Context, name string, cfg containerConfig) (str
 	return made.ID, err
 }
 
+// connect puts a container on another of the engine's networks, where it
+// answers to alias.
+func (a *api) connect(ctx context.Context, network, id, alias string) error {
+	return a.call(ctx, "POST", "/networks/"+network+"/connect", nil, map[string]any{
+		"Container":      id,
+		"EndpointConfig": map[string]any{"Aliases": []string{alias}},
+	}, nil)
+}
+
 func (a *api) start(ctx context.Context, id string) error {
 	return a.call(ctx, "POST", "/containers/"+id+"/start", nil, nil, nil)
 }

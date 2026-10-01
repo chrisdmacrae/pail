@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -25,6 +26,13 @@ type Config struct {
 	// MaxContainerMemory is the most memory one container may request, in
 	// bytes (PAIL_MAX_CONTAINER_MEMORY).
 	MaxContainerMemory int64
+	// AllowLAN names the pails whose containers may reach the home network
+	// (PAIL_ALLOW_LAN, comma-separated). Every other pail's can't.
+	AllowLAN []string
+	// SecretsKey is what pails' secrets are sealed with (PAIL_SECRETS_KEY):
+	// any text, long and random for preference. Unset, Pail makes a key of
+	// its own and keeps it in DataDir.
+	SecretsKey string
 	// Listen is the address the plain-HTTP listener binds (PAIL_LISTEN).
 	Listen string
 	// ListenTLS is the address the HTTPS listener binds (PAIL_LISTEN_TLS).
@@ -109,6 +117,9 @@ type S3 struct {
 }
 
 // Load builds a Config from getenv (normally os.Getenv).
+// pailNameRE is what a pail's name looks like, as the pails package has it.
+var pailNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
 func Load(getenv func(string) string) (Config, error) {
 	get := func(key, def string) string {
 		if v := strings.TrimSpace(getenv(key)); v != "" {
@@ -123,6 +134,7 @@ func Load(getenv func(string) string) (Config, error) {
 		Listen:     get("PAIL_LISTEN", ":80"),
 		ListenTLS:  get("PAIL_LISTEN_TLS", ":443"),
 		DataDir:    get("PAIL_DATA_DIR", "/var/lib/pail"),
+		SecretsKey: strings.TrimSpace(getenv("PAIL_SECRETS_KEY")),
 		S3: S3{
 			Endpoint:  get("PAIL_S3_ENDPOINT", ""),
 			AccessKey: get("PAIL_S3_ACCESS_KEY", ""),
@@ -146,6 +158,15 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if c.MaxContainerMemory, err = ParseSize(get("PAIL_MAX_CONTAINER_MEMORY", "2GB")); err != nil {
 		return c, fmt.Errorf("PAIL_MAX_CONTAINER_MEMORY: %w", err)
+	}
+	for _, name := range strings.Split(getenv("PAIL_ALLOW_LAN"), ",") {
+		if name = strings.ToLower(strings.TrimSpace(name)); name == "" {
+			continue
+		}
+		if !pailNameRE.MatchString(name) {
+			return c, fmt.Errorf("PAIL_ALLOW_LAN: list pails by name, with commas between them, like media,backups. Got %q", name)
+		}
+		c.AllowLAN = append(c.AllowLAN, name)
 	}
 	if c.MaxDeploys, err = strconv.Atoi(get("PAIL_MAX_DEPLOYS", "10")); err != nil || c.MaxDeploys < 1 {
 		return c, errors.New("PAIL_MAX_DEPLOYS: use a whole number, 1 or more")

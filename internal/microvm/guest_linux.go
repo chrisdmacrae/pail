@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -59,6 +60,9 @@ type guestJobSpec struct {
 	User     string `json:"user,omitempty"`
 	Hostname string `json:"hostname,omitempty"`
 	Data     string `json:"data,omitempty"`
+	// Hosts are the machines this one may reach, and itself: each one's
+	// address by its name.
+	Hosts map[string]string `json:"hosts,omitempty"`
 }
 
 // IsGuestInit reports whether this process is PID 1 inside a microVM: Pail's
@@ -197,6 +201,9 @@ func serviceMain() {
 	if job.Hostname != "" {
 		syscall.Sethostname([]byte(job.Hostname))
 	}
+	if err := nameHosts(job.Hosts); err != nil {
+		panic(fmt.Sprintf("name the pail's other containers: %v", err))
+	}
 
 	who, err := resolveUser(job.User)
 	if err != nil {
@@ -291,6 +298,33 @@ type who struct {
 	uid, gid uint32
 	groups   []uint32
 	home     string
+}
+
+// nameHosts adds the machines this one may reach to /etc/hosts, so each
+// answers to its name.
+func nameHosts(hosts map[string]string) error {
+	if len(hosts) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(hosts))
+	for name := range hosts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	// The file may not end in a newline, so start with one.
+	lines := "\n"
+	for _, name := range names {
+		lines += hosts[name] + " " + name + "\n"
+	}
+	f, err := os.OpenFile("/etc/hosts", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(lines); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // resolveUser reads an image's USER: "", a name, an ID, or either with a

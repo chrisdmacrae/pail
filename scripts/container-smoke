@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs Pail in a container, as deploy/container/pail-container.sh sets it up,
 # and deploys one of everything to it: a folder, a site that needs a build, a
-# function of each kind, a Dockerfile, and an image from a registry. It is the test of the
+# function of each kind, a Dockerfile, an image from a registry, and two
+# containers that reach each other. It is the test of the
 # container runtime against a real engine.
 #
 # It builds the image from this checkout, and leaves nothing behind.
@@ -141,10 +142,104 @@ mkdir "$work/image"
 echo '{ "containers": { "web": { "image": "nginx:1.27-alpine", "port": 80, "memory": "128MB" } } }' >"$work/image/pail.json"
 up image && answers image / "Welcome to nginx"
 
+step "A variable and a secret, filled into pail.json"
+mkdir "$work/vars"
+cp "$work/app/Dockerfile" "$work/vars/Dockerfile"
+cat >"$work/vars/server.py" <<'PY'
+import http.server, os, signal, sys
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(f"{os.environ['GREETING']} with {os.environ['DATABASE_URL']}\n".encode())
+http.server.HTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler).serve_forever()
+PY
+echo '{ "containers": { "web": { "port": 3000, "memory": "128MB", "env": { "GREETING": "${GREETING:-hi}", "DATABASE_URL": "db://app:${DB_PASSWORD}@db" } } } }' >"$work/vars/pail.json"
+# Without the secret the deploy fails, and says which one it lacks.
+if up vars 2>/dev/null; then
+  echo "container-smoke: a deploy that lacks a variable went live." >&2
+  exit 1
+fi
+grep -q 'no variable called DB_PASSWORD' "$work/vars.log" || { cat "$work/vars.log" >&2; exit 1; }
+echo "s3cret-smoke" | "$work/pail" env set vars DB_PASSWORD --secret --quiet
+up vars && answers vars / "hi with db://app:s3cret-smoke@db"
+"$work/pail" env set vars GREETING=hello --quiet
+"$work/pail" redeploy vars >/dev/null 2>&1 && answers vars / "hello with db://app:s3cret-smoke@db"
+if "$work/pail" env vars --json | grep -q 's3cret-smoke'; then
+  echo "container-smoke: a secret came back from the API." >&2
+  exit 1
+fi
+# The store holds it sealed.
+if "$engine" exec "$PAIL_NAME" grep -rqs 's3cret-smoke' /data/storage 2>/dev/null; then
+  echo "container-smoke: a secret is in the store unsealed." >&2
+  exit 1
+fi
+
+step "Two containers that find each other by name"
+mkdir -p "$work/pair/web" "$work/pair/store"
+for name in web store; do
+  cat >"$work/pair/$name/Dockerfile" <<'DOCKERFILE'
+FROM docker.io/library/python:3.13-alpine
+COPY server.py /server.py
+CMD ["python3", "/server.py"]
+DOCKERFILE
+done
+cat >"$work/pair/store/server.py" <<'PY'
+import http.server, os, signal, sys
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"kept by store")
+http.server.HTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler).serve_forever()
+PY
+# aweb starts before store, by name, and answers only once it has heard from it.
+cat >"$work/pair/web/server.py" <<'PY'
+import http.server, os, signal, sys, time, urllib.request
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+def ask():
+    return urllib.request.urlopen("http://store:6000/", timeout=3).read().decode()
+while True:
+    try:
+        ask()
+        break
+    except Exception as e:
+        print("waiting for store:", e, flush=True)
+        time.sleep(1)
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(f"web heard: {ask()}\n".encode())
+http.server.HTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler).serve_forever()
+PY
+cat >"$work/pair/pail.json" <<'JSON'
+{
+  "containers": {
+    "aweb": { "dockerfile": "./web/Dockerfile", "port": 3000, "memory": "128MB" },
+    "store": { "dockerfile": "./store/Dockerfile", "port": 6000, "memory": "128MB" }
+  },
+  "routes": [{ "path": "/*", "to": "container:aweb" }]
+}
+JSON
+up pair && answers pair / "web heard: kept by store"
+# The next deploy's containers find each other, not the first one's.
+up pair && answers pair / "web heard: kept by store"
+nets() { "$engine" network ls --format '{{.Name}}' | grep -c "^$PAIL_NAME-net\." || true; }
+for _ in $(seq 1 30); do [ "$(nets)" = 1 ] && break; sleep 1; done
+if [ "$(nets)" != 1 ]; then
+  echo "container-smoke: the pair's first deploy left its network behind." >&2
+  exit 1
+fi
+
 step "Restarting Pail: what was running comes back"
 "$engine" restart -t 60 "$PAIL_NAME" >/dev/null
 answers app / "to a container"
 answers fn / "from a function"
+answers pair / "web heard: kept by store"
+answers vars / "hello with db://app:s3cret-smoke@db"
 
 step "Removing a pail takes its container"
 "$work/pail" rm app --yes >/dev/null
@@ -157,6 +252,10 @@ step "Stopping Pail takes everything it started"
 bash deploy/container/pail-container.sh down >/dev/null
 if [ -n "$("$engine" ps -aq --filter "label=sh.pail.instance=$PAIL_NAME")" ]; then
   echo "container-smoke: containers were left behind." >&2
+  exit 1
+fi
+if [ "$(nets)" != 0 ]; then
+  echo "container-smoke: networks were left behind." >&2
   exit 1
 fi
 echo

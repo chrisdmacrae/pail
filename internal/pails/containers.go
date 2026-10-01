@@ -311,17 +311,40 @@ func (s *Service) prepare(ctx context.Context, e *entry, id string, man *Manifes
 	if err := s.canRun(); err != nil {
 		return nil, err
 	}
+	// pail.json's ${NAME} is filled in here, at each start, from the pail's
+	// variables as they are now. The manifest keeps the reference.
+	vars, err := s.variables(ctx, e.name)
+	if err != nil {
+		return nil, err
+	}
 	rs := &runset{deploy: id, units: map[string]*unit{}, pools: map[string]*fnPool{}}
 	for name, fn := range man.Functions {
+		if fn.Env, err = expandEnv(e.name, name, fn.Env, vars); err != nil {
+			return nil, err
+		}
 		image, err := s.functionImage(ctx, e.name, id, name, fn)
 		if err != nil {
 			return nil, err
 		}
 		rs.pools[name] = &fnPool{s: s, e: e, deploy: id, name: name, fn: fn, image: image, freed: make(chan struct{})}
 	}
+	// A deploy's containers can reach each other, each by its name. The
+	// group is the deploy's own, so one deploy's never find another's.
+	var group string
+	var peers []string
+	if len(man.Containers) > 1 {
+		group = e.name + "." + id
+		for name := range man.Containers {
+			peers = append(peers, name)
+		}
+		sort.Strings(peers)
+	}
 	for name, c := range man.Containers {
 		rootfs, err := s.rootfs(ctx, e.name, id, name)
 		if err != nil {
+			return nil, err
+		}
+		if c.Env, err = expandEnv(e.name, name, c.Env, vars); err != nil {
 			return nil, err
 		}
 		// Later values win: the image's own, then Pail's, then pail.json's.
@@ -340,7 +363,8 @@ func (s *Service) prepare(ctx context.Context, e *entry, id string, man *Manifes
 			Dir:    filepath.Join(s.dir, "run", e.name+"."+name+"."+id),
 			Rootfs: rootfs,
 			Argv:   c.argv(), Env: env, WorkingDir: c.WorkingDir, User: c.User,
-			Hostname: name, VCPUs: c.CPUs, MemMB: c.MemoryMB,
+			Hostname: name, Group: group, Peers: peers, LAN: s.allowLAN[e.name],
+			VCPUs: c.CPUs, MemMB: c.MemoryMB,
 			Log: func(line string) { u.say("", "%s", line) },
 		}
 		if c.Data != "" {
@@ -386,6 +410,14 @@ func (s *Service) goLive(ctx context.Context, e *entry, id string, man *Manifest
 			names = append(names, name)
 		}
 		sort.Strings(names)
+		if s.allowLAN[e.name] && len(next.units) > 0 {
+			say("", "%s is one of PAIL_ALLOW_LAN's pails: its containers can reach the home network", e.name)
+		}
+		// They start together, and the deploy waits for them all: one may
+		// need another before it answers, like an app its database.
+		starting, giveUp := context.WithCancel(ctx)
+		defer giveUp()
+		started := make(chan error, len(names))
 		for _, name := range names {
 			u := next.units[name]
 			u.watchedBy(lg)
@@ -396,11 +428,26 @@ func (s *Service) goLive(ctx context.Context, e *entry, id string, man *Manifest
 				paused = append(paused, old)
 			}
 			say("step", "→ starting %s in a %s (%s)", name, s.box(), u.c.size())
-			if err := u.start(ctx); err != nil {
-				undo()
-				return err
+			go func() {
+				err := u.start(starting)
+				if err == nil {
+					say("", "%s is answering on port %d", name, u.c.Port)
+				}
+				started <- err
+			}()
+		}
+		var failed error
+		for range names {
+			if err := <-started; err != nil && failed == nil {
+				// The first to fail is the one to hear about; the rest
+				// have nothing left to wait for.
+				failed = err
+				giveUp()
 			}
-			say("", "%s is answering on port %d", name, u.c.Port)
+		}
+		if failed != nil {
+			undo()
+			return failed
 		}
 	}
 

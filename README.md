@@ -126,6 +126,7 @@ Or download it for your system, Windows included, from the [latest release](http
 | `pail rollback <pail> <deploy>` | Serves an older deploy. Nothing is rebuilt. |
 | `pail redeploy <pail>` | Makes a new deploy from the latest good deploy's files and follows its log. |
 | `pail stop <pail>` · `pail start <pail>` | Turns a pail Off or back on. It keeps its deploys. |
+| `pail env <pail>` · `pail env set <pail> NAME=value… [--secret]` · `pail env rm <pail> NAME…` | Lists, sets or removes a pail's variables, which `pail.json` uses as `${NAME}`. `--secret` keeps them sealed, never to be shown again. A `NAME` with no `=value` is asked for without showing it, or read from stdin. |
 | `pail hosts <pail>` · `pail hosts add <pail> <hostname>` · `pail hosts rm <pail> <hostname>` | Lists, adds or removes custom hostnames, and says whether each points at the installation yet. |
 | `pail open <pail>` | Opens the pail's URL in a browser, and prints it. |
 | `pail ca` | Prints the installation's root certificate, when it has its own authority. |
@@ -153,6 +154,8 @@ Everything is an environment variable on the server.
 | `PAIL_MAX_DEPLOYS` | `10` | Good deploys kept per pail for rollback. Failed ones don't count. |
 | `PAIL_MAX_FUNCTION_MEMORY` | `1GB` | The most memory one copy of a function may ask for in `pail.json`. A deploy that asks for more fails before anything is built. |
 | `PAIL_MAX_CONTAINER_MEMORY` | `2GB` | The most memory one container may ask for in `pail.json`. A deploy that asks for more fails before anything is built. |
+| `PAIL_SECRETS_KEY` | a key Pail makes | What pails' secrets are sealed with: any text, long and random for preference. Left unset, Pail makes a key the first time it starts and keeps it in `secrets.key` in `PAIL_DATA_DIR`. Either way, back it up: without it secrets can't be read. |
+| `PAIL_ALLOW_LAN` | unset | Pails whose containers may reach the home network, by name with commas between: `media,backups`. Every other pail's can't. For code you trust with your network, like an app that mounts a share from a NAS. |
 | `PAIL_ACME_DNS_PROVIDER` · `PAIL_ACME_DNS_TOKEN` | unset | Set both to get certificates from Let's Encrypt by DNS-01, which also allows custom hostnames. The provider is one of `bunny`, `cloudflare`, `desec`, `digitalocean`, `duckdns`, `gandi`, `hetzner`, `netlify`, `njalla`. |
 | `PAIL_ACME_EMAIL` | unset | Optional address for Let's Encrypt's expiry notices. |
 | `PAIL_ACME_DIRECTORY` | Let's Encrypt production | Another ACME directory, such as Let's Encrypt's staging one while you're trying things out. |
@@ -193,6 +196,9 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 | `GET /api/v1/pails/{name}/hosts` | The pail's addresses, its own first, each with `points_here` from a fresh DNS check. |
 | `POST /api/v1/pails/{name}/hosts` | Body `{"host": "recipes.home.example"}`. Adds a custom hostname and checks it. `409` unless Let's Encrypt mode is on or `PAIL_TLS` is `off`, or if another pail has it. |
 | `DELETE /api/v1/pails/{name}/hosts/{host}` | Removes a custom hostname. |
+| `GET /api/v1/pails/{name}/env` | The pail's variables, by name. A secret comes with `secret: true` and no `value`. The pail needn't exist yet. |
+| `PUT /api/v1/pails/{name}/env/{key}` | Body `{"value": "...", "secret": true}`. Sets a variable, replacing any by that name. `409` for a secret when this Pail has no key to seal it with. |
+| `DELETE /api/v1/pails/{name}/env/{key}` | Removes a variable. |
 | `GET /api/v1/check` | The DNS self-check for the base domain: do names under it reach this Pail? |
 | `GET /api/v1/git` | The five git hosts, and which offer signing in. |
 | `PUT /api/v1/git/{kind}` | Body `{"token": "...", "server": "..."}`. Checks the token with the host, then holds it for the next pail. Answers with the connection's `id`, never the token. `server` is for GitLab, Gitea and Forgejo. |
@@ -239,7 +245,7 @@ Pail runs builds in Firecracker microVMs, so a project's build can't touch the s
 - **What gets built.** A deploy whose `package.json` has a `build` script, from `pail up`, an upload or a git host. Pail installs dependencies with the package manager the lockfile names (npm, pnpm or yarn), runs the build, and serves what it leaves in `dist`, `build`, `out`, `_site`, `.output/public` or `public`, or the folder `static` names in `pail.json`. The source isn't stored or served. A build that leaves a `pail.json` of its own in that folder, as the Astro adapter in `adapters/astro` does, is deployed as that file describes: its files, and its functions.
 - **Workspaces.** A project in a folder of a repo, from a git host or from `pail up`, is built with the whole repo in the microVM. Dependencies are installed where the nearest lockfile is, in the project's folder or one above it, and the build script runs in the project's folder. Only that one script runs: a package beside the project that has to be built first is the build script's to build.
 - **The build VM.** A throwaway microVM from the `node:22-slim` image, with 2 vCPUs, 2GB of memory and 15 minutes. Its root filesystem is read-only and shared; everything it writes goes to a work disk that is deleted afterwards.
-- **Isolation.** Each microVM has a network of its own. It can reach the internet through NAT for dependencies, and nothing else: not the home network, not other microVMs, not the server itself.
+- **Isolation.** Each microVM has a network of its own. It can reach the internet through NAT for dependencies, and nothing else: not the home network, not other microVMs, not the server itself. The one exception is the containers of one pail, which reach each other (see Containers).
 - **Guest init.** Inside a microVM, PID 1 is Pail's own binary, so there is nothing extra to install in an image.
 
 Running microVMs needs Pail to run as root.
@@ -252,7 +258,8 @@ Where there is no KVM, a laptop mostly, Pail runs the same things in the contain
 - **Builds.** A site builds in a throwaway container from `node:22-slim`, by the same script as in a microVM. A Dockerfile is built by the engine itself.
 - **Containers.** A deploy keeps each container's image as one file, the archive an engine saves and loads, where a microVM's root filesystem would be. An image from a registry is fetched by Pail, not the engine, so the digest check that skips an unchanged image works the same. A data volume is one of the engine's own, named `<network>-vol.<pail>.<container>`; an empty file on Pail's disk stands for it, and when a removed pail's files go, the volume follows.
 - **Functions.** A function's image is its language's image with the function's files and Pail's own binary added. A copy is a container of it, where that binary is the agent: it listens on the network, and speaks the protocol the agent in a microVM speaks over vsock. Each copy has a token of its own that requests must carry, since other containers on the network can reach it. There are no snapshots; a copy starts in a fraction of a second without one. What a deploy keeps is which image the function starts from, by digest, and its files.
-- **Tidying.** Everything Pail makes carries the label `sh.pail.instance=<network>`. At start Pail removes containers an earlier run left, and a while later, the images nothing has asked for since.
+- **A pail's containers find each other.** A deploy with more than one container gets a network of its own beside Pail's, `<network>-net.<pail>.<deploy>`, where each container answers to its name in `pail.json`. Another pail's containers aren't on it, so two pails can each have a `db`. The network goes when the last of its containers does.
+- **Tidying.** Everything Pail makes carries the label `sh.pail.instance=<network>`. At start Pail removes the containers and networks an earlier run left, and a while later, the images nothing has asked for since.
 - **What it isn't.** A container shares the machine's kernel, and containers on the network can reach each other and the home network. That is fine for your own code on your own machine. It is not the isolation a microVM gives, so it isn't for running code you don't trust.
 - **Deploys don't move between the two.** What a deploy keeps for a microVM is not what it keeps for a container. A Pail switched from one runtime to the other serves its static files as before, and says of anything else to deploy it again.
 
@@ -286,14 +293,14 @@ A `pail.json` at the top of a pail's upload can declare containers: Dockerfiles 
 | `cpus` | `1` | The microVM's processors. |
 | `data` | none | A folder kept on a volume that survives deploys, for SQLite and the like. |
 | `command` | the image's `CMD` | A list of words to run in place of the image's `CMD`, like `["node", "server.js"]`. The image's `ENTRYPOINT` still goes in front, as with Docker. |
-| `env` | none | Environment variables, on top of the image's own, `PORT`, `PAIL_NAME` and `PAIL_DEPLOY`. |
+| `env` | none | Environment variables, on top of the image's own, `PORT`, `PAIL_NAME` and `PAIL_DEPLOY`. `${NAME}` in a value is one of the pail's variables. |
 
 On each deploy Pail:
 
 1. **Builds** the Dockerfile with Buildah inside a throwaway microVM (2 vCPUs, 2GB, 30 minutes), so a build can't touch the server. `FROM node:22` means Docker Hub's, as it does to Docker. A container with an `image` skips the build: Pail pulls the image for the server's architecture instead.
 2. **Flattens** the image into an ext4 root filesystem and stores it with the deploy.
 3. **Boots** it in a microVM of the size asked for, with the data volume attached. Pail's own binary is PID 1; it runs the image's `ENTRYPOINT` and `CMD` as the image's `USER`, in its `WORKDIR`.
-4. **Waits** up to two minutes for the port to accept connections, then moves the live pointer and stops the old microVM. A deploy that never opens its port fails, and the previous one keeps serving.
+4. **Waits** up to two minutes for the port to accept connections, then moves the live pointer and stops the old microVM. A deploy that never opens its port fails, and the previous one keeps serving. A deploy's containers are started together and each is waited for, so one may wait for another, as an app does for its database.
 
 What follows from that:
 
@@ -305,7 +312,10 @@ What follows from that:
 - **Images from a registry.** Each deploy asks the registry what the tag points at and keeps exactly that with the deploy, so a rollback runs what ran then even if the tag has moved. When the image hasn't changed since the deploy being served, nothing is fetched. `pail redeploy` asks again, which is how a pail picks up a moved tag such as `latest`. Pail unpacks an image's files on the server but never runs them there, and no link inside an image can make it write outside the image's own folder. There is no setting for registry credentials yet, so images have to be public.
 - **Rollback** boots the root filesystem the older deploy was built with. Nothing is rebuilt.
 - **Output.** stdout and stderr go to the deploy's log while it deploys, and to the pail's output after: `pail logs <pail> --output`, with `--follow` to keep reading, or `GET /api/v1/pails/{name}/output`. Pail keeps the last 2,000 lines, in memory.
-- **Isolation.** As for builds: the internet through NAT, and nothing else. The only way in is through Pail's router.
+- **Variables and secrets.** A pail has variables of its own, set with `pail env set` or on its page, for what a repo shouldn't hold. `${NAME}` in a container's or a function's `env` is filled in from them, `${NAME:-fallback}` has a fallback, and `$${NAME}` is left as `${NAME}`. A deploy whose `pail.json` uses one the pail lacks fails before anything is built. They are filled in each time a container or a function's copy starts, so a deploy keeps the reference and never the value, and a change is used from the next deploy. A secret is sealed with AES-256-GCM before it is stored (`meta/<pail>/env.json`), under a key that is never in the object store, and no API returns its value.
+- **Each other.** A pail's containers reach each other by the names `pail.json` gives them: `api` finds the cache above at `cache:6379`. That is every port, not only the one `port` names, and only among the containers of one deploy: not another pail's, and not the deploy being replaced. Each container's address is kept for it while any of the deploy's containers is running, so one that restarts comes back where the others expect it. Functions aren't part of this.
+- **Isolation.** As for builds: the internet through NAT, and nothing else but the pail's other containers. The only way in from outside is through Pail's router.
+- **The home network, for pails you name.** `PAIL_ALLOW_LAN=media,backups` on the server lets those pails' containers reach private addresses: a NAS, another machine's API. It is the server's setting and not `pail.json`'s, so a repo can't grant it to itself; a name counts whether or not the pail exists yet, and a change takes a restart of Pail. Such a container still can't reach other pails' containers, or the services of the machine Pail runs on. Its connections arrive from that machine's address, since they go out through NAT. Names don't resolve through the home resolver, so use addresses. Builds and functions never get this. On Docker or Podman every container can reach the home network already, and the setting changes nothing.
 
 `GET /api/v1/pails/{name}` lists the serving deploy's containers with their state: `running`, `starting` or `stopped`.
 

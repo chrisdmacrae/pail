@@ -109,6 +109,25 @@ func TestOAuthApps(t *testing.T) {
 	}
 }
 
+func TestAllowLANListsPails(t *testing.T) {
+	load := func(list string) (Config, error) {
+		vars := map[string]string{"PAIL_TOKEN": "t", "PAIL_ALLOW_LAN": list}
+		for k, v := range s3 {
+			vars[k] = v
+		}
+		return Load(env(vars))
+	}
+	if c, err := load(""); err != nil || len(c.AllowLAN) != 0 {
+		t.Errorf("unset: %v, %v", c.AllowLAN, err)
+	}
+	if c, err := load(" Media, backups ,,"); err != nil || strings.Join(c.AllowLAN, "|") != "media|backups" {
+		t.Errorf("a list: %v, %v", c.AllowLAN, err)
+	}
+	if _, err := load("media=10.0.0.5"); err == nil || !strings.Contains(err.Error(), "PAIL_ALLOW_LAN") {
+		t.Errorf("something that isn't a pail's name: got %v", err)
+	}
+}
+
 func TestRuntimeIsMicroVMsContainersOrWhicheverRuns(t *testing.T) {
 	load := func(runtime string) (Config, error) {
 		vars := map[string]string{"PAIL_TOKEN": "t", "PAIL_RUNTIME": runtime}

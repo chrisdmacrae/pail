@@ -5,15 +5,15 @@ section: Deploying
 order: 5
 navLabel: Run a container
 next:
-  href: /deploying/astro/
-  label: Deploy an Astro site
+  href: /deploying/variables/
+  label: Keep settings and secrets out of the repo
 ---
 
 ## When to use one
 
 Use a container when the thing you’re hosting is a server that stays up: an app with a database, anything that needs websockets, background work, or data that lasts. For a small program that only answers requests, [a function](/deploying/functions/) is less to write and costs nothing while idle.
 
-Each container runs in a small virtual machine of its own. It can reach the internet, and nothing on your network. The only way in is through Pail.
+Each container runs in a small virtual machine of its own. It can reach the internet and [the pail's other containers](#more-than-one-container), and nothing on your network. The only way in is through Pail.
 
 Containers need `/dev/kvm` on the server. A Pail on [Docker](/running/docker/) or [Podman](/running/podman/) runs them as containers of that engine instead, without the virtual machine around each. [Running Pail](/running/) covers both.
 
@@ -81,7 +81,7 @@ Each container takes these in `pail.json`. `port` and `memory` are required.
 | `command` | the image’s own | What to run, as a list of words. See below. |
 | `cpus` | `1` | How many processors it gets. |
 | `data` | none | A folder that keeps its contents between deploys. |
-| `env` | none | Environment variables for the app. |
+| `env` | none | Environment variables for the app. `${NAME}` in a value is one of [the pail’s variables](/deploying/variables/). |
 
 ## Change what it runs
 
@@ -135,6 +135,53 @@ To serve a built front end beside an API, say which folder holds the files and w
 Routes are read top to bottom and the first match wins. `/api/*` covers `/api` and everything under it. A path with no star covers only itself. A path that no route covers is not found.
 
 Only the `static` folder is served as files. The rest of your project, Dockerfile included, is never served.
+
+## More than one container
+
+A pail can run several containers: an app and its database, say. Each one reaches the others by the name `pail.json` gives it.
+
+```json
+{
+  "containers": {
+    "web": { "port": 3000, "memory": "256MB", "env": { "DATABASE_URL": "postgres://app:secret@db:5432/app" } },
+    "db": {
+      "image": "postgres:17-alpine",
+      "port": 5432,
+      "memory": "256MB",
+      "data": "/var/lib/postgresql/data",
+      "env": { "POSTGRES_USER": "app", "POSTGRES_PASSWORD": "secret", "POSTGRES_DB": "app", "PGDATA": "/var/lib/postgresql/data/pgdata" }
+    }
+  },
+  "routes": [{ "path": "/*", "to": "container:web" }]
+}
+```
+
+Here `web` finds the database at `db:5432`. Any port works between them, not only the one `port` names.
+
+- **Only this pail’s.** Another pail’s containers can’t reach these, and can have the same names.
+- **They start together.** Pail starts them all at once and waits for each port, so `web` can wait for `db` before it answers. It should wait and retry rather than exit: a container that exits before it opens its port fails the deploy.
+- **Routes decide what visitors reach.** A container with no route, like `db` here, is reached only by the pail’s other containers.
+- **Each keeps its own data.** A `data` folder belongs to one container. Two containers can’t share one.
+- **Each deploy is its own set.** While a deploy takes over, the new containers find each other, never the ones they replace.
+
+## Reach your network
+
+A container can’t reach anything on your network: not your NAS, not another machine. That is what makes it safe to run code you didn’t write.
+
+For a pail you trust, the person running Pail can lift that. On the server, name the pails in `PAIL_ALLOW_LAN`, with commas between them, and restart Pail:
+
+```
+PAIL_ALLOW_LAN=media,backups
+```
+
+The containers of `media` and `backups` can then reach private addresses, such as a share on a NAS at `10.0.0.5`. This is the server’s setting, not something `pail.json` can ask for.
+
+- **Use addresses.** A container doesn’t use your home resolver, so `nas.lan` won’t resolve. `10.0.0.5` will.
+- **It arrives from Pail’s address.** What a container sends leaves through the server, so the other end sees the server’s address. Allow that one on a share’s access list.
+- **Still out of reach:** other pails’ containers, and anything running on the server itself.
+- **Only containers.** Builds and functions never get this.
+
+On [Docker](/running/docker/) or [Podman](/running/podman/) every container can reach your network already, and the setting changes nothing.
 
 ## See what it’s printing
 

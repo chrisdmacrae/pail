@@ -64,6 +64,9 @@ type Runner struct {
 	log *slog.Logger
 	api *api
 
+	// groupMu keeps one group's network from being made and removed at once.
+	groupMu sync.Mutex
+
 	mu sync.Mutex
 	// used are the images asked for since Pail started.
 	used map[string]bool
@@ -160,6 +163,22 @@ func (r *Runner) Prepare(ctx context.Context) error {
 	for _, c := range left {
 		if err := r.api.remove(ctx, c.ID); err != nil {
 			r.log.Warn("remove a container left from last time", "container", c.ID, "err", err)
+		}
+	}
+
+	// Nor does a group's network outlive its containers.
+	var nets []struct {
+		Name string `json:"Name"`
+	}
+	if err := r.api.call(ctx, "GET", "/networks", filter(labelInstance+"="+r.cfg.Network), nil, &nets); err != nil {
+		return err
+	}
+	for _, n := range nets {
+		if !strings.HasPrefix(n.Name, r.groupNetwork("")) {
+			continue
+		}
+		if err := r.api.call(ctx, "DELETE", "/networks/"+n.Name, nil, nil, nil); err != nil && !notFound(err) {
+			r.log.Warn("remove a network left from last time", "network", n.Name, "err", err)
 		}
 	}
 

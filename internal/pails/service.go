@@ -34,7 +34,12 @@ type Options struct {
 	// means no limit.
 	MaxContainerMemory int64
 	MaxFunctionMemory  int64
-	Logger             *slog.Logger
+	// AllowLAN names the pails whose containers may reach the home network.
+	AllowLAN []string
+	// SecretKey is the 32-byte key pails' secrets are sealed with. Without
+	// one, a pail's variables can be set and its secrets can't.
+	SecretKey []byte
+	Logger    *slog.Logger
 }
 
 // Service is the one writer of a Pail installation's storage. It keeps every
@@ -49,7 +54,13 @@ type Service struct {
 	dir             string
 	maxContainerMem int64
 	maxFunctionMem  int64
-	log             *slog.Logger
+	// allowLAN are the pails whose containers may reach the home network.
+	allowLAN map[string]bool
+	// secretKey seals pails' secrets; envMu is held to change any pail's
+	// variables.
+	secretKey []byte
+	envMu     sync.Mutex
+	log       *slog.Logger
 
 	deploys sync.WaitGroup
 
@@ -84,6 +95,10 @@ func New(o Options) *Service {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	allowLAN := map[string]bool{}
+	for _, name := range o.AllowLAN {
+		allowLAN[name] = true
+	}
 	return &Service{
 		store:           o.Store,
 		baseDomain:      o.BaseDomain,
@@ -93,6 +108,8 @@ func New(o Options) *Service {
 		dir:             o.Dir,
 		maxContainerMem: o.MaxContainerMemory,
 		maxFunctionMem:  o.MaxFunctionMemory,
+		allowLAN:        allowLAN,
+		secretKey:       o.SecretKey,
 		log:             o.Logger,
 		pails:           map[string]*entry{},
 		removing:        map[string]bool{},

@@ -52,13 +52,27 @@ func (r *Runner) Start(ctx context.Context, spec microvm.MachineSpec) (microvm.M
 	if err != nil {
 		return nil, err
 	}
-	if err := r.api.start(ctx, id); err != nil {
+	// discard removes the container, and its group's network if it was the
+	// last one on it.
+	discard := func() {
 		r.discard(id)
+		if spec.Group != "" {
+			r.leaveGroup(spec.Group)
+		}
+	}
+	if spec.Group != "" {
+		if err := r.joinGroup(ctx, id, spec.Group, spec.Hostname); err != nil {
+			discard()
+			return nil, err
+		}
+	}
+	if err := r.api.start(ctx, id); err != nil {
+		discard()
 		return nil, err
 	}
 	ip, err := r.address(ctx, id)
 	if err != nil {
-		r.discard(id)
+		discard()
 		return nil, err
 	}
 	m := &machine{r: r, id: id, ip: ip, gone: make(chan struct{})}
@@ -66,10 +80,51 @@ func (r *Runner) Start(ctx context.Context, spec microvm.MachineSpec) (microvm.M
 	go r.api.logs(context.Background(), id, spec.Log)
 	go func() {
 		r.ended(id)
-		r.discard(id)
+		discard()
 		close(m.gone)
 	}()
 	return m, nil
+}
+
+// A group is a set of containers that may find each other by name: a pail's
+// containers. Every container is on Pail's network, where Pail reaches it.
+// A group has a network of its own beside that one, where each of its
+// containers answers to its name. Another pail's containers aren't on it, so
+// two pails can each have a "db".
+
+// groupNetwork names the engine's network for a group.
+func (r *Runner) groupNetwork(group string) string {
+	return r.cfg.Network + "-net." + group
+}
+
+// joinGroup puts a container that hasn't started on its group's network,
+// making the network for the first of them.
+func (r *Runner) joinGroup(ctx context.Context, id, group, name string) error {
+	r.groupMu.Lock()
+	defer r.groupMu.Unlock()
+	network := r.groupNetwork(group)
+	err := r.api.call(ctx, "GET", "/networks/"+network, nil, nil, nil)
+	if notFound(err) {
+		err = r.api.call(ctx, "POST", "/networks/create", nil, map[string]any{"Name": network, "Labels": r.labels()}, nil)
+	}
+	if err == nil {
+		err = r.api.connect(ctx, network, id, name)
+	}
+	if err != nil {
+		return fmt.Errorf("the network %s shares with the pail's other containers: %w", name, err)
+	}
+	return nil
+}
+
+// leaveGroup removes a group's network once none of its containers is left.
+func (r *Runner) leaveGroup(group string) {
+	r.groupMu.Lock()
+	defer r.groupMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	// The engine won't remove a network that has a container on it, which
+	// is the answer wanted while the group has others running.
+	r.api.call(ctx, "DELETE", "/networks/"+r.groupNetwork(group), nil, nil, nil)
 }
 
 func (m *machine) Addr(port int) string { return net.JoinHostPort(m.ip, strconv.Itoa(port)) }

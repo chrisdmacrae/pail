@@ -233,6 +233,7 @@ func ValidName(name string) bool { return nameRE.MatchString(name) }
 //
 //	pails/<name>/deploys/<id>/...               the unpacked upload
 //	meta/<name>/state.json                      record (the live pointer)
+//	meta/<name>/env.json                        its variables, secrets sealed
 //	meta/<name>/deploys/<id>.json               Deploy
 //	meta/<name>/deploys/<id>.log                log lines, one JSON per line
 //	meta/<name>/deploys/<id>.manifest.json      Manifest

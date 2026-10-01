@@ -35,7 +35,15 @@ func (r *Runner) Start(ctx context.Context, spec MachineSpec) (Machine, error) {
 	if err := os.MkdirAll(spec.Dir, 0o755); err != nil {
 		return nil, err
 	}
+	// The network comes first: a machine in a group is told where the
+	// group's others are before it boots.
+	t, err := r.net.join(spec.Group, spec.Hostname, spec.Peers, spec.LAN)
+	if err != nil {
+		os.RemoveAll(spec.Dir)
+		return nil, fmt.Errorf("can't set up the microVM's network: %w", err)
+	}
 	fail := func(err error) (Machine, error) {
+		t.release()
 		os.RemoveAll(spec.Dir)
 		return nil, err
 	}
@@ -48,7 +56,7 @@ func (r *Runner) Start(ctx context.Context, spec MachineSpec) (Machine, error) {
 	}
 	job, _ := json.Marshal(guestJobSpec{
 		Argv: spec.Argv, Env: spec.Env, Dir: spec.WorkingDir,
-		User: spec.User, Hostname: spec.Hostname, Data: spec.DataPath,
+		User: spec.User, Hostname: spec.Hostname, Data: spec.DataPath, Hosts: t.Hosts,
 	})
 	jobFile := filepath.Join(spec.Dir, "job")
 	if err := os.WriteFile(jobFile, job, 0o600); err != nil {
@@ -71,10 +79,6 @@ func (r *Runner) Start(ctx context.Context, spec MachineSpec) (Machine, error) {
 		drives = append(drives, drive{"data", spec.Data, false})
 	}
 
-	t, err := r.net.acquire()
-	if err != nil {
-		return fail(fmt.Errorf("can't set up the microVM's network: %w", err))
-	}
 	// The machine outlives the call that started it.
 	run, cancel := context.WithCancel(context.Background())
 	vm, err := r.boot(run, bootSpec{
@@ -83,7 +87,6 @@ func (r *Runner) Start(ctx context.Context, spec MachineSpec) (Machine, error) {
 	})
 	if err != nil {
 		cancel()
-		t.release()
 		return fail(err)
 	}
 	m := &machine{tap: t, vm: vm, cancel: cancel, gone: make(chan struct{})}

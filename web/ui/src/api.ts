@@ -68,6 +68,8 @@ export interface Info {
   // tls is where certificates come from: Pail's own authority ("internal",
   // whose root each device trusts once), Let's Encrypt ("acme"), or none.
   tls: 'off' | 'internal' | 'acme';
+  // secrets says this Pail has a key to seal a pail's secrets with.
+  secrets?: boolean;
   limits: { max_upload_size: number; max_deploys: number; max_container_memory: number };
 }
 
@@ -114,6 +116,15 @@ export interface Host {
   default: boolean;
   points_here: boolean;
   detail?: string;
+}
+
+// Variable is one of a pail's variables, which pail.json uses as ${NAME}. A
+// secret never comes with its value.
+export interface Variable {
+  name: string;
+  value?: string;
+  secret: boolean;
+  updated_at: string;
 }
 
 export interface LogLine {
@@ -220,6 +231,12 @@ export const listHosts = async (name: string) =>
 export const addHost = (name: string, host: string) => json<Host>('POST', `${pailPath(name)}/hosts`, { host });
 export const removeHost = async (name: string, host: string) =>
   void (await call('DELETE', `${pailPath(name)}/hosts/${encodeURIComponent(host)}`));
+export const listVariables = async (name: string) =>
+  (await json<{ variables: Variable[] }>('GET', `${pailPath(name)}/env`)).variables;
+export const setVariable = (name: string, key: string, value: string, secret: boolean) =>
+  json<Variable>('PUT', `${pailPath(name)}/env/${encodeURIComponent(key)}`, { value, secret });
+export const removeVariable = async (name: string, key: string) =>
+  void (await call('DELETE', `${pailPath(name)}/env/${encodeURIComponent(key)}`));
 export const listGitHosts = async () => (await json<{ hosts: GitHost[] }>('GET', '/git')).hosts;
 export const connectGit = (kind: string, token: string, server?: string) =>
   json<GitConnection>('PUT', `/git/${kind}`, { token, server });

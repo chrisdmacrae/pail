@@ -257,7 +257,7 @@ Each function takes these in `pail.json`. Only `src` is required.
 | `memory` | `128MB` | How much memory it gets. |
 | `idle` | `5m` | How long it waits for another request before it sleeps. |
 | `max` | `4` | How many copies may run at once. |
-| `env` | none | Environment variables for the program. |
+| `env` | none | Environment variables for the program. `${NAME}` in a value is one of [the pail’s variables](/deploying/variables/). |
 
 The server sets the most memory a function may ask for: 1GB unless `PAIL_MAX_FUNCTION_MEMORY` says otherwise.
 

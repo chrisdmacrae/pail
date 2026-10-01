@@ -15,6 +15,14 @@ import (
 )
 
 // What the API sends back. Only the fields the CLI uses.
+// apiVariable is one of a pail's variables. A secret comes without a value.
+type apiVariable struct {
+	Name      string `json:"name"`
+	Value     string `json:"value,omitempty"`
+	Secret    bool   `json:"secret"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 type apiInfo struct {
 	Version    string `json:"version"`
 	BaseDomain string `json:"base_domain"`
@@ -161,6 +169,19 @@ func (c *client) post(path string, in, out any) error {
 		body, size = bytes.NewReader(b), int64(len(b))
 	}
 	resp, err := c.do("POST", path, body, size, "application/json")
+	if err != nil {
+		return err
+	}
+	return c.decode(resp, out)
+}
+
+// put sends in as JSON and reads the answer into out.
+func (c *client) put(path string, in, out any) error {
+	b, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do("PUT", path, bytes.NewReader(b), int64(len(b)), "application/json")
 	if err != nil {
 		return err
 	}

@@ -139,13 +139,47 @@ func (f *fakeMachines) Start(_ context.Context, spec microvm.MachineSpec) (micro
 		l.Close()
 		return m, nil
 	}
-	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	m.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		fmt.Fprintf(w, "%s|%s %s|host=%s|proto=%s|boots=%d|body=%s|env=%s|argv=%v|dir=%s",
 			strings.SplitN(string(image), "\n", 2)[0], r.Method, r.URL.RequestURI(), r.Host, r.Header.Get("X-Forwarded-Proto"), boots, body, env, spec.Argv, spec.WorkingDir)
 	}))
 	m.addr = m.srv.Listener.Addr().String()
+	if _, needs, ok := strings.Cut(string(image), "NEEDS "); ok {
+		// A machine that opens its port only once another in its group is
+		// up, as an app waits for its database.
+		m.srv.Listener.Close()
+		go func() {
+			for !f.up(spec.Group, strings.Fields(needs)[0]) {
+				select {
+				case <-m.done:
+					return
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
+			l, err := net.Listen("tcp", m.addr)
+			if err != nil {
+				return
+			}
+			m.srv.Listener = l
+			m.srv.Start()
+		}()
+		return m, nil
+	}
+	m.srv.Start()
 	return m, nil
+}
+
+// up says whether a machine in a group is running under a name.
+func (f *fakeMachines) up(group, name string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, m := range f.running {
+		if group != "" && m.spec.Group == group && m.spec.Hostname == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *fakeMachine) Addr(int) string       { return m.addr }
@@ -184,11 +218,11 @@ type containerFixture struct {
 	dir      string
 }
 
-func newContainerFixture(t *testing.T, store *storage.Memory, machines *fakeMachines, dir string) *containerFixture {
+func newContainerFixture(t *testing.T, store *storage.Memory, machines *fakeMachines, dir string, allowLAN ...string) *containerFixture {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := config.Config{Token: token, BaseDomain: "pail.lan", MaxUploadSize: 1 << 20, MaxDeploys: 3}
-	svc := pails.New(pails.Options{Store: store, BaseDomain: cfg.BaseDomain, MaxDeploys: 3, Builder: machines, Dir: dir, MaxContainerMemory: 2 << 30, MaxFunctionMemory: 1 << 30, Logger: logger})
+	svc := pails.New(pails.Options{Store: store, BaseDomain: cfg.BaseDomain, MaxDeploys: 3, Builder: machines, Dir: dir, MaxContainerMemory: 2 << 30, MaxFunctionMemory: 1 << 30, AllowLAN: allowLAN, SecretKey: []byte("0123456789abcdef0123456789abcdef"), Logger: logger})
 	if err := svc.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -365,6 +399,198 @@ func TestContainers(t *testing.T) {
 	}
 	if keys, _ := store.List(context.Background(), "meta/notes/"); len(keys) != 0 {
 		t.Errorf("left in storage: %v", keys)
+	}
+}
+
+// A pail's containers are a group: each can reach the others by name, and
+// they start together, since one may need another before it answers.
+func TestContainersOfAPailReachEachOther(t *testing.T) {
+	pails.PortWait = 2 * time.Second
+	machines := &fakeMachines{t: t, volumes: map[string]bool{}}
+	f := newContainerFixture(t, storage.NewMemory(), machines, t.TempDir())
+	groups := func() map[string]string {
+		machines.mu.Lock()
+		defer machines.mu.Unlock()
+		got := map[string]string{}
+		for _, m := range machines.running {
+			got[m.spec.Hostname] = m.spec.Group + " " + strings.Join(m.spec.Peers, ",")
+		}
+		return got
+	}
+
+	// app sorts before db, and answers only once db is up.
+	shop := map[string]string{
+		"app/Dockerfile": "FROM app:v1\nNEEDS db",
+		"db/Dockerfile":  "FROM db:v1",
+		"pail.json": `{
+			"containers": {
+				"app": {"dockerfile": "./app/Dockerfile", "port": 8080, "memory": "256MB"},
+				"db": {"dockerfile": "./db/Dockerfile", "port": 5432, "memory": "256MB"}
+			},
+			"routes": [{"path": "/*", "to": "container:app"}]
+		}`,
+	}
+	d, log := f.deploy("shop", tarGz(t, shop))
+	if d.State != "ok" {
+		t.Fatalf("deploy: %+v\n%s", d, log)
+	}
+	wantBody(t, f.site("shop.pail.lan", "/"), 200, "FROM app:v1|GET /|")
+	want := "shop." + d.ID + " app,db"
+	if got := groups(); got["app"] != want || got["db"] != want {
+		t.Errorf("the group each container is in: %v, want %q", got, want)
+	}
+
+	// The next deploy's containers are a group of their own.
+	next, log := f.deploy("shop", tarGz(t, shop))
+	if next.State != "ok" {
+		t.Fatalf("second deploy: %+v\n%s", next, log)
+	}
+	want = "shop." + next.ID + " app,db"
+	eventually(t, "the first deploy's containers stop", func() bool { return machines.count() == 2 })
+	if got := groups(); got["app"] != want || got["db"] != want {
+		t.Errorf("after the second deploy: %v, want %q", got, want)
+	}
+
+	// One that fails takes the deploy with it, without waiting out the rest.
+	shop["db/Dockerfile"] = "FROM db:v2\nDEAF"
+	pails.PortWait = 300 * time.Millisecond
+	if bad, log := f.deploy("shop", tarGz(t, shop)); bad.State != "failed" || !strings.Contains(bad.Error, "db didn't open port 5432") {
+		t.Errorf("a deploy whose database never answers: %+v\n%s", bad, log)
+	}
+
+	// A container by itself is in no group.
+	if d, log := f.deploy("solo", tarGz(t, map[string]string{"Dockerfile": "FROM app:solo", "pail.json": `{"containers": {"web": {"port": 3000, "memory": "256MB"}}}`})); d.State != "ok" {
+		t.Fatalf("deploy: %+v\n%s", d, log)
+	}
+	if got := groups()["web"]; got != " " {
+		t.Errorf("a lone container's group: %q", got)
+	}
+}
+
+// Only the pails PAIL_ALLOW_LAN names have containers that reach the home
+// network.
+func TestOnlyNamedPailsReachTheHomeNetwork(t *testing.T) {
+	pails.PortWait = 2 * time.Second
+	machines := &fakeMachines{t: t, volumes: map[string]bool{}}
+	f := newContainerFixture(t, storage.NewMemory(), machines, t.TempDir(), "media")
+	solo := tarGz(t, map[string]string{"Dockerfile": "FROM app:solo", "pail.json": `{"containers": {"web": {"port": 3000, "memory": "256MB"}}}`})
+
+	d, log := f.deploy("media", solo)
+	if d.State != "ok" || !strings.Contains(log, "media is one of PAIL_ALLOW_LAN's pails") {
+		t.Fatalf("deploy: %+v\n%s", d, log)
+	}
+	d, log = f.deploy("notes", solo)
+	if d.State != "ok" || strings.Contains(log, "PAIL_ALLOW_LAN") {
+		t.Fatalf("deploy: %+v\n%s", d, log)
+	}
+	machines.mu.Lock()
+	defer machines.mu.Unlock()
+	for _, m := range machines.running {
+		pail := strings.Split(filepath.Base(m.spec.Dir), ".")[0]
+		if m.spec.LAN != (pail == "media") {
+			t.Errorf("%s's container: LAN is %v", pail, m.spec.LAN)
+		}
+	}
+	if len(machines.running) != 2 {
+		t.Errorf("%d machines running, want 2", len(machines.running))
+	}
+}
+
+// A pail's variables fill in pail.json's ${NAME}. A secret is sealed in the
+// store, never comes back from the API, and isn't kept with a deploy.
+func TestVariablesFillInPailJSON(t *testing.T) {
+	pails.PortWait = 2 * time.Second
+	store := storage.NewMemory()
+	machines := &fakeMachines{t: t, volumes: map[string]bool{}}
+	f := newContainerFixture(t, store, machines, t.TempDir())
+	set := func(key, body string) *httptest.ResponseRecorder {
+		return f.api("PUT", "/api/v1/pails/shop/env/"+key, []byte(body))
+	}
+	stored := func() string {
+		keys, _ := store.List(context.Background(), "")
+		var all strings.Builder
+		for _, key := range keys {
+			if strings.HasSuffix(key, ".gz") {
+				continue
+			}
+			b, _ := store.Read(context.Background(), key)
+			all.Write(b)
+		}
+		return all.String()
+	}
+	shop := func(env string) []byte {
+		return tarGz(t, map[string]string{"Dockerfile": "FROM app:v1", "pail.json": `{"containers": {"web": {"port": 3000, "memory": "256MB", "env": ` + env + `}}}`})
+	}
+
+	// They can be set before the pail's first deploy, which needs them.
+	wantBody(t, set("DB_PASSWORD", `{"value": "hunter2", "secret": true}`), 200, `"name":"DB_PASSWORD","secret":true`)
+	wantBody(t, set("GREETING", `{"value": "hello"}`), 200, `"name":"GREETING","value":"hello","secret":false`)
+	list := f.api("GET", "/api/v1/pails/shop/env", nil).Body.String()
+	if strings.Contains(list, "hunter2") || !strings.Contains(list, `"name":"DB_PASSWORD","secret":true`) || !strings.Contains(list, `"value":"hello"`) {
+		t.Errorf("the list: %s", list)
+	}
+	wantBody(t, set("1BAD", `{"value": "x"}`), 400, "bad_variable")
+	wantBody(t, set("EMPTY", `{}`), 400, "bad_request")
+	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"secrets":true`)
+
+	env := `{"DATABASE_URL": "postgres://app:${DB_PASSWORD}@db/app", "GREETING": "${GREETING}, world", "MODE": "${MODE:-dev}", "SHELL_ONE": "$${HOME}"}`
+	d, log := f.deploy("shop", shop(env))
+	if d.State != "ok" {
+		t.Fatalf("deploy: %+v\n%s", d, log)
+	}
+	got := f.site("shop.pail.lan", "/").Body.String()
+	for _, want := range []string{"DATABASE_URL=postgres://app:hunter2@db/app", "GREETING=hello, world", "MODE=dev", "SHELL_ONE=${HOME}"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("what the container saw lacks %q:\n%s", want, got)
+		}
+	}
+	// The secret is nowhere in the store as itself: not in the variables,
+	// and not in what the deploy keeps.
+	if strings.Contains(stored(), "hunter2") {
+		t.Errorf("the secret is in the store unsealed")
+	}
+	if strings.Contains(log, "hunter2") {
+		t.Errorf("the secret is in the deploy's log:\n%s", log)
+	}
+
+	// A variable pail.json uses and the pail lacks fails the deploy, before
+	// anything is built, and says how to set it.
+	bad, log := f.deploy("shop", shop(`{"KEY": "${API_KEY}"}`))
+	if bad.State != "failed" || !strings.Contains(bad.Error, "${API_KEY}") || !strings.Contains(bad.Error, "pail env set shop API_KEY") || strings.Contains(log, "STEP 1/1") {
+		t.Errorf("a deploy that lacks a variable: %+v\n%s", bad, log)
+	}
+
+	// The next deploy uses a variable as it is then.
+	wantBody(t, set("DB_PASSWORD", `{"value": "correct horse", "secret": true}`), 200, `"secret":true`)
+	if d, log := f.deploy("shop", shop(env)); d.State != "ok" {
+		t.Fatalf("redeploy: %+v\n%s", d, log)
+	}
+	if got := f.site("shop.pail.lan", "/").Body.String(); !strings.Contains(got, "postgres://app:correct horse@db/app") {
+		t.Errorf("after the variable changed: %s", got)
+	}
+
+	wantBody(t, f.api("DELETE", "/api/v1/pails/shop/env/GREETING", nil), 204, "")
+	wantBody(t, f.api("DELETE", "/api/v1/pails/shop/env/GREETING", nil), 404, "no_variable")
+
+	// Its variables go with the pail.
+	wantBody(t, f.api("DELETE", "/api/v1/pails/shop", nil), 204, "")
+	if list := f.api("GET", "/api/v1/pails/shop/env", nil).Body.String(); strings.Contains(list, "DB_PASSWORD") {
+		t.Errorf("a removed pail's variables: %s", list)
+	}
+}
+
+// Without a key, a pail can have variables and can't have secrets.
+func TestSecretsNeedAKey(t *testing.T) {
+	svc := pails.New(pails.Options{Store: storage.NewMemory(), BaseDomain: "pail.lan", MaxDeploys: 3})
+	ctx := context.Background()
+	if _, err := svc.SetVariable(ctx, "shop", "GREETING", "hello", false); err != nil {
+		t.Errorf("a variable: %v", err)
+	}
+	if _, err := svc.SetVariable(ctx, "shop", "DB_PASSWORD", "hunter2", true); !errors.Is(err, pails.ErrNoSecretKey) {
+		t.Errorf("a secret without a key: %v", err)
+	}
+	if svc.CanKeepSecrets() {
+		t.Errorf("a Pail with no key says it can keep secrets")
 	}
 }
 

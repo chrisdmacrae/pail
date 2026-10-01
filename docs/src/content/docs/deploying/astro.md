@@ -2,7 +2,7 @@
 title: Deploy an Astro site
 lead: "Add Pail’s adapter to an Astro project. Prerendered pages are served as files, and pages rendered on demand and API routes are answered by a function."
 section: Deploying
-order: 6
+order: 7
 navLabel: Deploy an Astro site
 next:
   href: /git-providers/

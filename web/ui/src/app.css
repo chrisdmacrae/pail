@@ -327,6 +327,36 @@ body,
   margin: 0;
 }
 
+/* A variable: its name, then its value on one line, cut short if it is long. */
+.pl-var-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.pl-var-value {
+  flex: 1 1 80px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pl-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+.pl-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--water);
+}
+
 /* A long hostname keeps a line to itself; its status and Remove sit below. */
 .pl-addr {
   flex-wrap: wrap;

@@ -98,6 +98,16 @@ type MachineSpec struct {
 	User       string
 	Hostname   string
 
+	// Group, when set, names the machines that may reach each other: those
+	// started with the same Group, each known to the others by its
+	// Hostname. Peers is every Hostname in the group, this one's included.
+	// A machine in no group is reached by Pail and by nothing else.
+	Group string
+	Peers []string
+	// LAN lets the machine reach the home network, which no machine can
+	// otherwise: for a pail the person running Pail has named as trusted.
+	LAN bool
+
 	VCPUs int
 	MemMB int
 	// Log receives what the machine prints, a line at a time.

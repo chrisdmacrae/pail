@@ -4,12 +4,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -77,6 +81,56 @@ func machinesFor(ctx context.Context, cfg config.Config, logger *slog.Logger) (m
 	return vms, nil
 }
 
+// secretKey is the key pails' secrets are sealed with. PAIL_SECRETS_KEY
+// gives it, as any text. Otherwise Pail makes one the first time and keeps
+// it on local disk, beside everything else that isn't in the object store:
+// whoever holds the store alone can't read a secret. Without either, pails
+// can have variables and can't have secrets.
+func secretKey(cfg config.Config, logger *slog.Logger) []byte {
+	if cfg.SecretsKey != "" {
+		key := sha256.Sum256([]byte(cfg.SecretsKey))
+		return key[:]
+	}
+	file := filepath.Join(cfg.DataDir, "secrets.key")
+	read := func() []byte {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			return nil
+		}
+		key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+		if err != nil || len(key) != 32 {
+			logger.Error("the key for pails' secrets can't be read: it isn't one Pail made. Secrets are off until it is put right or removed", "file", file)
+			return nil
+		}
+		return key
+	}
+	if _, err := os.Stat(file); err == nil {
+		return read()
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		logger.Error("can't make a key for pails' secrets", "err", err)
+		return nil
+	}
+	err := os.MkdirAll(cfg.DataDir, 0o755)
+	if err == nil {
+		var f *os.File
+		if f, err = os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err == nil {
+			_, err = f.WriteString(hex.EncodeToString(key) + "\n")
+			err = errors.Join(err, f.Close())
+		}
+	}
+	if errors.Is(err, os.ErrExist) {
+		return read() // another Pail on this disk made it first
+	}
+	if err != nil {
+		logger.Warn("pails can't have secrets: there is nowhere to keep their key. Set PAIL_SECRETS_KEY, or give Pail a data folder it can write", "file", file, "err", err)
+		return nil
+	}
+	logger.Info("made the key pails' secrets are sealed with. Back it up: secrets can't be read without it", "file", file)
+	return key
+}
+
 func run(logger *slog.Logger) error {
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
@@ -107,6 +161,9 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	if len(cfg.AllowLAN) > 0 {
+		logger.Info("these pails' containers may reach the home network", "pails", strings.Join(cfg.AllowLAN, ","))
+	}
 	svc := pails.New(pails.Options{
 		Store:              store,
 		BaseDomain:         cfg.BaseDomain,
@@ -116,6 +173,8 @@ func run(logger *slog.Logger) error {
 		Dir:                cfg.DataDir,
 		MaxContainerMemory: cfg.MaxContainerMemory,
 		MaxFunctionMemory:  cfg.MaxFunctionMemory,
+		AllowLAN:           cfg.AllowLAN,
+		SecretKey:          secretKey(cfg, logger),
 		Logger:             logger,
 	})
 	if err := svc.Load(ctx); err != nil {

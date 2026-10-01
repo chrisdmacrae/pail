@@ -27,6 +27,7 @@ import { ago, clock } from '../time';
 import { UploadZone } from '../UploadZone';
 import { Addresses } from './Addresses';
 import { Connect } from './FromGit';
+import { Variables } from './Variables';
 
 const SOURCES: Record<string, string> = {
   cli: 'pail-cli',
@@ -313,6 +314,8 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
 
         <aside style={{ display: 'flex', flexDirection: 'column', gap: 32, minWidth: 0 }}>
           <Addresses pail={pail} info={info} />
+
+          <Variables pail={pail} info={info} />
 
           <dl className="pl-facts">
             <dt>Source</dt>

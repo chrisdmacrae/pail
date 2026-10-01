@@ -63,6 +63,7 @@ type flags struct {
 	yes     bool
 	follow  bool
 	output  bool
+	secret  bool
 	help    bool
 	version bool
 }
@@ -92,6 +93,11 @@ const usage = `pail puts things you host at home on a Pail installation.
   pail hosts <pail>              A pail's hostnames, and whether each points here
   pail hosts add <pail> <host>   Add a custom hostname
   pail hosts rm <pail> <host>    Remove one
+  pail env <pail>                A pail's variables, for pail.json's ${NAME}
+  pail env set <pail> NAME=value Set one or more; the next deploy uses them
+        --secret                 Keep them sealed, never to be shown again
+  pail env set <pail> NAME       The same, asking for the value or reading stdin
+  pail env rm <pail> NAME        Remove one or more
   pail open <pail>               Open the pail's URL in a browser
   pail ca                        Print the installation's root certificate
   pail rm <pail>                 Remove a pail and all its deploys; asks first
@@ -119,6 +125,7 @@ func Run(env Env) int {
 	fs.BoolVarP(&a.flags.yes, "yes", "y", false, "")
 	fs.BoolVarP(&a.flags.follow, "follow", "f", false, "")
 	fs.BoolVar(&a.flags.output, "output", false, "")
+	fs.BoolVar(&a.flags.secret, "secret", false, "")
 	fs.BoolVarP(&a.flags.help, "help", "h", false, "")
 	fs.BoolVar(&a.flags.version, "version", false, "")
 
@@ -156,6 +163,9 @@ func (a *app) dispatch(args []string) error {
 	if a.flags.name != "" && cmd != "up" {
 		return usagef("--name only goes with pail up.")
 	}
+	if a.flags.secret && (cmd != "env" || len(args) == 0 || args[0] != "set") {
+		return usagef("--secret only goes with pail env set.")
+	}
 	switch cmd {
 	case "login":
 		return a.login(args)
@@ -177,6 +187,8 @@ func (a *app) dispatch(args []string) error {
 		return a.stopStart(cmd, args)
 	case "hosts":
 		return a.hosts(args)
+	case "env":
+		return a.envVars(args)
 	case "open":
 		return a.open(args)
 	case "ca":
@@ -661,6 +673,128 @@ func (a *app) hosts(args []string) error {
 		fmt.Fprintf(w, "%s\t%s\t%s\n", h.Host, kind, pointing(h))
 	}
 	return w.Flush()
+}
+
+// envVars lists, sets or removes a pail's variables: what pail.json's
+// ${NAME} is filled in with. A secret's value is never shown.
+func (a *app) envVars(args []string) error {
+	const usage = "Try pail env blog, pail env set blog API_KEY=… --secret or pail env rm blog API_KEY."
+	action := "list"
+	if len(args) >= 3 && (args[0] == "set" || args[0] == "rm") {
+		action, args = args[0], args[1:]
+	} else if len(args) != 1 {
+		return usagef(usage)
+	}
+	pail, rest := args[0], args[1:]
+	path := "/api/v1/pails/" + pail + "/env"
+
+	// What to set is read before anything is sent, so a mistake in the
+	// third doesn't leave the first two changed.
+	type assignment struct{ name, value string }
+	var sets []assignment
+	if action == "set" {
+		for _, arg := range rest {
+			name, value, given := strings.Cut(arg, "=")
+			if !given {
+				var err error
+				if value, err = a.askValue(name, len(rest)); err != nil {
+					return err
+				}
+			}
+			sets = append(sets, assignment{name, value})
+		}
+	}
+
+	c, err := a.connect()
+	if err != nil {
+		return err
+	}
+	switch action {
+	case "set":
+		var saved []apiVariable
+		for _, set := range sets {
+			var v apiVariable
+			if err := c.put(path+"/"+url.PathEscape(set.name), map[string]any{"value": set.value, "secret": a.flags.secret}, &v); err != nil {
+				return err
+			}
+			saved = append(saved, v)
+		}
+		switch {
+		case a.flags.json:
+			return a.printJSON(map[string]any{"variables": saved})
+		case a.flags.quiet:
+		default:
+			kind := "variable"
+			if a.flags.secret {
+				kind = "secret"
+			}
+			for _, v := range saved {
+				fmt.Fprintf(a.env.Stdout, "Set the %s %s on %s.\n", kind, v.Name, pail)
+			}
+			fmt.Fprintf(a.env.Stdout, "What's running keeps what it started with. To use it now: pail redeploy %s\n", pail)
+		}
+		return nil
+
+	case "rm":
+		for _, name := range rest {
+			resp, err := c.do("DELETE", path+"/"+url.PathEscape(name), nil, 0, "")
+			if err != nil {
+				return err
+			}
+			resp.Body.Close()
+			if !a.flags.quiet && !a.flags.json {
+				fmt.Fprintf(a.env.Stdout, "Removed %s from %s.\n", name, pail)
+			}
+		}
+		return nil
+	}
+
+	var listed struct {
+		Variables []apiVariable `json:"variables"`
+	}
+	if err := c.get(path, &listed); err != nil {
+		return err
+	}
+	if a.flags.json {
+		return a.printJSON(listed)
+	}
+	if len(listed.Variables) == 0 && !a.flags.quiet {
+		fmt.Fprintf(a.env.Stdout, "%s has no variables. Set one with: pail env set %s NAME=value\n", pail, pail)
+		return nil
+	}
+	w := tabwriter.NewWriter(a.env.Stdout, 0, 0, 2, ' ', 0)
+	for _, v := range listed.Variables {
+		switch {
+		case a.flags.quiet:
+			fmt.Fprintln(w, v.Name)
+		case v.Secret:
+			fmt.Fprintf(w, "%s\t%s\n", v.Name, "(secret)")
+		default:
+			fmt.Fprintf(w, "%s\t%s\n", v.Name, v.Value)
+		}
+	}
+	return w.Flush()
+}
+
+// askValue gets the value of a variable given by name alone: typed at a
+// prompt that doesn't show it, or read from stdin, which keeps a secret out
+// of the shell's history. of is how many variables are being set.
+func (a *app) askValue(name string, of int) (string, error) {
+	if a.interactive() && a.env.ReadSecret != nil {
+		value, err := a.env.ReadSecret("Value for " + name + ": ")
+		if err != nil {
+			return "", usagef("Couldn't read the value: %v.", err)
+		}
+		return value, nil
+	}
+	if of != 1 || a.env.Stdin == nil {
+		return "", usagef("Give %s a value: %s=…. One variable at a time can take its value from stdin instead.", name, name)
+	}
+	raw, err := io.ReadAll(a.env.Stdin)
+	if err != nil {
+		return "", usagef("Couldn't read the value from stdin: %v.", err)
+	}
+	return strings.TrimRight(string(raw), "\r\n"), nil
 }
 
 // open opens the pail's URL in a browser, and prints it either way.

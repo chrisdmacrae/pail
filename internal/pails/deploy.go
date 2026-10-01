@@ -374,6 +374,11 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 		if cfg, err = parsePailJSON(p.pailJSON); err != nil {
 			return nil, err
 		}
+		// A variable pail.json uses and the pail lacks is said now, before
+		// anything is built.
+		if err := s.checkVariables(ctx, name, cfg); err != nil {
+			return nil, err
+		}
 	}
 	// A project with server code is built by its Dockerfiles and functions,
 	// not as a site.
