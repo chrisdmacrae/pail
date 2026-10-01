@@ -17,8 +17,8 @@ const docs = defineCollection({
     // navLabel is a shorter name for the sidebar, when the title is long.
     navLabel: z.string().optional(),
     // provider marks the guide for one provider, a DNS host or a git host,
-    // and holds the name Pail's settings use for it. These pages nest under
-    // their section's first page in the sidebar.
+    // and holds the name Pail's settings use for it. These pages are left out
+    // of the sidebar, and reached from their section's first page.
     provider: z.string().optional(),
     // providerTiles lists the section's provider guides as tiles under the lead.
     providerTiles: z.boolean().default(false),

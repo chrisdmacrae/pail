@@ -82,14 +82,10 @@ a:focus-visible,
 .dx-nav a:hover {
   background: var(--surface-sunk);
 }
-.dx-nav a[aria-current='page'] {
+.dx-nav a[aria-current] {
   background: var(--water-soft);
   color: var(--water-ink);
   font-weight: 600;
-}
-.dx-nav-sub a {
-  padding-left: var(--space-4);
-  color: var(--ink-muted);
 }
 
 /* Prose */
@@ -314,10 +310,6 @@ a:focus-visible,
   }
   .pa-top {
     padding: 0 var(--space-4);
-  }
-  .dx-nav-sub {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
   }
   .dx-nav a {
     min-height: 44px;

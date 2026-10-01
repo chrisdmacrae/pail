@@ -10,16 +10,20 @@ interface Props {
 }
 const { title, description } = Astro.props;
 
-// The sidebar is the collection: sections in a fixed order, pages by their
-// order, and provider guides nested under their section.
-const pages = (await getCollection('docs')).sort((a, b) => a.data.order - b.data.order);
+// The sidebar is the collection, two levels deep: sections in a fixed order,
+// and their pages by order. A provider's guide isn't listed; it is reached
+// from the tiles on its section's first page, which the sidebar marks while
+// the guide is open.
+const all = await getCollection('docs');
+const pages = all.filter((p) => !p.data.provider).sort((a, b) => a.data.order - b.data.order);
 const sections = ['Start here', 'Running Pail', 'Deploying', 'Git providers', 'Custom domains'].map((name) => ({
   name,
-  pages: pages.filter((p) => p.data.section === name && !p.data.provider),
-  providers: pages.filter((p) => p.data.section === name && p.data.provider),
+  pages: pages.filter((p) => p.data.section === name),
 }));
 const href = (id: string) => `/${id}/`;
 const here = Astro.url.pathname.replace(/\/?$/, '/');
+const guide = all.find((p) => p.data.provider && href(p.id) === here);
+const current = guide ? href(pages.find((p) => p.data.section === guide.data.section)?.id ?? guide.id) : here;
 ---
 
 <!doctype html>
@@ -65,19 +69,10 @@ const here = Astro.url.pathname.replace(/\/?$/, '/');
             <div class="dx-nav-group">
               <p class="dx-nav-title">{section.name}</p>
               {section.pages.map((p) => (
-                <a href={href(p.id)} aria-current={here === href(p.id) ? 'page' : undefined}>
+                <a href={href(p.id)} aria-current={current !== href(p.id) ? undefined : guide ? 'true' : 'page'}>
                   {p.data.navLabel ?? p.data.title}
                 </a>
               ))}
-              {section.providers.length > 0 && (
-                <div class="dx-nav-group dx-nav-sub">
-                  {section.providers.map((p) => (
-                    <a href={href(p.id)} aria-current={here === href(p.id) ? 'page' : undefined}>
-                      {p.data.navLabel ?? p.data.title}
-                    </a>
-                  ))}
-                </div>
-              )}
             </div>
           ))
         }
