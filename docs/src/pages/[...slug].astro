@@ -8,7 +8,7 @@ export async function getStaticPaths() {
 }
 
 const { page } = Astro.props;
-const { Content } = await render(page);
+const { Content, headings } = await render(page);
 
 // Guides by provider, for pages that offer the choice: the ones in the same
 // section as the page.
@@ -23,7 +23,7 @@ const git = page.data.section === 'Git providers';
 const place = page.data.section === 'Running Pail';
 ---
 
-<Docs title={page.data.title} description={page.data.lead} section={page.data.section}>
+<Docs title={page.data.title} description={page.data.lead} section={page.data.section} headings={headings}>
   <h1>{page.data.title}</h1>
   <p class="dx-lead">{page.data.lead}</p>
 

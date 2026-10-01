@@ -2,26 +2,181 @@
 import { getCollection } from 'astro:content';
 import Docs from '../layouts/Docs.astro';
 
-const pages = (await getCollection('docs', (p) => !p.data.provider)).sort((a, b) => a.data.order - b.data.order);
+// The cards link to pages by id, and take their names from the pages
+// themselves, so a page that is renamed is renamed here too.
+const pages = await getCollection('docs');
+const link = (id: string, label?: string) => {
+  const page = pages.find((p) => p.id === id);
+  if (!page) throw new Error(`The docs home links to ${id}, and there is no such page.`);
+  return { href: `/${id}/`, label: label ?? page.data.navLabel ?? page.data.title };
+};
+
+// The design system's 24px line icons, by name.
+const ICONS = {
+  terminal: '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7.5 9.5 3 2.5-3 2.5M13 15h4"/>',
+  upload: '<path d="M12 15V4.5M7.5 9 12 4.5 16.5 9M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
+  git: '<circle cx="6" cy="5.5" r="2"/><circle cx="6" cy="18.5" r="2"/><circle cx="18" cy="7.5" r="2"/><path d="M6 7.5v9M18 9.5v.5a4 4 0 0 1-4 4h-5a3 3 0 0 0-3 3"/>',
+  globe:
+    '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.6 3.6 5.6 3.6 9s-1.2 6.4-3.6 9c-2.4-2.6-3.6-5.6-3.6-9S9.6 5.6 12 3z"/>',
+};
+
+const cards: { title: string; icon: keyof typeof ICONS; tint: string; lead: string; links: ReturnType<typeof link>[] }[] =
+  [
+    {
+      title: 'Run it',
+      icon: 'terminal',
+      tint: 'pail',
+      lead: 'On a server at home, or on the machine you’re at.',
+      links: [
+        link('running', 'What Pail needs'),
+        link('running/proxmox', 'On Proxmox'),
+        link('running/docker', 'On Docker'),
+        link('running/podman', 'On Podman'),
+        link('running/storage'),
+      ],
+    },
+    {
+      title: 'Deploy',
+      icon: 'upload',
+      tint: 'water',
+      lead: 'A folder of files is the start. Then builds, functions and containers.',
+      links: [
+        link('deploying'),
+        link('deploying/functions'),
+        link('deploying/containers'),
+        link('deploying/variables'),
+        link('deploying/astro'),
+      ],
+    },
+    {
+      title: 'From git',
+      icon: 'git',
+      tint: 'live',
+      lead: 'Pick a repo, and every push is a deploy.',
+      links: [
+        link('git-providers', 'Set up a git provider'),
+        link('git-providers/github', 'GitHub'),
+        link('git-providers/gitlab', 'GitLab'),
+        link('git-providers/forgejo', 'Forgejo'),
+        link('git-providers/gitea', 'Gitea'),
+        link('git-providers/bitbucket', 'Bitbucket'),
+      ],
+    },
+    {
+      title: 'Your own domain',
+      icon: 'globe',
+      tint: 'pail',
+      lead: 'Real certificates, and pails at hostnames you choose.',
+      links: [link('custom-domains', 'Set up a custom domain'), link('custom-domains/cloudflare-tunnel', 'Behind a Cloudflare Tunnel')],
+    },
+  ];
 ---
 
-<Docs title="Pail docs" description="How to run Pail and put the things you host at home in it.">
-  <h1>Pail docs</h1>
-  <p class="dx-lead">
-    Pail is where you toss the things you host at home: static sites, PWAs and small server apps, each with one name,
-    one URL and one status. Toss it in the pail. It’s live.
-  </p>
+<Docs title="Pail docs" description="How to run Pail and put the things you host at home in it." wide>
+  <section class="dx-hero">
+    <div class="dx-hero-text">
+      <h1>Pail docs</h1>
+      <p class="dx-lead">
+        Pail is where you toss the things you host at home: static sites, PWAs and small server apps, each with one
+        name, one URL and one status. Toss it in the pail. It’s live.
+      </p>
+      <div class="dx-hero-actions">
+        <a class="pa-btn pa-btn-primary" href="/quickstart/">Start here</a>
+        <a class="dx-more" href="/deploying/">What Pail deploys →</a>
+      </div>
+    </div>
 
-  <ul class="dx-tiles" style="grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));">
+    <!-- The mark, large, with three things on their way in. -->
+    <svg class="dx-hero-art" viewBox="0 0 360 300" role="img" aria-label="Files dropping into a pail">
+      <g class="dx-art-fall">
+        <path d="M96 78v40M226 62v36"></path>
+      </g>
+      <g transform="rotate(-7 96 52)">
+        <rect class="dx-art-chip" x="40" y="34" width="112" height="36" rx="6"></rect>
+        <text class="dx-art-label" x="96" y="57" text-anchor="middle">index.html</text>
+      </g>
+      <g transform="rotate(6 226 38)">
+        <rect class="dx-art-chip" x="174" y="20" width="104" height="36" rx="6"></rect>
+        <text class="dx-art-label" x="226" y="43" text-anchor="middle">pail.json</text>
+      </g>
+      <path class="dx-art-fill" d="M111.2 200h137.6l-10.8 66.4H122z"></path>
+      <g class="dx-art-pail">
+        <path d="M120 160a60 60 0 0 1 120 0"></path>
+        <path
+          d="M88 160h184M102.4 160l16.8 107.2a12.8 12.8 0 0 0 12.8 11.2h96a12.8 12.8 0 0 0 12.8-11.2l16.8-107.2"
+        ></path>
+      </g>
+      <!-- The third is passing through the handle, in front of it. -->
+      <g transform="rotate(-4 180 126)">
+        <rect class="dx-art-chip" x="126" y="108" width="108" height="36" rx="6"></rect>
+        <text class="dx-art-label" x="180" y="131" text-anchor="middle">Dockerfile</text>
+      </g>
+      <g transform="translate(266 214)">
+        <rect class="dx-art-live" width="74" height="28" rx="14"></rect>
+        <circle class="dx-art-live-dot" cx="16" cy="14" r="4.5"></circle>
+        <text class="dx-art-live-text" x="28" y="19">Live</text>
+      </g>
+    </svg>
+  </section>
+
+  <section class="dx-card dx-start">
+    <div class="dx-start-text">
+      <h2>One command</h2>
+      <p>
+        From a folder with an <code>index.html</code> in it, <code>pail up</code> packs it, sends it, and prints where it
+        lives. Run it again after a change and the address serves the new files.
+      </p>
+      <p><a class="dx-more" href="/quickstart/">The quickstart, from nothing to your first pail →</a></p>
+    </div>
+    <div class="pa-log dx-start-log" aria-label="What pail up prints">
+      <div class="pa-log-line"><span class="pa-log-time">$</span><span>pail up</span></div>
+      <div class="pa-log-line pa-log-step"><span class="pa-log-time">14:02</span><span>→ pail up from 10.0.0.23</span></div>
+      <div class="pa-log-line"><span class="pa-log-time">14:02</span><span>unpacking 12 files · found index.html</span></div>
+      <div class="pa-log-line"><span class="pa-log-time">14:02</span><span>→ swapping blog.pail.lan to a1f9e02</span></div>
+      <div class="pa-log-line pa-log-ok"><span class="pa-log-time">14:02</span><span>✓ live at https://blog.pail.lan</span></div>
+    </div>
+  </section>
+
+  <ul class="dx-cards">
     {
-      pages.map((p) => (
-        <li>
-          <a class="pa-source dx-tile" href={`/${p.id}/`}>
-            <span class="pa-source-label">{p.data.title}</span>
-            <span class="pa-source-hint">{p.data.lead}</span>
-          </a>
+      cards.map((card) => (
+        <li class={`dx-card dx-card-${card.tint}`}>
+          <h2>
+            <span class="dx-card-icon">
+              <svg
+                class="pa-icon"
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+                set:html={ICONS[card.icon]}
+              />
+            </span>
+            {card.title}
+          </h2>
+          <p class="dx-card-lead">{card.lead}</p>
+          <ul class="dx-card-links">
+            {card.links.map((l) => (
+              <li>
+                <a href={l.href}>
+                  <span>{l.label}</span>
+                  <span aria-hidden="true">→</span>
+                </a>
+              </li>
+            ))}
+          </ul>
         </li>
       ))
     }
   </ul>
+
+  <p class="dx-home-foot">
+    Pail is open source. The code, and where to say something is wrong, is on{' '}
+    <a href="https://github.com/chrisdmacrae/pail">GitHub</a>.
+  </p>
 </Docs>

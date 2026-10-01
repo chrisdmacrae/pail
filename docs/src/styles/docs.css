@@ -150,6 +150,16 @@ a:focus-visible,
   align-items: start;
 }
 
+/* With the list of a page's headings there are three columns, and the shell
+   is as much wider as the list. */
+.dx-shell-toc {
+  max-width: 1280px;
+  grid-template-columns: 208px minmax(0, 1fr) 192px;
+}
+.dx-shell-wide {
+  max-width: 1200px;
+}
+
 /* Sidebar */
 .dx-nav {
   position: sticky;
@@ -191,6 +201,45 @@ a:focus-visible,
   background: var(--water-soft);
   color: var(--water-ink);
   font-weight: 600;
+}
+
+/* On this page: the page's headings, beside it, with the one you are at
+   marked. */
+.dx-toc {
+  position: sticky;
+  top: calc(64px + var(--space-6));
+  max-height: calc(100vh - 64px - var(--space-12));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+  line-height: 20px;
+}
+.dx-toc .dx-nav-title {
+  padding: 0 var(--space-3);
+  margin-bottom: var(--space-2);
+}
+.dx-toc a {
+  padding: 6px var(--space-3);
+  border-left: 2px solid var(--line);
+  color: var(--ink-muted);
+  text-decoration: none;
+}
+.dx-toc a.dx-toc-sub {
+  padding-left: var(--space-6);
+}
+.dx-toc a:hover {
+  color: var(--ink);
+}
+.dx-toc a[aria-current] {
+  border-left-color: var(--water-ink);
+  color: var(--water-ink);
+  font-weight: 600;
+}
+.dx-toc a:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-ring);
+  border-radius: 2px;
 }
 
 /* Prose */
@@ -392,18 +441,215 @@ a:focus-visible,
   text-decoration: underline;
 }
 
+
+/* Home: the title beside the mark at work, then where to go. */
+.dx-main-wide {
+  max-width: none;
+}
+.dx-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 340px);
+  gap: var(--space-8);
+  align-items: center;
+}
+.dx-hero-text > * + * {
+  margin-top: var(--space-4);
+}
+.dx-main .dx-hero h1 {
+  font-size: 56px;
+  line-height: 60px;
+}
+.dx-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  flex-wrap: wrap;
+  padding-top: var(--space-2);
+}
+.dx-hero-actions .pa-btn {
+  text-decoration: none;
+}
+.dx-more {
+  font-weight: 600;
+  text-decoration: none;
+}
+.dx-more:hover {
+  text-decoration: underline;
+}
+.dx-hero-art {
+  width: 100%;
+  height: auto;
+}
+.dx-art-pail {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 14;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.dx-art-fill {
+  fill: var(--pail);
+}
+.dx-art-fall {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 2 7;
+}
+.dx-art-chip {
+  fill: var(--surface-raised);
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+}
+.dx-art-label {
+  font: 500 14px var(--font-mono);
+  fill: var(--ink);
+}
+.dx-art-live {
+  fill: var(--live-soft);
+}
+.dx-art-live-dot {
+  fill: var(--live);
+}
+.dx-art-live-text {
+  font: 600 13px var(--font-sans);
+  letter-spacing: 0.03em;
+  fill: var(--live);
+}
+
+/* Cards: a raised surface with a heading and what is under it. */
+.dx-card {
+  padding: var(--space-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-sm);
+}
+.dx-main .dx-card h2 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 22px;
+  line-height: 28px;
+}
+.dx-main > .dx-start {
+  margin-top: var(--space-12);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: var(--space-8);
+  align-items: center;
+}
+.dx-start-text > * + * {
+  margin-top: var(--space-3);
+}
+.dx-start-log {
+  max-height: none;
+}
+.dx-main .dx-cards {
+  margin-top: var(--space-4);
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+.dx-main .dx-cards > li {
+  margin: 0;
+}
+.dx-card-icon {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: var(--pail-soft);
+  color: var(--pail-ink);
+}
+.dx-card-water .dx-card-icon {
+  background: var(--water-soft);
+  color: var(--water-ink);
+}
+.dx-card-live .dx-card-icon {
+  background: var(--live-soft);
+  color: var(--live);
+}
+.dx-card-lead {
+  margin: var(--space-3) 0 0;
+  color: var(--ink-muted);
+}
+.dx-main .dx-card-links {
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.dx-main .dx-card-links li {
+  margin: 0;
+  border-top: 1px solid var(--line);
+}
+.dx-card-links a {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 10px 0;
+  text-decoration: none;
+  font-weight: 500;
+}
+.dx-card-links a:hover span:first-child {
+  text-decoration: underline;
+}
+.dx-main > .dx-home-foot {
+  margin-top: var(--space-12);
+  color: var(--ink-muted);
+  text-align: center;
+}
+
+/* The list of headings goes first, when there isn't room for three columns. */
+@media (max-width: 1120px) {
+  .dx-shell-toc {
+    max-width: 1040px;
+    grid-template-columns: 208px minmax(0, 1fr);
+  }
+  .dx-toc {
+    display: none;
+  }
+}
+
 @media (max-width: 860px) {
   .dx-shell {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-8);
     padding: var(--space-6) var(--space-4) 56px;
   }
+  .dx-shell-toc {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* On a narrow screen the page comes first, and the way around the docs
+     is at its foot. */
   .dx-nav {
+    order: 1;
     position: static;
     max-height: none;
     overflow: visible;
-    padding-bottom: var(--space-6);
-    border-bottom: 1px solid var(--line);
+    padding-top: var(--space-6);
+    border-top: 1px solid var(--line);
+  }
+  .dx-hero,
+  .dx-main > .dx-start {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .dx-hero-art {
+    max-width: 280px;
+    justify-self: center;
+  }
+  .dx-main .dx-hero h1 {
+    font-size: 40px;
+    line-height: 44px;
+  }
+  .dx-main .dx-cards {
+    grid-template-columns: minmax(0, 1fr);
   }
   .dx-main h1 {
     font-size: 32px;

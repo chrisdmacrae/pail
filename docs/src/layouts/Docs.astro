@@ -10,8 +10,17 @@ interface Props {
   description: string;
   // section is drawn above the title in the page's social image.
   section?: string;
+  // headings are the page's own, for the list of what is on it.
+  headings?: { depth: number; slug: string; text: string }[];
+  // wide lets the page use the room the list of headings would take.
+  wide?: boolean;
 }
-const { title, description, section } = Astro.props;
+const { title, description, section, headings = [], wide = false } = Astro.props;
+
+// On this page: the headings a page is divided by, and the ones under them.
+// A page with one heading or none has nothing to choose between.
+const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
+const hasToc = !wide && toc.length > 1;
 
 // The picture a link to this page unfurls with is drawn on demand by
 // src/pages/api/og.png.ts, from what the address says. Whatever reads the tag
@@ -83,7 +92,7 @@ const current = guide ? href(pages.find((p) => p.data.section === guide.data.sec
       <Search />
     </header>
 
-    <div class="dx-shell">
+    <div class:list={['dx-shell', hasToc && 'dx-shell-toc', wide && 'dx-shell-wide']}>
       <nav class="dx-nav" aria-label="Docs">
         {
           sections.map((section) => (
@@ -99,10 +108,59 @@ const current = guide ? href(pages.find((p) => p.data.section === guide.data.sec
         }
       </nav>
 
-      <main class="dx-main">
+      <main class:list={['dx-main', wide && 'dx-main-wide']} id="top">
         <slot />
       </main>
+
+      {
+        hasToc && (
+          <nav class="dx-toc" aria-label="On this page">
+            <p class="dx-nav-title">On this page</p>
+            <a href="#top">Overview</a>
+            {toc.map((h) => (
+              <a href={`#${h.slug}`} class={h.depth === 3 ? 'dx-toc-sub' : undefined}>
+                {h.text}
+              </a>
+            ))}
+          </nav>
+        )
+      }
     </div>
+
+    <script>
+      // On this page marks the heading you are at: the last one to have
+      // passed the line a jump to a heading lands on, just under the header.
+      const toc = document.querySelector('.dx-toc');
+      if (toc) {
+        const links = [...toc.querySelectorAll('a')];
+        const targets = links.map((a) => document.getElementById(decodeURIComponent(a.hash.slice(1))));
+        const line = 64 + 24 + 8;
+        let waiting = false;
+        const mark = () => {
+          waiting = false;
+          let at = 0;
+          targets.forEach((target, i) => {
+            if (i > 0 && target && target.getBoundingClientRect().top <= line) at = i;
+          });
+          // The last heading may sit too low ever to reach the line: at the
+          // foot of the page it is where you are.
+          const foot = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
+          if (foot && window.scrollY > 0) at = links.length - 1;
+          links.forEach((a, i) => {
+            if (i === at) a.setAttribute('aria-current', 'true');
+            else a.removeAttribute('aria-current');
+          });
+        };
+        const soon = () => {
+          if (waiting) return;
+          waiting = true;
+          requestAnimationFrame(mark);
+        };
+        window.addEventListener('scroll', soon, { passive: true });
+        window.addEventListener('resize', soon);
+        mark();
+      }
+    </script>
 
     <script>
       // Every code block gets a Copy button, like the design system's
