@@ -106,9 +106,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":     s.version,
 		"base_domain": s.cfg.BaseDomain,
-		// Custom hostnames need Let's Encrypt mode: the internal CA can only
-		// sign for the base domain.
-		"custom_hostnames": s.cfg.ACME.Enabled(),
+		// Custom hostnames need Let's Encrypt mode, or a proxy that handles
+		// HTTPS: the internal CA can only sign for the base domain.
+		"custom_hostnames": s.customHostnames(),
 		// "off", "internal" (Pail's own authority, whose root devices trust
 		// once) or "acme" (Let's Encrypt).
 		"tls": s.TLSMode(),
@@ -239,8 +239,8 @@ func (s *Server) handleAddHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", `Say which hostname to add: {"host": "recipes.home.example"}.`)
 		return
 	}
-	if !s.cfg.ACME.Enabled() {
-		writeError(w, http.StatusConflict, "needs_acme", "Custom hostnames need a domain you own and a DNS token. Set PAIL_ACME_DNS_PROVIDER and PAIL_ACME_DNS_TOKEN on the server.")
+	if !s.customHostnames() {
+		writeError(w, http.StatusConflict, "needs_acme", "Custom hostnames need a domain you own and a DNS token, or a proxy in front of Pail that handles HTTPS. Set PAIL_ACME_DNS_PROVIDER and PAIL_ACME_DNS_TOKEN on the server, or PAIL_TLS=off behind the proxy.")
 		return
 	}
 	r.SetPathValue("host", pails.CleanHost(body.Host))

@@ -24,7 +24,9 @@ Dashboards change. If a label here doesn’t match what you see, Njalla’s own 
 
 ## Point your names at Pail
 
-In Njalla’s DNS for `example.com`, add two records. Both point to the address of the server Pail runs on; a private address like `10.0.0.50` is fine.
+In Njalla’s DNS for `example.com`, add two records. Both point to the address of the server Pail runs on.
+
+A private address like `10.0.0.50` is fine if Pail only needs to work on your home network. Away from home, nothing can connect to it. To open Pail from anywhere, see [Reach Pail from outside your network](/custom-domains/#reach-pail-from-outside-your-network).
 
 | Type | Name | Points to |
 | --- | --- | --- |

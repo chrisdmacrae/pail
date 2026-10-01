@@ -59,7 +59,7 @@ Pail is configured entirely by environment variables. There is no settings scree
 | `PAIL_MAX_CONTAINER_MEMORY` | `2GB` | The most memory one container may ask for. |
 | `PAIL_DATA_DIR` | `/var/lib/pail` | Local disk for what builds and containers need, and where containers’ data is kept. |
 | `PAIL_FIRECRACKER`, `PAIL_KERNEL` | `firecracker`, `<data dir>/vmlinux` | The Firecracker binary and the kernel its virtual machines boot. |
-| `PAIL_TLS` | on | `off` serves plain HTTP only, for running behind a proxy that handles HTTPS itself. |
+| `PAIL_TLS` | on | `off` serves plain HTTP only, for running behind a proxy that handles HTTPS itself, such as a [Cloudflare Tunnel](/custom-domains/cloudflare-tunnel/). Pails can take custom hostnames then, because the proxy holds their certificates. |
 
 [Custom domains](/custom-domains/) and [git providers](/git-providers/) have settings of their own, covered in their guides.
 

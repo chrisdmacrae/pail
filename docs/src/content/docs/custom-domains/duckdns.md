@@ -23,7 +23,9 @@ Dashboards change. If a label here doesn’t match what you see, Duck DNS’s ow
 
 ## Point your names at Pail
 
-Duck DNS has no records to add. Set your subdomain’s **current ip** to the address of the server Pail runs on. A private address like `10.0.0.50` is fine. Duck DNS then sends `garden.duckdns.org` and every name under it to that address.
+Duck DNS has no records to add. Set your subdomain’s **current ip** to the address of the server Pail runs on. Duck DNS then sends `garden.duckdns.org` and every name under it to that address.
+
+A private address like `10.0.0.50` is fine if Pail only needs to work on your home network. Away from home, nothing can connect to it. To open Pail from anywhere, see [Reach Pail from outside your network](/custom-domains/#reach-pail-from-outside-your-network).
 
 > **Issuing takes a little longer.** Duck DNS holds one verification record at a time, so Pail proves the base domain and its wildcard one after the other.
 

@@ -13,9 +13,12 @@ Out of the box, every pail lives under `pail.lan` and Pail signs its own certifi
 
 - **Pail proves the domain is yours through your DNS provider.** It asks the provider’s API to publish a short-lived record, and Let’s Encrypt checks for it. That is what the API token is for.
 - **Nothing has to be reachable from the internet.** Pail can sit on a private address with no ports open. Only the DNS record is public.
+- **A private address works at home only.** The name resolves everywhere, but only devices on your network can connect to the address behind it. To open Pail from anywhere, see [Reach Pail from outside your network](#reach-pail-from-outside-your-network).
 - **One certificate covers every pail.** Pail gets a wildcard for its base domain, so `blog.pail.example.com` and every pail after it are covered from the start.
 - **Extra hostnames get their own.** Add `blog.example.com` to a pail and Pail gets that name a certificate too.
 - **Renewal is automatic.** Pail replaces each certificate well before it runs out.
+
+> **Behind a proxy that handles HTTPS,** none of this is needed. With `PAIL_TLS=off`, Pail serves plain HTTP, the proxy holds the certificates, and pails can take extra hostnames without a DNS token. A [Cloudflare Tunnel](/custom-domains/cloudflare-tunnel/) is the usual case.
 
 ## Before you start
 
@@ -29,7 +32,7 @@ You need three things:
 
 1. **Make the token.** Follow the guide for your provider, then come back here.
 
-2. **Point the names at Pail.** Add two records, both to the address of the server Pail runs on. A private address like `10.0.0.50` is fine.
+2. **Point the names at Pail.** Add two records, both to the address of the server Pail runs on. A private address like `10.0.0.50` is fine if Pail only needs to work on your home network. For anywhere else, see [Reach Pail from outside your network](#reach-pail-from-outside-your-network).
 
    | Type | Name | Points to |
    | --- | --- | --- |
@@ -96,6 +99,49 @@ Each hostname shows **Points here** or **Not pointing here yet**.
 
 > **The token has to cover the name.** Pail gets the certificate through the same token, so the hostname must be in a DNS zone that token can edit. If it isn’t, Pail refuses the hostname and says so.
 
+## Reach Pail from outside your network
+
+A private address only means something on your own network. Away from home, `pail.example.com` still resolves, but nothing answers at the address it gives. There are three ways to change that. The first two keep Pail’s certificates as they are. The third hands them to Cloudflare.
+
+| Way | Who can reach Pail | What it needs |
+| --- | --- | --- |
+| A VPN | Your own devices | A VPN app on each device |
+| Port forwarding | Anyone | A public address from your internet provider |
+| A Cloudflare Tunnel | Anyone | Your domain on Cloudflare. No Let’s Encrypt. |
+
+### Keep it private with a VPN
+
+Leave the records on the private address and join your devices to your home network instead. A VPN such as Tailscale or WireGuard, set up to carry your home network’s addresses, lets a phone or laptop reach Pail from anywhere while nothing is open to the internet. Only devices on the VPN get in.
+
+### Forward ports from your router
+
+Your router has the one public address your home gets. Forwarding tells it to hand connections on two ports to Pail.
+
+1. **Give Pail’s server a fixed address.** Reserve its address in your router’s DHCP settings, or set a fixed one on the server. A forward points at an address, and stops working if the server gets another.
+
+2. **Forward the ports.** In your router’s settings, look for **Port forwarding**, **Virtual servers** or **NAT**. Forward TCP ports `443` and `80` to Pail’s address, each to the same port. Pail serves everything on `443`; `80` is there so a plain `http://` link gets sent to HTTPS.
+
+3. **Point the records at your public address.** Your router’s status page shows it, usually as the WAN or internet address. Change both records from the private address to that one.
+
+   | Type | Name | Points to |
+   | --- | --- | --- |
+   | A | `pail.example.com` | Your public address |
+   | A | `*.pail.example.com` | Your public address |
+
+4. **Try it from outside.** Turn off Wi-Fi on a phone and open `https://pail.example.com` over mobile data. Testing from inside your network doesn’t prove anything.
+
+> **This puts Pail on the internet.** The sign-in page and every pail can be reached by anyone. Pail’s token is the only key, so keep it long and keep it to yourself.
+
+**If your public address changes.** Most home connections get a new address now and then, and the records go stale when it does. Many routers can keep a record up to date by themselves: look for **Dynamic DNS** in the router’s settings. If your name is with [Duck DNS](/custom-domains/duckdns/), this is what it is made for.
+
+**If your provider shares one address between customers.** Some providers, most mobile and rural ones among them, put many homes behind one public address. Port forwarding can’t work there. Compare the WAN address your router shows with the one a site such as `ifconfig.me` reports. If they differ, or the router’s begins with `10.`, `192.168.`, or `100.64.` to `100.127.`, you are behind one. Use a [Cloudflare Tunnel](/custom-domains/cloudflare-tunnel/) or a VPN instead.
+
+**If names stop opening at home.** Some routers can’t send a connection out to their own public address and back in. If Pail opens on mobile data but not on your Wi-Fi, add the two records on your home resolver, pointing at Pail’s private address. Devices at home then connect straight to it.
+
+### Use a Cloudflare Tunnel
+
+A small program on your network connects out to Cloudflare, and Cloudflare sends visitors down that connection. No ports are opened, and it works behind a shared address. Cloudflare holds the certificates, so Pail needs no Let’s Encrypt and no DNS token. Uploads through it are limited in size. [Cloudflare Tunnel](/custom-domains/cloudflare-tunnel/) has the steps.
+
 ## When it doesn’t work
 
 **Pail won’t start, and says the provider “isn’t one Pail knows”.** `PAIL_ACME_DNS_PROVIDER` has a typo, or names a provider Pail doesn’t support. The message lists the ones it does.
@@ -113,6 +159,8 @@ Each hostname shows **Points here** or **Not pointing here yet**.
   ```
 
 **A hostname is refused with “couldn’t get a certificate”.** It isn’t in a zone the token can edit. Widen the token to include that zone, or move the hostname’s DNS to the same provider.
+
+**Pail opens at home but nowhere else.** The records point at a private address, which only your network can reach. See [Reach Pail from outside your network](#reach-pail-from-outside-your-network).
 
 **The browser warns about the certificate.** If `PAIL_ACME_DIRECTORY` still points at staging, remove it and restart.
 

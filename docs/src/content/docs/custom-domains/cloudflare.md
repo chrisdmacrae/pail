@@ -28,7 +28,9 @@ Dashboards change. If a label here doesn’t match what you see, Cloudflare’s 
 
 ## Point your names at Pail
 
-In Cloudflare’s DNS for `example.com`, add two records. Both point to the address of the server Pail runs on; a private address like `10.0.0.50` is fine.
+In Cloudflare’s DNS for `example.com`, add two records. Both point to the address of the server Pail runs on.
+
+A private address like `10.0.0.50` is fine if Pail only needs to work on your home network. Away from home, nothing can connect to it. To open Pail from anywhere, see [Reach Pail from outside your network](/custom-domains/#reach-pail-from-outside-your-network).
 
 | Type | Name | Points to |
 | --- | --- | --- |
@@ -37,7 +39,7 @@ In Cloudflare’s DNS for `example.com`, add two records. Both point to the addr
 
 That makes `pail.example.com` Pail’s base domain, and a pail called blog lives at `blog.pail.example.com`. Use another name in place of `pail` if you like.
 
-> **Keep these records DNS only.** Turn the proxy off for both (the grey cloud). Cloudflare can’t proxy to a private address on your network.
+> **Keep these records DNS only.** Turn the proxy off for both (the grey cloud). Cloudflare can’t proxy to a private address on your network. To send visitors through Cloudflare instead, with no ports open at home, use a [Cloudflare Tunnel](/custom-domains/cloudflare-tunnel/). That needs no API token: Cloudflare holds the certificates.
 
 ## Tell Pail
 

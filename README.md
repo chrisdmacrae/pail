@@ -134,7 +134,7 @@ Everything is an environment variable on the server.
 | `PAIL_MAX_DEPLOYS` | `10` | Good deploys kept per pail for rollback. Failed ones don't count. |
 | `PAIL_MAX_FUNCTION_MEMORY` | `1GB` | The most memory one copy of a function may ask for in `pail.json`. A deploy that asks for more fails before anything is built. |
 | `PAIL_MAX_CONTAINER_MEMORY` | `2GB` | The most memory one container may ask for in `pail.json`. A deploy that asks for more fails before anything is built. |
-| `PAIL_ACME_DNS_PROVIDER` · `PAIL_ACME_DNS_TOKEN` | unset | Set both to get certificates from Let's Encrypt by DNS-01, and to allow custom hostnames. The provider is one of `bunny`, `cloudflare`, `desec`, `digitalocean`, `duckdns`, `gandi`, `hetzner`, `netlify`, `njalla`. |
+| `PAIL_ACME_DNS_PROVIDER` · `PAIL_ACME_DNS_TOKEN` | unset | Set both to get certificates from Let's Encrypt by DNS-01, which also allows custom hostnames. The provider is one of `bunny`, `cloudflare`, `desec`, `digitalocean`, `duckdns`, `gandi`, `hetzner`, `netlify`, `njalla`. |
 | `PAIL_ACME_EMAIL` | unset | Optional address for Let's Encrypt's expiry notices. |
 | `PAIL_ACME_DIRECTORY` | Let's Encrypt production | Another ACME directory, such as Let's Encrypt's staging one while you're trying things out. |
 | `PAIL_ACME_RESOLVERS` | the system's | DNS servers to check the challenge record with, comma-separated, e.g. `1.1.1.1:53`. Set it when your home resolver answers for the domain itself and would never see the public record. |
@@ -145,7 +145,7 @@ Everything is an environment variable on the server.
 | `PAIL_KERNEL` | `<data dir>/vmlinux` | The guest kernel every microVM boots. |
 | `PAIL_LISTEN` | `:80` | Address the plain-HTTP listener binds. |
 | `PAIL_LISTEN_TLS` | `:443` | Address the HTTPS listener binds. |
-| `PAIL_TLS` | on | `off` serves everything over plain HTTP: for development, or behind a proxy that terminates TLS itself. |
+| `PAIL_TLS` | on | `off` serves everything over plain HTTP: for development, or behind a proxy that terminates TLS itself. Custom hostnames are allowed, since the proxy holds their certificates. |
 | `PAIL_S3_ENDPOINT` | none (required) | versitygw's URL, e.g. `http://versitygw:7070`. |
 | `PAIL_S3_ACCESS_KEY` · `PAIL_S3_SECRET_KEY` | none (required) | versitygw credentials. |
 | `PAIL_S3_BUCKET` | `pail` | Bucket Pail keeps everything in; created if missing. |
@@ -168,7 +168,7 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 | `POST /api/v1/pails/{name}/redeploy` | Starts a deploy that copies the latest good one. Answers `202` like an upload; `409` if no deploy has finished. |
 | `POST /api/v1/pails/{name}/stop` · `/start` | Turns the pail Off or back on; answers with the pail. |
 | `GET /api/v1/pails/{name}/hosts` | The pail's addresses, its own first, each with `points_here` from a fresh DNS check. |
-| `POST /api/v1/pails/{name}/hosts` | Body `{"host": "recipes.home.example"}`. Adds a custom hostname and checks it. `409` unless Let's Encrypt mode is on, or if another pail has it. |
+| `POST /api/v1/pails/{name}/hosts` | Body `{"host": "recipes.home.example"}`. Adds a custom hostname and checks it. `409` unless Let's Encrypt mode is on or `PAIL_TLS` is `off`, or if another pail has it. |
 | `DELETE /api/v1/pails/{name}/hosts/{host}` | Removes a custom hostname. |
 | `GET /api/v1/check` | The DNS self-check for the base domain: do names under it reach this Pail? |
 | `GET /api/v1/git` | The five git hosts, and which are connected. |
@@ -355,7 +355,7 @@ Pail routes by the Host header, so every pail name and custom hostname has to re
 - **In the UI**, Your pails shows a note when names under the base domain don't reach Pail, and a pail's Addresses show "Points here" or "Not pointing here yet" for each hostname.
 - **`pail hosts`** reports the same.
 
-A hostname is added whether or not its DNS is ready; it starts answering as soon as it points here. Custom hostnames need Let's Encrypt mode (see TLS).
+A hostname is added whether or not its DNS is ready; it starts answering as soon as it points here. Custom hostnames need Let's Encrypt mode, or a proxy that handles HTTPS in front of Pail (see TLS).
 
 ## TLS
 
@@ -368,6 +368,8 @@ Pail serves every pail over HTTPS from its own listener. The plain listener answ
 - **First start waits.** Pail doesn't begin serving until it has the wildcard, and refuses to start, saying why, if it can't get one.
 - **Adding a hostname waits too.** `pail hosts add` and the UI return once the hostname's certificate is issued. If Let's Encrypt won't issue one, because the hostname isn't in a zone the token can edit, the hostname isn't added.
 - **Try it on staging first.** Let's Encrypt's production directory has rate limits. Set `PAIL_ACME_DIRECTORY=https://acme-staging-v02.api.letsencrypt.org/directory` until it works, then remove it.
+
+**Behind a proxy (`PAIL_TLS=off`).** Pail serves plain HTTP on `PAIL_LISTEN` and gets no certificates; whatever is in front of it, a reverse proxy or a Cloudflare Tunnel, holds them and answers HTTPS. Custom hostnames are allowed, and are added without a certificate: the proxy has to answer for each one and pass it on with its `Host` unchanged. Pail reads `X-Forwarded-Proto` to tell whether the visitor came over HTTPS.
 
 The base domain needs at least two labels (`pail.lan`, not `localhost`): browsers refuse a wildcard certificate directly under a single-label name. `make dev` runs with `PAIL_TLS=off` for that reason.
 

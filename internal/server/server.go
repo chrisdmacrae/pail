@@ -94,6 +94,14 @@ func (s *Server) TLSMode() string {
 	return s.certs.Mode()
 }
 
+// customHostnames reports whether pails can take hostnames beyond the base
+// domain. Something has to hold a certificate for each: Pail, which gets one
+// from Let's Encrypt, or a proxy in front of it that terminates TLS itself.
+// Pail's own authority can't: it only signs for the base domain.
+func (s *Server) customHostnames() bool {
+	return s.cfg.ACME.Enabled() || s.cfg.TLSOff
+}
+
 // Plain is what the plain-HTTP listener serves when HTTPS is on: the DNS
 // self-check, the root certificate for devices that don't trust it yet, and
 // a redirect to HTTPS for everything else.

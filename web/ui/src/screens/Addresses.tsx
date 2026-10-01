@@ -111,7 +111,9 @@ export function Addresses({ pail, info }: { pail: Pail; info: Info | null }) {
             </p>
           )}
           <p className="pl-small">
-            Point it at this Pail server: a CNAME to {info.base_domain}, or an A record to this server’s address.
+            {info.tls === 'off'
+              ? 'This Pail serves plain HTTP, so the proxy in front of it has to answer for the hostname and pass it on.'
+              : `Point it at this Pail server: a CNAME to ${info.base_domain}, or an A record to this server’s address.`}
           </p>
         </>
       )}
@@ -125,7 +127,8 @@ export function Addresses({ pail, info }: { pail: Pail; info: Info | null }) {
           <p className="pl-small">
             Custom hostnames need a domain you own and a DNS token, set with{' '}
             <code className="pl-mono">PAIL_ACME_DNS_PROVIDER</code> and{' '}
-            <code className="pl-mono">PAIL_ACME_DNS_TOKEN</code>.
+            <code className="pl-mono">PAIL_ACME_DNS_TOKEN</code>, or a proxy in front of Pail that handles HTTPS, with{' '}
+            <code className="pl-mono">PAIL_TLS=off</code>.
           </p>
         </>
       )}

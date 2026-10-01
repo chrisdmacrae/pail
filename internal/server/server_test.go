@@ -576,6 +576,13 @@ func TestCustomHostnames(t *testing.T) {
 	f.srv = plain
 	wantBody(t, add("blog", "x.home.example"), http.StatusConflict, "PAIL_ACME_DNS_PROVIDER and PAIL_ACME_DNS_TOKEN")
 	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"custom_hostnames":false`)
+
+	// Behind a proxy that handles HTTPS, there is no certificate to get, so
+	// hostnames are taken as they are.
+	f.srv = New(Options{Config: config.Config{Token: token, BaseDomain: "pail.lan", TLSOff: true}, Pails: f.svc, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Version: "test"})
+	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"custom_hostnames":true`)
+	wantBody(t, add("blog", "x.home.example"), http.StatusCreated, "x.home.example")
+	wantBody(t, f.site("x.home.example", "/"), 200, "blog")
 }
 
 func TestHTTPS(t *testing.T) {
