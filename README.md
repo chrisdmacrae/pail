@@ -20,7 +20,7 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | — | TLS: Pail's own certificate authority, and Let's Encrypt by DNS-01 | done |
 | 6 | Git hosts: token first, then OAuth | done |
 | 7 | Firecracker microVMs: the build VM, containers, and the KVM check | done |
-| 8 | pail.json functions: base images, snapshots, sleep when idle, and routing | |
+| 8 | pail.json functions: base images, snapshots, sleep when idle, and routing | done |
 
 ## Layout
 
@@ -132,7 +132,7 @@ Everything is an environment variable on the server.
 | `PAIL_BASE_DOMAIN` | `pail.lan` | The domain every pail gets a name under. |
 | `PAIL_MAX_UPLOAD_SIZE` | `100MB` | Largest archive accepted; bigger ones get a 413. |
 | `PAIL_MAX_DEPLOYS` | `10` | Good deploys kept per pail for rollback. Failed ones don't count. |
-| `PAIL_MAX_FUNCTION_MEMORY` | `1GB` | Reported by `/api/v1/info`; not enforced until functions exist. |
+| `PAIL_MAX_FUNCTION_MEMORY` | `1GB` | The most memory one copy of a function may ask for in `pail.json`. A deploy that asks for more fails before anything is built. |
 | `PAIL_MAX_CONTAINER_MEMORY` | `2GB` | The most memory one container may ask for in `pail.json`. A deploy that asks for more fails before anything is built. |
 | `PAIL_ACME_DNS_PROVIDER` · `PAIL_ACME_DNS_TOKEN` | unset | Set both to get certificates from Let's Encrypt by DNS-01, and to allow custom hostnames. The provider is one of `bunny`, `cloudflare`, `desec`, `digitalocean`, `duckdns`, `gandi`, `hetzner`, `netlify`, `njalla`. |
 | `PAIL_ACME_EMAIL` | unset | Optional address for Let's Encrypt's expiry notices. |
@@ -254,7 +254,7 @@ On each deploy Pail:
 What follows from that:
 
 - **Routes.** First match wins. `/api/*` covers `/api` and everything under it; a path with no star covers only itself. A path no route covers is a 404. With one container and nothing else, no routes are needed: it answers everything. Requests pass through with their method, body and `Host`, plus `X-Forwarded-For`, `-Host` and `-Proto`; websockets and event streams pass through too.
-- **Files beside containers.** A deploy with containers serves files only from the folder `static` names. Its source, Dockerfile included, is never served. A `package.json` build script is left to the Dockerfile.
+- **Files beside server code.** A deploy with containers or functions serves files only from the folder `static` names. Its source, Dockerfile included, is never served. A `package.json` build script is left to the Dockerfile.
 - **Data.** A volume is 10GB, takes only the space it uses, and lives under `PAIL_DATA_DIR/volumes` on the server: back it up there. One microVM holds it at a time, so a container with `data` is stopped before its replacement starts, which is a few seconds of 503s per deploy. Without `data` the new microVM is answering before the old one stops. The volume goes when the pail is removed.
 - **The root filesystem** is the container's own to write to, and is fresh on every start. Only `data` lasts.
 - **Staying up.** If the app exits, Pail starts its microVM again, waiting a little longer each time it keeps happening. When Pail restarts, containers come back by themselves. `pail stop` shuts them down and `pail start` brings them back.
@@ -265,7 +265,67 @@ What follows from that:
 
 `GET /api/v1/pails/{name}` lists the serving deploy's containers with their state: `running`, `starting` or `stopped`.
 
-Functions in `pail.json` are not built yet; a deploy that declares them is refused.
+## Functions
+
+A function is a program Pail runs once per request, with no Dockerfile and no server to write. `pail.json` says where its source is; Pail works out the language, builds it, and runs it in a microVM that sleeps when nothing is asking.
+
+```json
+{
+  "static": "./build",
+  "functions": {
+    "api": { "src": "./fn/api" },
+    "thumbs": { "src": "./fn/thumbs", "lang": "python", "timeout": "10s", "memory": "256MB", "idle": "15m", "max": 2, "env": { "MAX_SIZE": "512" } }
+  },
+  "routes": [
+    { "path": "/api/*", "to": "function:api" },
+    { "path": "/thumbs/*", "to": "function:thumbs" },
+    { "path": "/*", "to": "static", "fallback": "index.html" }
+  ]
+}
+```
+
+| Field | Default | What it sets |
+| --- | --- | --- |
+| `src` | none, required | The function's source: a folder, or one file. |
+| `lang` | detected | `python`, `node`, `ruby`, `go`, `rust` or `shell`. |
+| `cmd` | the language's | What a request runs: a command line, or a list of words. |
+| `timeout` | `10s` | How long one request may take, and how long it may wait for a copy. At most 15 minutes. |
+| `memory` | `128MB` | Each copy's memory. At most `PAIL_MAX_FUNCTION_MEMORY`. |
+| `idle` | `5m` | How long a copy waits for another request before it stops. |
+| `max` | `4` | The most copies that run at once. |
+| `env` | none | Environment variables. |
+
+**The interface is CGI** (RFC 3875). The request arrives as `REQUEST_METHOD`, `PATH_INFO` (the full request path), `QUERY_STRING`, `CONTENT_TYPE`, `CONTENT_LENGTH`, each header as `HTTP_<NAME>`, `PAIL_NAME` and `PAIL_DEPLOY`, with the body on stdin. The program writes header lines, a blank line, then the body. `Status: 404` sets the status; without one it is 200, or 302 when there is a `Location`. With no `Content-Type` it is `text/plain`. stderr goes to the pail's output.
+
+| lang | Detected by | Built with | Runs |
+| --- | --- | --- | --- |
+| python | `requirements.txt` or `main.py` | `pip install -r requirements.txt` | `python3 main.py` |
+| node | `package.json` or `index.js` | `npm ci`, or `npm install` without a lockfile | `node` on `main` in `package.json`, else `index.js` |
+| ruby | `Gemfile` or `main.rb` | `bundle install` | `ruby main.rb`, through `bundle exec` with a Gemfile |
+| go | `go.mod` | `go build -o fn` | `./fn` |
+| rust | `Cargo.toml` | `cargo build --release` | the built binary |
+| shell | `main.sh` | nothing | `sh main.sh` |
+
+A `src` that is one file is told apart by its extension and run directly.
+
+On each deploy Pail:
+
+1. **Builds** the source, where the language has a build step, in a throwaway microVM from the language's image, with the internet for dependencies and nothing else.
+2. **Snapshots.** It boots the function's microVM once, runs the language's interpreter so it is already in memory, and saves a Firecracker snapshot. The root filesystem, the built source and the snapshot are stored with the deploy, so a rollback restores exactly what ran then.
+3. **Runs on request.** The first request restores the snapshot. An agent inside (Pail's own binary, as PID 1) takes each request from Pail over vsock, runs the program as a fresh process, and sends back its output.
+4. **Sleeps.** A copy with no requests for `idle` is stopped. The next request restores the snapshot again.
+
+What follows from that:
+
+- **Copies.** A copy handles one request at a time. A request goes to an idle copy; if every copy is busy and fewer than `max` are running, Pail restores another; if `max` are busy, the request waits, and one still waiting when its `timeout` runs out gets a 503, with a line in the pail's output saying the function was at its max.
+- **Failures.** A non-zero exit, running out of memory, a timeout, more than 32MB of output, or output that doesn't start with header lines returns a 500. The response and the pail's output both say which.
+- **Disk.** A function's files and root filesystem are read-only and shared by its copies. `/tmp` is in memory: what one request leaves there the next may find, on the same copy, until it sleeps. Use a container's `data` for anything that has to last.
+- **Responses are whole.** Pail holds a program's output until it exits, to know whether it failed. Streaming needs a container.
+- **Network.** As for builds: the internet through NAT, and nothing else.
+- **Where a snapshot can't be taken or restored,** the function still runs, booting each copy from cold, and the deploy's log says so.
+- **Memory with containers.** `memory` is required for a container and optional for a function.
+
+`GET /api/v1/pails/{name}` lists the serving deploy's functions with how many copies of each are awake, and its routes.
 
 ### Developing this on a Mac
 

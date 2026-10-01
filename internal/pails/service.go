@@ -29,9 +29,11 @@ type Options struct {
 	Builder microvm.Machines
 	// Dir is local disk for containers' root filesystems and data volumes.
 	Dir string
-	// MaxContainerMemory is the most memory one container may ask for, in
-	// bytes. Zero means no limit.
+	// MaxContainerMemory and MaxFunctionMemory are the most memory one
+	// container, or one copy of a function, may ask for, in bytes. Zero
+	// means no limit.
 	MaxContainerMemory int64
+	MaxFunctionMemory  int64
 	Logger             *slog.Logger
 }
 
@@ -46,6 +48,7 @@ type Service struct {
 	builder         microvm.Machines
 	dir             string
 	maxContainerMem int64
+	maxFunctionMem  int64
 	log             *slog.Logger
 
 	deploys sync.WaitGroup
@@ -89,6 +92,7 @@ func New(o Options) *Service {
 		builder:         o.Builder,
 		dir:             o.Dir,
 		maxContainerMem: o.MaxContainerMemory,
+		maxFunctionMem:  o.MaxFunctionMemory,
 		log:             o.Logger,
 		pails:           map[string]*entry{},
 		removing:        map[string]bool{},
@@ -205,11 +209,18 @@ func (s *Service) view(e *entry) Pail {
 	if e.rec.Off {
 		p.Status = StatusOff
 	}
+	if e.manifest != nil {
+		p.Routes = e.manifest.Routes
+	}
 	if e.running != nil {
 		for name, u := range e.running.units {
 			p.Containers = append(p.Containers, ContainerStatus{Name: name, Port: u.c.Port, State: u.state()})
 		}
 		sort.Slice(p.Containers, func(i, j int) bool { return p.Containers[i].Name < p.Containers[j].Name })
+		for name, pool := range e.running.pools {
+			p.Functions = append(p.Functions, FunctionStatus{Name: name, Lang: pool.fn.Lang, Copies: pool.copies(), Max: pool.fn.Max})
+		}
+		sort.Slice(p.Functions, func(i, j int) bool { return p.Functions[i].Name < p.Functions[j].Name })
 	}
 	for _, d := range e.deploys {
 		if d.State == DeployBuilding {
@@ -441,7 +452,7 @@ func (s *Service) Serve(ctx context.Context, name, id string) (Pail, error) {
 		// it was built with, and answering, before the pointer moves. That
 		// outlasts a caller who hangs up.
 		var lg *Log
-		if len(man.Containers) > 0 {
+		if len(man.Containers)+len(man.Functions) > 0 {
 			lg = e.output
 			lg.add("step", "→ serving %s again", id)
 		}
@@ -491,6 +502,8 @@ type Live struct {
 	// backends is where each of the deploy's containers answers, "" for
 	// one that isn't up.
 	backends map[string]string
+	// run is what the deploy runs, for its functions.
+	run *runset
 }
 
 // Backend is the address a container answers at. up is false while the
@@ -512,6 +525,7 @@ func (s *Service) Live(ctx context.Context, name string) (Live, error) {
 	live := Live{Pail: name, Deploy: e.rec.Serving, Manifest: e.manifest}
 	off := e.rec.Off
 	if rs := e.running; rs != nil && rs.deploy == live.Deploy {
+		live.run = rs
 		live.backends = make(map[string]string, len(rs.units))
 		for c, u := range rs.units {
 			live.backends[c] = u.addr()
@@ -570,7 +584,7 @@ func (s *Service) Remove(ctx context.Context, name string) error {
 	e.running.halt()
 	err := s.removeObjects(ctx, name)
 	if s.dir != "" {
-		err = errors.Join(err, os.RemoveAll(s.rootfsDir(name)), os.RemoveAll(s.volumeDir(name)))
+		err = errors.Join(err, os.RemoveAll(s.rootfsDir(name)), os.RemoveAll(s.volumeDir(name)), os.RemoveAll(s.functionsDir(name)))
 	}
 
 	s.mu.Lock()

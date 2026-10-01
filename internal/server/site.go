@@ -33,7 +33,8 @@ func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, name string) 
 		http.Error(w, "Pail couldn't read this pail's files.", http.StatusInternalServerError)
 		return
 	}
-	// Routes decide what answers: a container, or the deploy's files.
+	// Routes decide what answers: a container, a function, or the deploy's
+	// files.
 	target, ok := live.Manifest.Match(path.Clean("/" + r.URL.Path))
 	if !ok {
 		s.notFound(w, r, "Nothing at "+r.URL.Path+" in "+name+".")
@@ -41,6 +42,10 @@ func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, name string) 
 	}
 	if target.Container != "" {
 		s.serveContainer(w, r, live, target.Container)
+		return
+	}
+	if target.Function != "" {
+		s.serveFunction(w, r, live, target.Function)
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {

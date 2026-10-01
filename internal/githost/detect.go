@@ -52,10 +52,14 @@ func Detect(ctx context.Context, c Client, repo, branch string, canBuild bool) (
 		switch {
 		case json.Unmarshal(manifest, &m) != nil:
 			return Detection{Summary: "pail.json isn’t valid JSON"}, nil
-		case len(m.Functions) > 0:
-			return Detection{Summary: "pail.json has functions, which Pail can’t run yet"}, nil
-		case len(m.Containers) > 0 && !canBuild:
-			return Detection{Summary: "pail.json has containers, which this Pail can’t run"}, nil
+		case len(m.Functions)+len(m.Containers) > 0 && !canBuild:
+			return Detection{Summary: "pail.json has server code, which this Pail can’t run"}, nil
+		case len(m.Functions) > 0 && len(m.Containers) > 0:
+			return Detection{Deployable: true, Summary: "Functions and containers · Pail builds and runs them"}, nil
+		case len(m.Functions) == 1:
+			return Detection{Deployable: true, Summary: "A function · Pail builds it and runs it on request"}, nil
+		case len(m.Functions) > 1:
+			return Detection{Deployable: true, Summary: fmt.Sprintf("%d functions · Pail builds them and runs them on request", len(m.Functions))}, nil
 		case len(m.Containers) == 1:
 			for _, c := range m.Containers {
 				if c.Image != "" {

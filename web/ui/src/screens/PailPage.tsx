@@ -57,8 +57,12 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
       const [pail, deploys] = await Promise.all([getPail(name), listDeploys(name)]);
       return { pail, deploys };
     },
-    // A container on its way up changes without anyone pressing anything.
-    ({ pail }: { pail: Pail }) => pail.status === 'building' || !!pail.containers?.some((c) => c.state === 'starting'),
+    // A container on its way up, or a function with copies awake, changes
+    // without anyone pressing anything.
+    ({ pail }: { pail: Pail }) =>
+      pail.status === 'building' ||
+      !!pail.containers?.some((c) => c.state === 'starting') ||
+      !!pail.functions?.some((f) => f.copies > 0),
   );
   const [selected, setSelected] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(() => !!routeState<{ confirm?: boolean }>()?.confirm);
@@ -87,6 +91,8 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
   const { pail, deploys } = data;
   const building = pail.status === 'building';
   const sel = deploys.find((d) => d.id === selected) ?? deploys[0];
+  // What runs for this pail and may print something.
+  const servers = [...(pail.containers ?? []), ...(pail.functions ?? [])].map((c) => c.name);
 
   // act runs one change against the API, then shows where things stand.
   const act = async (change: () => Promise<unknown>) => {
@@ -209,16 +215,16 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
             ))}
           </div>
           {sel && <DeployLog key={sel.id} pail={name} deploy={sel} onFinished={refresh} />}
-          {!!pail.containers?.length && (
+          <ServerCode pail={pail} />
+          {servers.length > 0 && (
             <>
               <h2 className="pl-h2" style={{ marginTop: 16 }}>
                 Output
               </h2>
               <p className="pl-small" style={{ margin: 0 }}>
-                What {pail.containers.length === 1 ? pail.containers[0].name : 'the containers'} printed lately, as it
-                happens.
+                What {servers.length === 1 ? servers[0] : 'its server code'} printed lately, as it happens.
               </p>
-              <Output pail={name} many={pail.containers.length > 1} />
+              <Output pail={name} many={servers.length > 1} />
             </>
           )}
         </section>
@@ -352,6 +358,91 @@ function DeployLog(props: { pail: string; deploy: Deploy; onFinished: () => void
 
   return <BuildLog lines={lines.map((l) => ({ time: clock(l.time), text: l.text, level: l.level }))} />;
 }
+
+const PAIL_JSON = `{
+  "functions": { "api": { "src": "./fn/api" } },
+  "routes": [
+    { "path": "/api/*", "to": "function:api" },
+    { "path": "/*", "to": "static", "fallback": "index.html" }
+  ]
+}`;
+
+// ServerCode shows what the serving deploy's pail.json set up: which paths go
+// where, and its functions. Without any, it says how to add some.
+function ServerCode({ pail }: { pail: Pail }) {
+  const functions = pail.functions ?? [];
+  const label = { fontSize: 12, fontWeight: 600, letterSpacing: '.03em' };
+  const heading = (
+    <h2 className="pl-h2" style={{ marginTop: 16 }}>
+      Functions and routes
+    </h2>
+  );
+  if (!pail.routes?.length) {
+    return (
+      <>
+        {heading}
+        <div className="pl-card">
+          <p className="pl-muted" style={{ margin: 0 }}>
+            No server code, so Pail serves the files as they are. To run some, put a <code>pail.json</code> beside your
+            app:
+          </p>
+          <pre className="pl-code">{PAIL_JSON}</pre>
+        </div>
+      </>
+    );
+  }
+  return (
+    <>
+      {heading}
+      <div className="pl-card" style={{ gap: 16 }}>
+        <p className="pl-small" style={{ margin: 0 }}>
+          From <code>pail.json</code> in deploy {pail.serving}. Change it in your project; Pail reads it again on every
+          deploy.
+        </p>
+        <div className="pl-stack" style={{ gap: 8 }}>
+          <span style={label}>ROUTES</span>
+          {pail.routes.map((r) => (
+            <div
+              key={r.path}
+              className="pl-mono"
+              style={{ display: 'flex', gap: 12, alignItems: 'baseline', flexWrap: 'wrap', fontSize: 13 }}
+            >
+              <span style={{ minWidth: 120 }}>{r.path}</span>
+              <span style={{ color: 'var(--ink-muted)' }}>→ {r.to}</span>
+            </div>
+          ))}
+        </div>
+        {functions.length > 0 && (
+          <div className="pl-stack" style={{ gap: 8 }}>
+            <span style={label}>FUNCTIONS</span>
+            {functions.map((f) => (
+              <div
+                key={f.name}
+                style={{ display: 'flex', gap: 12, alignItems: 'baseline', flexWrap: 'wrap', fontSize: 13 }}
+              >
+                <span className="pl-mono" style={{ minWidth: 120 }}>
+                  {f.name}
+                </span>
+                <span style={{ color: 'var(--ink-muted)' }}>
+                  {`${LANGS[f.lang] ?? f.lang} · ${f.copies === 0 ? 'asleep' : `${f.copies} of ${f.max} awake`}`}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+const LANGS: Record<string, string> = {
+  python: 'Python',
+  node: 'Node',
+  ruby: 'Ruby',
+  go: 'Go',
+  rust: 'Rust',
+  shell: 'Shell',
+};
 
 // Output shows what a pail's containers print, live. With more than one
 // container, each line says whose it is.

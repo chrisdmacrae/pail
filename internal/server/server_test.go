@@ -276,7 +276,7 @@ func TestZipFolderWithPailJSON(t *testing.T) {
 		"pail.json":  `{"functions": {"api": {"src": "./fn/api"}}}`,
 		"index.html": "x",
 	}))
-	if withFn.State != "failed" || !strings.Contains(withFn.Error, "doesn't run functions yet") {
+	if withFn.State != "failed" || !strings.Contains(withFn.Error, "this Pail can't run it: it has no way to run microVMs") {
 		t.Errorf("functions deploy: %+v", withFn)
 	}
 }
@@ -1066,6 +1066,14 @@ func (b *fakeBuilder) BuildContainer(context.Context, microvm.ContainerBuild) (m
 
 func (b *fakeBuilder) PullContainer(context.Context, microvm.ContainerPull) (microvm.Built, error) {
 	return microvm.Built{}, errors.New("not here")
+}
+
+func (b *fakeBuilder) BuildFunction(context.Context, microvm.FunctionBuild) (microvm.FunctionImage, error) {
+	return microvm.FunctionImage{}, errors.New("not here")
+}
+
+func (b *fakeBuilder) StartFunction(context.Context, microvm.FunctionSpec) (microvm.FunctionCopy, error) {
+	return nil, errors.New("not here")
 }
 
 func (b *fakeBuilder) Start(context.Context, microvm.MachineSpec) (microvm.Machine, error) {

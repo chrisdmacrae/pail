@@ -37,6 +37,10 @@ const (
 const (
 	guestModeArg     = "pailmode"
 	guestModeService = "service"
+	// A function's microVM runs an agent that takes requests from the host.
+	guestModeFunction = "function"
+	// guestAgentPort is the vsock port the agent listens on.
+	guestAgentPort = 1024
 	// guestServiceJob is what a container's microVM runs, left in its own
 	// root filesystem by the host.
 	guestServiceJob = "/.pail-job"
@@ -68,8 +72,12 @@ func IsGuestInit() bool {
 // machine off. Everything it prints reaches the host through the serial
 // console.
 func GuestMain() {
-	if os.Getenv(guestModeArg) == guestModeService {
+	switch os.Getenv(guestModeArg) {
+	case guestModeService:
 		serviceMain()
+		return
+	case guestModeFunction:
+		functionMain()
 		return
 	}
 	code := 1

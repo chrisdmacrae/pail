@@ -39,6 +39,11 @@ type fakeMachines struct {
 	digests map[string]string
 	// pulls counts the images fetched in full.
 	pulls int
+	// copies are the function copies running, and most the most there
+	// have been at once.
+	copies, most int
+	// noSnapshots makes function builds leave no snapshot.
+	noSnapshots bool
 }
 
 type fakeMachine struct {
@@ -183,7 +188,7 @@ func newContainerFixture(t *testing.T, store *storage.Memory, machines *fakeMach
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := config.Config{Token: token, BaseDomain: "pail.lan", MaxUploadSize: 1 << 20, MaxDeploys: 3}
-	svc := pails.New(pails.Options{Store: store, BaseDomain: cfg.BaseDomain, MaxDeploys: 3, Builder: machines, Dir: dir, MaxContainerMemory: 2 << 30, Logger: logger})
+	svc := pails.New(pails.Options{Store: store, BaseDomain: cfg.BaseDomain, MaxDeploys: 3, Builder: machines, Dir: dir, MaxContainerMemory: 2 << 30, MaxFunctionMemory: 1 << 30, Logger: logger})
 	if err := svc.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -415,8 +420,7 @@ func TestContainerPailJSON(t *testing.T) {
 		"doesn't say which folder holds the files":                                                                                  `{"containers": {"web": {"port": 80, "memory": "64MB"}}, "routes": [{"path": "/*", "to": "static"}]}`,
 		"needs routes to say which paths go where":                                                                                  `{"containers": {"web": {"port": 80, "memory": "64MB"}, "api": {"port": 81, "memory": "64MB"}}}`,
 		"the upload has no such file":                                                                                               `{"containers": {"web": {"port": 80, "memory": "64MB", "dockerfile": "./docker/Dockerfile"}}}`,
-		"this Pail doesn't run functions yet":                                                                                       `{"functions": {"hello": {}}}`,
-		"A route goes to \"static\" or \"container:<name>\"":                                                                        `{"containers": {"web": {"port": 80, "memory": "64MB"}}, "routes": [{"path": "/*", "to": "elsewhere"}]}`,
+		"A route goes to \"static\", \"function:<name>\" or \"container:<name>\"":                                                   `{"containers": {"web": {"port": 80, "memory": "64MB"}}, "routes": [{"path": "/*", "to": "elsewhere"}]}`,
 	} {
 		if d, _ := f.deploy("wrong", tarGz(t, with(pailJSON))); d.State != "failed" || !strings.Contains(d.Error, want) {
 			t.Errorf("%s: got %+v, want an error containing %q", pailJSON, d, want)
@@ -425,7 +429,7 @@ func TestContainerPailJSON(t *testing.T) {
 
 	// Where microVMs can't run, a deploy with containers is refused, saying why.
 	machines.down = "this machine has no /dev/kvm"
-	if d, _ := f.deploy("nowhere", tarGz(t, with(`{"containers": {"web": {"port": 80, "memory": "64MB"}}}`))); d.State != "failed" || !strings.Contains(d.Error, "this Pail can't run them: this machine has no /dev/kvm") {
+	if d, _ := f.deploy("nowhere", tarGz(t, with(`{"containers": {"web": {"port": 80, "memory": "64MB"}}}`))); d.State != "failed" || !strings.Contains(d.Error, "this Pail can't run it: this machine has no /dev/kvm") {
 		t.Errorf("with no microVMs: %+v", d)
 	}
 }

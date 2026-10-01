@@ -522,3 +522,129 @@ func TestContainerFromARegistry(t *testing.T) {
 		t.Errorf("what the image answered: %q\n%s", got, said)
 	}
 }
+
+// A function: built, snapshotted, then restored as copies that each run a
+// program per call.
+func TestFunctionSnapshotsAndRuns(t *testing.T) {
+	r := testRunner(t)
+	out := &lines{}
+	dir := t.TempDir()
+	start := time.Now()
+	fn, err := r.BuildFunction(context.Background(), FunctionBuild{
+		Fill: fillWith(map[string]string{"main.sh": `echo "Content-Type: text/plain"
+echo
+echo "built: $(cat built.txt)"
+echo "method: $REQUEST_METHOD greeting: $GREETING"
+echo "body: $(cat)"
+echo "clock: $(date +%s)"
+echo "tmp: $(cat /tmp/kept 2>/dev/null)"; echo "$REQUEST_METHOD" > /tmp/kept
+touch /work/src/nope 2>/dev/null && echo CODE-WRITABLE
+touch /nope 2>/dev/null && echo ROOT-WRITABLE
+wget -q -T 10 -O /dev/null http://example.com && echo "internet: ok"
+echo "to the log" >&2
+`}),
+		BuildImage: testImage, Script: "echo by-the-build > built.txt", RunImage: testImage,
+		MemMB: 128, Dir: filepath.Join(dir, "fn"), Log: out.add,
+	})
+	if err != nil {
+		t.Fatalf("BuildFunction: %v\n%s", err, out)
+	}
+	t.Logf("building and snapshotting took %s and logged:\n%s", time.Since(start).Round(time.Millisecond), out)
+	if fn.State == "" {
+		t.Fatalf("no snapshot was taken:\n%s", out)
+	}
+
+	// Two copies at once, restored from the one snapshot.
+	var copies [2]FunctionCopy
+	var wg sync.WaitGroup
+	for i := range copies {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			began := time.Now()
+			c, err := r.StartFunction(context.Background(), FunctionSpec{Dir: filepath.Join(dir, fmt.Sprintf("copy%d", i)), Image: fn, MemMB: 128, Log: out.add})
+			if err != nil {
+				t.Errorf("StartFunction: %v", err)
+				return
+			}
+			t.Logf("copy %d was ready %s after it was asked for", i, time.Since(began).Round(time.Millisecond))
+			copies[i] = c
+		}()
+	}
+	wg.Wait()
+	if copies[0] == nil || copies[1] == nil {
+		t.Fatalf("copies didn't start:\n%s", out)
+	}
+	defer copies[1].Stop()
+
+	call := func(c FunctionCopy, method, body string, argv ...string) (FunctionResult, string, time.Duration) {
+		t.Helper()
+		said := &lines{}
+		began := time.Now()
+		res, err := c.Call(context.Background(), FunctionCall{
+			Argv: argv, Dir: "/work/src", Env: append(append([]string{}, fn.Env...), "REQUEST_METHOD="+method, "GREETING=hi"),
+			Body: strings.NewReader(body), BodyLen: int64(len(body)), Timeout: 20 * time.Second, MaxOutput: 1 << 20, Stderr: said.add,
+		})
+		if err != nil {
+			t.Fatalf("Call: %v", err)
+		}
+		return res, said.String(), time.Since(began)
+	}
+
+	for i, c := range copies {
+		res, said, took := call(c, "POST", "what was sent", "sh", "main.sh")
+		got := string(res.Output)
+		t.Logf("copy %d answered in %s:\n%s", i, took.Round(time.Millisecond), got)
+		for _, want := range []string{"built: by-the-build", "method: POST greeting: hi", "body: what was sent", "tmp: \n", "internet: ok"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("copy %d's answer is missing %q", i, want)
+			}
+		}
+		if strings.Contains(got, "WRITABLE") {
+			t.Errorf("copy %d could write to a shared disk", i)
+		}
+		if res.ExitCode != 0 || said != "to the log" {
+			t.Errorf("copy %d: exit %d, stderr %q", i, res.ExitCode, said)
+		}
+		// A restored copy wakes with the clock of the snapshot, and is told the time.
+		var clock int64
+		if _, after, ok := strings.Cut(got, "clock: "); ok {
+			fmt.Sscanf(after, "%d", &clock)
+		}
+		if drift := time.Now().Unix() - clock; drift < -5 || drift > 5 {
+			t.Errorf("copy %d's clock is %ds off", i, drift)
+		}
+	}
+	// A copy stays warm: what one call left in /tmp, the next finds.
+	if res, _, took := call(copies[0], "GET", "", "sh", "main.sh"); !strings.Contains(string(res.Output), "tmp: POST") {
+		t.Errorf("the second call to a copy: %s", res.Output)
+	} else {
+		t.Logf("a warm call took %s", took.Round(time.Millisecond))
+	}
+
+	// How a call can end.
+	if res, _, _ := call(copies[0], "GET", "", "sh", "-c", "echo out; exit 3"); res.ExitCode != 3 || string(res.Output) != "out\n" {
+		t.Errorf("a failing program: %+v", res)
+	}
+	said := &lines{}
+	began := time.Now()
+	res, err := copies[0].Call(context.Background(), FunctionCall{Argv: []string{"sh", "-c", "sleep 30 & sleep 30"}, Env: fn.Env, Timeout: time.Second, Stderr: said.add})
+	if err != nil || !res.TimedOut || time.Since(began) > 5*time.Second {
+		t.Errorf("a program that overruns: %+v, %v after %s", res, err, time.Since(began))
+	}
+	if res, _, _ := call(copies[0], "GET", "", "sh", "-c", "tail /dev/zero"); !res.OutOfMemory {
+		t.Errorf("a program that eats all the memory: %+v", res)
+	}
+	if res, _, _ := call(copies[0], "GET", "", "sh", "-c", "yes | head -c 5000000"); !res.TooBig {
+		t.Errorf("a program that writes too much: exit %d, %d bytes, too big %v", res.ExitCode, len(res.Output), res.TooBig)
+	}
+	// And the copy is still good after all that.
+	if res, _, _ := call(copies[0], "GET", "", "sh", "-c", "echo still here; pgrep sleep | wc -l"); string(res.Output) != "still here\n0\n" {
+		t.Errorf("after the failures: %q", res.Output)
+	}
+
+	copies[0].Stop()
+	if _, err := os.Stat(filepath.Join(dir, "copy0")); !os.IsNotExist(err) {
+		t.Errorf("a copy's folder outlived it: %v", err)
+	}
+}

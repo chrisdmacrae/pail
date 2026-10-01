@@ -208,8 +208,8 @@ func TestUpFailures(t *testing.T) {
 
 	// The server refuses this one after the upload: the deploy fails.
 	s.write("fn/pail.json", `{"name": "dash", "functions": {"api": {"src": "./api"}}}`)
-	want(t, s.fails(ExitDeployFailed, "up", "./fn"), "this Pail doesn't run functions yet", "✗ deploy failed")
-	want(t, s.fails(ExitDeployFailed, "up", "./fn", "--quiet"), "pail: pail.json declares functions")
+	want(t, s.fails(ExitDeployFailed, "up", "./fn"), "this Pail can't run it", "✗ deploy failed")
+	want(t, s.fails(ExitDeployFailed, "up", "./fn", "--quiet"), "pail: This deploy runs server code")
 
 	s.write("big/index.html", "x")
 	blob := make([]byte, 2<<20)

@@ -36,6 +36,14 @@ func (r *Runner) Start(context.Context, MachineSpec) (Machine, error) {
 	return nil, errNotLinux
 }
 
+func (r *Runner) BuildFunction(context.Context, FunctionBuild) (FunctionImage, error) {
+	return FunctionImage{}, errNotLinux
+}
+
+func (r *Runner) StartFunction(context.Context, FunctionSpec) (FunctionCopy, error) {
+	return nil, errNotLinux
+}
+
 // IsGuestInit is never true off Linux.
 func IsGuestInit() bool { return false }
 

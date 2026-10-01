@@ -71,6 +71,20 @@ type bootSpec struct {
 	log func(line string)
 	// tied makes the microVM die with Pail rather than outlive it.
 	tied bool
+	// bareNet leaves the guest's address for something inside it to set,
+	// rather than the kernel as it boots.
+	bareNet bool
+	// vsock, when set, is the socket (in dir) that reaches the guest.
+	vsock string
+	// api, when set, is the socket (in dir) Firecracker takes orders on.
+	api string
+	// restore, when set, is a snapshot to resume instead of booting.
+	restore *snapshot
+}
+
+// snapshot is a paused microVM on disk.
+type snapshot struct {
+	mem, state string
 }
 
 // booted is a microVM that was started.
@@ -99,11 +113,16 @@ func (r *Runner) boot(ctx context.Context, b bootSpec) (*booted, error) {
 		"machine-config": map[string]any{"vcpu_count": b.vcpus, "mem_size_mib": b.memMB},
 	}
 	if b.tap != nil {
-		bootArgs += " " + b.tap.bootParam
+		if !b.bareNet {
+			bootArgs += " " + b.tap.bootParam
+		}
 		config["network-interfaces"] = []map[string]any{{"iface_id": "eth0", "guest_mac": b.tap.GuestMAC, "host_dev_name": b.tap.Name}}
 	}
 	if b.args != "" {
 		bootArgs += " " + b.args
+	}
+	if b.vsock != "" {
+		config["vsock"] = map[string]any{"guest_cid": 3, "uds_path": b.vsock}
 	}
 	config["boot-source"] = map[string]any{"kernel_image_path": r.cfg.Kernel, "boot_args": bootArgs}
 	configFile := filepath.Join(b.dir, "vm.json")
@@ -117,8 +136,16 @@ func (r *Runner) boot(ctx context.Context, b bootSpec) (*booted, error) {
 	if err := os.WriteFile(filepath.Join(b.dir, "firecracker.log"), nil, 0o644); err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, r.cfg.Firecracker, "--no-api", "--config-file", configFile,
-		"--log-path", filepath.Join(b.dir, "firecracker.log"), "--level", "Warning")
+	args := []string{"--log-path", filepath.Join(b.dir, "firecracker.log"), "--level", "Warning"}
+	if b.api != "" {
+		args = append(args, "--api-sock", b.api)
+	} else {
+		args = append(args, "--no-api")
+	}
+	if b.restore == nil {
+		args = append(args, "--config-file", configFile)
+	}
+	cmd := exec.CommandContext(ctx, r.cfg.Firecracker, args...)
 	cmd.Dir = b.dir
 	// A group of its own, so killing it can't reach Pail.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -150,6 +177,23 @@ func (r *Runner) boot(ctx context.Context, b bootSpec) (*booted, error) {
 		vm.waitErr = cmd.Wait()
 		close(vm.done)
 	}()
+	if b.restore != nil {
+		load := map[string]any{
+			"snapshot_path": b.restore.state,
+			"mem_backend":   map[string]any{"backend_type": "File", "backend_path": b.restore.mem},
+			"resume_vm":     true,
+		}
+		if b.tap != nil {
+			// The snapshot remembers the tap it was taken with; this copy
+			// has one of its own.
+			load["network_overrides"] = []map[string]any{{"iface_id": "eth0", "host_dev_name": b.tap.Name}}
+		}
+		if err := fcAPI(ctx, filepath.Join(b.dir, b.api), "PUT", "/snapshot/load", load); err != nil {
+			cmd.Process.Kill()
+			<-vm.done
+			return nil, fmt.Errorf("restore the snapshot: %w", err)
+		}
+	}
 	return vm, nil
 }
 

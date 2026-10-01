@@ -64,10 +64,11 @@ type unit struct {
 	also *Log
 }
 
-// runset is the containers of one deploy.
+// runset is what one deploy runs: its containers, and its functions' copies.
 type runset struct {
 	deploy string
 	units  map[string]*unit
+	pools  map[string]*fnPool
 }
 
 func (rs *runset) each(fn func(*unit)) {
@@ -86,7 +87,24 @@ func (rs *runset) each(fn func(*unit)) {
 }
 
 // halt stops every machine and keeps them stopped.
-func (rs *runset) halt() { rs.each((*unit).halt) }
+func (rs *runset) halt() {
+	if rs == nil {
+		return
+	}
+	for _, p := range rs.pools {
+		p.close()
+	}
+	rs.each((*unit).halt)
+}
+
+// resume lets a halted runset run again: containers start, and functions
+// wake on their next request.
+func (rs *runset) resume() {
+	for _, p := range rs.pools {
+		p.open()
+	}
+	rs.each((*unit).run)
+}
 
 func (u *unit) say(level, format string, args ...any) {
 	line := Line{Time: time.Now().UTC(), Text: fmt.Sprintf(format, args...), Level: level, Source: u.name}
@@ -279,10 +297,10 @@ func (u *unit) state() string {
 // canRun says whether this Pail can run containers and, if not, why.
 func (s *Service) canRun() error {
 	if ok, why := s.CanBuild(); !ok {
-		return userErrorf("This deploy runs containers, and this Pail can't run them: %s.", why)
+		return userErrorf("This deploy runs server code, and this Pail can't run it: %s.", why)
 	}
 	if s.dir == "" {
-		return userErrorf("This deploy runs containers, and this Pail has no local disk set for them.")
+		return userErrorf("This deploy runs server code, and this Pail has no local disk set for it.")
 	}
 	return nil
 }
@@ -293,7 +311,14 @@ func (s *Service) prepare(ctx context.Context, e *entry, id string, man *Manifes
 	if err := s.canRun(); err != nil {
 		return nil, err
 	}
-	rs := &runset{deploy: id, units: map[string]*unit{}}
+	rs := &runset{deploy: id, units: map[string]*unit{}, pools: map[string]*fnPool{}}
+	for name, fn := range man.Functions {
+		image, err := s.functionImage(ctx, e.name, id, name, fn)
+		if err != nil {
+			return nil, err
+		}
+		rs.pools[name] = &fnPool{s: s, e: e, deploy: id, name: name, fn: fn, image: image, freed: make(chan struct{})}
+	}
 	for name, c := range man.Containers {
 		rootfs, err := s.rootfs(ctx, e.name, id, name)
 		if err != nil {
@@ -351,7 +376,7 @@ func (s *Service) goLive(ctx context.Context, e *entry, id string, man *Manifest
 		}
 	}
 
-	if len(man.Containers) > 0 {
+	if len(man.Containers)+len(man.Functions) > 0 {
 		var err error
 		if next, err = s.prepare(ctx, e, id, man); err != nil {
 			return err
@@ -418,7 +443,7 @@ func (s *Service) revive(e *entry) {
 		return
 	}
 	if running != nil && running.deploy == rec.Serving {
-		running.each((*unit).run)
+		running.resume()
 		return
 	}
 	man, err := s.manifestOf(ctx, e, rec.Serving)
@@ -426,17 +451,20 @@ func (s *Service) revive(e *entry) {
 		s.log.Error("read manifest", "pail", e.name, "deploy", rec.Serving, "err", err)
 		return
 	}
-	if len(man.Containers) == 0 {
+	if len(man.Containers)+len(man.Functions) == 0 {
 		return
 	}
 	rs, err := s.prepare(ctx, e, rec.Serving, man)
 	if err != nil {
-		e.output.add("error", "%s's containers can't start: %v", e.name, err)
-		s.log.Error("start containers", "pail", e.name, "deploy", rec.Serving, "err", err)
+		e.output.add("error", "%s's server code can't start: %v", e.name, err)
+		s.log.Error("start server code", "pail", e.name, "deploy", rec.Serving, "err", err)
 		return
 	}
 	s.mu.Lock()
 	e.running = rs
+	if e.manifest == nil && e.rec.Serving == rec.Serving {
+		e.manifest = man
+	}
 	s.mu.Unlock()
 	rs.each((*unit).run)
 }

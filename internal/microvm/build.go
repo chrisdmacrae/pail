@@ -1,6 +1,10 @@
 package microvm
 
-import "context"
+import (
+	"context"
+	"io"
+	"time"
+)
 
 // BuildRequest asks for a project to be built in a throwaway microVM.
 type BuildRequest struct {
@@ -107,6 +111,97 @@ type Machine interface {
 	Stop()
 }
 
+// FunctionBuild asks for a function's source to be made ready to run: built
+// in a throwaway microVM if its language needs it, then booted once and
+// snapshotted, so that a copy can be restored in a moment.
+type FunctionBuild struct {
+	// Fill puts the function's source in the folder it is given.
+	Fill func(dir string) error
+	// BuildImage and Script build the source: Script runs in the source's
+	// folder, in a microVM made from BuildImage. An empty Script means
+	// there is nothing to build.
+	BuildImage string
+	Script     string
+	// RunImage is the image the function runs in.
+	RunImage string
+	// MemMB is the memory each copy gets.
+	MemMB int
+	// Warm, when set, is a command run once in the function's folder before
+	// the snapshot is taken, with WarmEnv, so that what the function needs
+	// from disk is already in the memory a copy wakes up with.
+	Warm    []string
+	WarmEnv []string
+	// Dir is where the function's files are left.
+	Dir string
+	// Log receives the build's output, a line at a time.
+	Log func(line string)
+}
+
+// FunctionImage is a function ready to run: what BuildFunction leaves.
+type FunctionImage struct {
+	// Root is the root filesystem and Code the function's own files, both
+	// read-only when it runs.
+	Root, Code string
+	// RootID names Root's contents: two functions with the same RootID have
+	// the same root filesystem.
+	RootID string
+	// Mem and State are the snapshot a copy is restored from. They are
+	// empty if this machine couldn't take one; copies then boot from cold.
+	Mem, State string
+	// Env is the run image's own environment.
+	Env []string
+}
+
+// FunctionSpec is one copy of a function to start.
+type FunctionSpec struct {
+	// Dir is a folder of the copy's own. It is removed when the copy stops.
+	Dir   string
+	Image FunctionImage
+	MemMB int
+	// Log receives what the copy's microVM itself prints.
+	Log func(line string)
+}
+
+// FunctionCall is one request for a function: a program to run to its end.
+type FunctionCall struct {
+	Argv []string
+	Env  []string
+	// Dir is where the program runs, inside the function's own files.
+	Dir string
+	// Body is the program's standard input, BodyLen bytes of it.
+	Body    io.Reader
+	BodyLen int64
+	// Timeout is how long the program may run.
+	Timeout time.Duration
+	// MaxOutput is the most the program may write to standard output.
+	MaxOutput int64
+	// Stderr receives what the program writes to standard error, a line at
+	// a time.
+	Stderr func(line string)
+}
+
+// FunctionResult is how a call ended.
+type FunctionResult struct {
+	// Output is what the program wrote to standard output.
+	Output   []byte
+	ExitCode int
+	// Signal names the signal that ended the program, if one did.
+	Signal      string
+	TimedOut    bool
+	OutOfMemory bool
+	// TooBig says the program wrote more than MaxOutput and was stopped.
+	TooBig bool
+}
+
+// FunctionCopy is one running microVM of a function. It runs one call at a
+// time.
+type FunctionCopy interface {
+	Call(ctx context.Context, call FunctionCall) (FunctionResult, error)
+	// Done closes when the copy has stopped.
+	Done() <-chan struct{}
+	Stop()
+}
+
 // Machines is what runs builds and containers. Runner is the real one.
 type Machines interface {
 	Available() (bool, string)
@@ -114,4 +209,6 @@ type Machines interface {
 	BuildContainer(ctx context.Context, req ContainerBuild) (Built, error)
 	PullContainer(ctx context.Context, req ContainerPull) (Built, error)
 	Start(ctx context.Context, spec MachineSpec) (Machine, error)
+	BuildFunction(ctx context.Context, req FunctionBuild) (FunctionImage, error)
+	StartFunction(ctx context.Context, spec FunctionSpec) (FunctionCopy, error)
 }

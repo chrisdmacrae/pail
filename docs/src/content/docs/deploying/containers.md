@@ -2,7 +2,7 @@
 title: Run a container
 lead: "Give Pail a Dockerfile, or the name of an image, and a port. It keeps the container running and sends requests to it."
 section: Deploying
-order: 4
+order: 5
 navLabel: Run a container
 next:
   href: /git-providers/
@@ -11,7 +11,7 @@ next:
 
 ## When to use one
 
-Use a container when the thing you’re hosting is a program, not a folder of files: an API, an app with a database, anything that needs websockets, background work, or data that lasts.
+Use a container when the thing you’re hosting is a server that stays up: an app with a database, anything that needs websockets, background work, or data that lasts. For a small program that only answers requests, [a function](/deploying/functions/) is less to write and costs nothing while idle.
 
 Each container runs in a small virtual machine of its own. It can reach the internet, and nothing on your network. The only way in is through Pail.
 

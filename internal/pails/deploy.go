@@ -198,6 +198,12 @@ func (s *Service) recopy(ctx context.Context, e *entry, d *Deploy, lg *Log) (*Ma
 		next.Containers = containers
 		man = &next
 	}
+	// Its functions run again from what was built and snapshotted then.
+	for f, fn := range man.Functions {
+		if err := s.shareFunction(ctx, e.name, src.ID, d.ID, f, fn); err != nil {
+			return nil, err
+		}
+	}
 	return man, nil
 }
 
@@ -346,8 +352,9 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 			return nil, err
 		}
 	}
-	// A project with containers is built by its Dockerfiles, not by Pail.
-	if needsBuild(p.packageJSON) && len(cfg.containers) == 0 {
+	// A project with server code is built by its Dockerfiles and functions,
+	// not as a site.
+	if needsBuild(p.packageJSON) && len(cfg.containers)+len(cfg.functions) == 0 {
 		return s.buildAndStore(ctx, name, d, archive, format, p, cfg, lg)
 	}
 	static := "./" + strings.TrimSuffix(cfg.root, "/")
@@ -357,10 +364,21 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 	case cfg.fallback != "" && !p.names[cfg.root+cfg.fallback]:
 		return nil, userErrorf("pail.json falls back to %s, but %s has no such file.", cfg.fallback, static)
 	}
-	if len(cfg.containers) > 0 {
+	plans := map[string]functionPlan{}
+	if len(cfg.containers)+len(cfg.functions) > 0 {
 		// Refused before anything is stored or built.
 		if err := s.canRun(); err != nil {
 			return nil, err
+		}
+		for _, f := range cfg.functionNames() {
+			fc := cfg.functions[f]
+			if most := s.maxFunctionMem >> 20; most > 0 && int64(fc.MemoryMB) > most {
+				return nil, userErrorf("pail.json: %s asks for %s of memory, and this Pail gives a function at most %s. Ask for less, or raise PAIL_MAX_FUNCTION_MEMORY on the server.",
+					f, config.FormatSize(int64(fc.MemoryMB)<<20), config.FormatSize(s.maxFunctionMem))
+			}
+			if plans[f], err = planFunction(f, fc, p.names); err != nil {
+				return nil, err
+			}
 		}
 		for _, c := range cfg.names() {
 			if most := s.maxContainerMem >> 20; most > 0 && int64(cfg.containers[c].MemoryMB) > most {
@@ -400,6 +418,11 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 	}
 	if len(cfg.containers) > 0 {
 		if err := s.buildContainers(ctx, name, d, archive, format, p, cfg, man, lg); err != nil {
+			return nil, err
+		}
+	}
+	if len(cfg.functions) > 0 {
+		if err := s.buildFunctions(ctx, name, d, archive, format, p, cfg, plans, man, lg); err != nil {
 			return nil, err
 		}
 	}
@@ -532,13 +555,16 @@ func (s *Service) shareRootfs(ctx context.Context, name, from, to, c string) err
 	return nil
 }
 
-// dropRootfs deletes the root filesystems kept for a deploy.
+// dropRootfs deletes what was kept for a deploy's containers and functions.
 func (s *Service) dropRootfs(ctx context.Context, name, id string) {
 	if s.dir != "" {
 		os.RemoveAll(filepath.Join(s.rootfsDir(name), id))
+		os.RemoveAll(filepath.Join(s.functionsDir(name), id))
 	}
-	if err := s.store.DeletePrefix(ctx, deployMeta(name, id)+"rootfs."); err != nil {
-		s.log.Error("delete root filesystems", "pail", name, "deploy", id, "err", err)
+	for _, kind := range []string{"rootfs.", "fn."} {
+		if err := s.store.DeletePrefix(ctx, deployMeta(name, id)+kind); err != nil {
+			s.log.Error("delete root filesystems", "pail", name, "deploy", id, "err", err)
+		}
 	}
 }
 
@@ -748,6 +774,7 @@ func (s *Service) prune(ctx context.Context, e *entry) {
 		)
 		if s.dir != "" {
 			os.RemoveAll(filepath.Join(s.rootfsDir(e.name), id))
+			os.RemoveAll(filepath.Join(s.functionsDir(e.name), id))
 		}
 		if err != nil {
 			s.log.Error("prune deploy", "pail", e.name, "deploy", id, "err", err)

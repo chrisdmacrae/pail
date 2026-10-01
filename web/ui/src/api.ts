@@ -21,6 +21,21 @@ export interface Container {
   state: 'running' | 'starting' | 'stopped';
 }
 
+// Fn is one function of the deploy a pail is serving. With no copies running
+// it is asleep, and wakes on its next request.
+export interface Fn {
+  name: string;
+  lang: string;
+  copies: number;
+  max: number;
+}
+
+// Route sends the paths it covers to files, a function or a container.
+export interface Route {
+  path: string;
+  to: string;
+}
+
 export interface Pail {
   name: string;
   host: string;
@@ -38,6 +53,9 @@ export interface Pail {
   deploy: Deploy | null;
   // containers are the microVMs of the deploy being served, if it has any.
   containers?: Container[];
+  functions?: Fn[];
+  // routes say what answers each path, for a pail with server code.
+  routes?: Route[];
 }
 
 export interface Info {

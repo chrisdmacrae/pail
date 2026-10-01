@@ -80,6 +80,7 @@ func run(logger *slog.Logger) error {
 		Builder:            vms,
 		Dir:                cfg.DataDir,
 		MaxContainerMemory: cfg.MaxContainerMemory,
+		MaxFunctionMemory:  cfg.MaxFunctionMemory,
 		Logger:             logger,
 	})
 	if err := svc.Load(ctx); err != nil {

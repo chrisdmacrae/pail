@@ -43,6 +43,11 @@ type Pail struct {
 	// Containers are the containers of the deploy being served, and how
 	// each is doing.
 	Containers []ContainerStatus `json:"containers,omitempty"`
+	// Functions are the functions of the deploy being served.
+	Functions []FunctionStatus `json:"functions,omitempty"`
+	// Routes say what answers each path of the deploy being served, when
+	// its pail.json has server code.
+	Routes []Route `json:"routes,omitempty"`
 	// Serving is the ID of the deploy requests are answered from, or "".
 	Serving   string    `json:"serving"`
 	CreatedAt time.Time `json:"created_at"`
@@ -103,12 +108,14 @@ type Manifest struct {
 	Files map[string]File `json:"files"`
 	// Containers are the microVMs the deploy runs, by name.
 	Containers map[string]Container `json:"containers,omitempty"`
+	// Functions are the programs the deploy runs on demand, by name.
+	Functions map[string]Function `json:"functions,omitempty"`
 	// Routes say what answers each path. None means files answer them all.
 	Routes []Route `json:"routes,omitempty"`
 }
 
-// Route sends the paths it covers to files or to a container. To is
-// "static" or "container:<name>".
+// Route sends the paths it covers to files, a function or a container. To is
+// "static", "function:<name>" or "container:<name>".
 type Route struct {
 	Path string `json:"path"`
 	To   string `json:"to"`
@@ -139,6 +146,39 @@ type Container struct {
 	User       string   `json:"user,omitempty"`
 }
 
+// Function is one function of a deploy: what pail.json asked for, and how
+// its source turned out to be run.
+type Function struct {
+	Lang string `json:"lang"`
+	// TimeoutMS is how long one request may take, and IdleMS how long a
+	// copy waits for another before it stops.
+	TimeoutMS int64 `json:"timeout_ms"`
+	IdleMS    int64 `json:"idle_ms"`
+	MemoryMB  int   `json:"memory_mb"`
+	// Max is the most copies that run at once.
+	Max int               `json:"max"`
+	Env map[string]string `json:"env,omitempty"`
+
+	// Argv is the program a request runs, and BaseEnv what the language and
+	// its image set for it.
+	Argv    []string `json:"argv"`
+	BaseEnv []string `json:"base_env,omitempty"`
+	// RootID names the root filesystem the function runs on.
+	RootID string `json:"root_id"`
+	// Snapshot says a copy is restored from a snapshot rather than booted.
+	Snapshot bool `json:"snapshot"`
+}
+
+// FunctionStatus is a function as the API reports it.
+type FunctionStatus struct {
+	Name string `json:"name"`
+	Lang string `json:"lang"`
+	// Copies is how many microVMs of it are running now. None means it is
+	// asleep, and costs nothing.
+	Copies int `json:"copies"`
+	Max    int `json:"max"`
+}
+
 // ContainerStatus is a container as the API reports it.
 type ContainerStatus struct {
 	Name string `json:"name"`
@@ -164,6 +204,12 @@ var (
 	ErrNotServable = errors.New("deploy didn't finish, so it can't be served")
 	ErrOff         = errors.New("pail is off")
 	ErrNoSource    = errors.New("pail has no finished deploy to redeploy")
+	// ErrFunctionBusy means every copy of a function stayed busy for as
+	// long as a request may wait.
+	ErrFunctionBusy = errors.New("function is at its max")
+	// ErrFunctionDown means a function has nothing to run on: this Pail
+	// can't run microVMs, or the function's files are gone.
+	ErrFunctionDown = errors.New("function can't run")
 )
 
 // ErrCantStart means a deploy's containers didn't come up, so the pail went
@@ -186,6 +232,7 @@ func ValidName(name string) bool { return nameRE.MatchString(name) }
 //	meta/<name>/deploys/<id>.log                log lines, one JSON per line
 //	meta/<name>/deploys/<id>.manifest.json      Manifest
 //	meta/<name>/deploys/<id>.rootfs.<c>.gz      a container's root filesystem
+//	meta/<name>/deploys/<id>.fn.<f>.<part>.gz   a function: root, code, mem, state
 const metaRoot = "meta/"
 
 func metaPrefix(name string) string      { return metaRoot + name + "/" }
@@ -196,6 +243,9 @@ func logKey(name, id string) string      { return deployMeta(name, id) + "log" }
 func manifestKey(name, id string) string { return deployMeta(name, id) + "manifest.json" }
 func rootfsKey(name, id, container string) string {
 	return deployMeta(name, id) + "rootfs." + container + ".gz"
+}
+func functionKey(name, id, function, part string) string {
+	return deployMeta(name, id) + "fn." + function + "." + part + ".gz"
 }
 func pailFiles(name string) string       { return "pails/" + name + "/" }
 func deployFiles(name, id string) string { return pailFiles(name) + "deploys/" + id + "/" }
