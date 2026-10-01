@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/chrisdmacrae/pail/internal/config"
 	"github.com/chrisdmacrae/pail/internal/pails"
@@ -20,6 +21,13 @@ import (
 )
 
 const token = "test-token"
+
+// testUI stands in for the built web UI.
+var testUI = fstest.MapFS{
+	"index.html":        {Data: []byte("<title>Pail</title>")},
+	"favicon.svg":       {Data: []byte("<svg/>")},
+	"assets/app-abc.js": {Data: []byte("console.log('pail')")},
+}
 
 type fixture struct {
 	t     *testing.T
@@ -36,7 +44,7 @@ func newFixture(t *testing.T, store *storage.Memory) *fixture {
 	if err := svc.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return &fixture{t: t, store: store, svc: svc, srv: New(cfg, svc, logger, "test")}
+	return &fixture{t: t, store: store, svc: svc, srv: New(cfg, svc, testUI, logger, "test")}
 }
 
 func (f *fixture) do(method, host, target string, body []byte, header ...string) *httptest.ResponseRecorder {
@@ -439,4 +447,37 @@ func TestStopStartAndRedeploy(t *testing.T) {
 	wantBody(t, f.api("POST", "/api/v1/pails/empty/redeploy", nil), http.StatusConflict, "no finished deploy")
 	wantBody(t, f.api("POST", "/api/v1/pails/nope/redeploy", nil), http.StatusNotFound, "No pail called nope")
 	wantBody(t, f.api("POST", "/api/v1/pails/nope/stop", nil), http.StatusNotFound, "No pail called nope")
+}
+
+func TestWebUI(t *testing.T) {
+	f := newFixture(t, storage.NewMemory())
+
+	// The page is public; what it shows comes from the API, which isn't.
+	for _, target := range []string{"/", "/new", "/pails/blog"} {
+		rec := f.site("pail.lan", target)
+		wantBody(t, rec, 200, "<title>Pail</title>")
+		if rec.Header().Get("Content-Security-Policy") == "" || rec.Header().Get("Cache-Control") != "no-cache" {
+			t.Errorf("%s: headers %v", target, rec.Header())
+		}
+	}
+	js := f.site("pail.lan", "/assets/app-abc.js")
+	wantBody(t, js, 200, "console.log")
+	if cc := js.Header().Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+		t.Errorf("asset cache: %q", cc)
+	}
+	wantBody(t, f.site("pail.lan", "/favicon.svg"), 200, "<svg/>")
+	wantBody(t, f.site("pail.lan", "/assets/gone.js"), 404, "This is Pail on pail.lan.")
+	wantBody(t, f.site("10.0.20.15:8080", "/"), 200, "<title>Pail</title>")
+	if rec := f.do("POST", "pail.lan", "/", nil); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /: got %d", rec.Code)
+	}
+
+	// The UI never shadows the API, and a pail's host never serves the UI.
+	wantBody(t, f.site("pail.lan", "/api/v1/info"), http.StatusUnauthorized, "token")
+	wantBody(t, f.site("blog.pail.lan", "/"), 404, "No pail called blog.")
+
+	// A server built without the UI says so instead.
+	f.srv = New(config.Config{Token: token, BaseDomain: "pail.lan"}, f.svc, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	wantBody(t, f.site("pail.lan", "/"), 200, "This build has no web UI")
+	wantBody(t, f.site("pail.lan", "/new"), 404, "This is Pail on pail.lan.")
 }

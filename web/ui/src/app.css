@@ -1,0 +1,328 @@
+/* Layout for the Pail prototype: only what must change with screen width. */
+.pl-app {
+  min-height: 100%;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 22px;
+}
+.pl-main {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 48px 32px 80px;
+  box-sizing: border-box;
+}
+.pl-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.pl-display {
+  margin: 0;
+  font: 700 44px / 48px var(--font-display);
+  letter-spacing: -0.02em;
+}
+.pl-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 32px;
+  align-items: start;
+}
+.pl-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 32px;
+  align-items: start;
+}
+.pl-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pl-link-btn {
+  text-decoration: none;
+}
+.pl-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 44px;
+  padding: 0 4px;
+  margin-left: -4px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  font: 600 14px / 1 var(--font-sans);
+  cursor: pointer;
+}
+.pl-back:hover {
+  color: var(--ink);
+}
+.pl-back:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-ring);
+}
+.pl-repo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 16px;
+  box-sizing: border-box;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pl-repo:hover {
+  border-color: var(--line-strong);
+}
+.pl-repo:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-ring);
+}
+.pl-repo.is-on {
+  background: var(--water-soft);
+  border-color: var(--water-ink);
+  box-shadow: inset 0 0 0 1px var(--water-ink);
+}
+@media (max-width: 860px) {
+  .pl-split,
+  .pl-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 560px) {
+  .pl-main {
+    padding: 24px 16px 56px;
+  }
+  .pl-display {
+    font-size: 32px;
+    line-height: 38px;
+  }
+  .pa-top {
+    padding: 0 16px;
+  }
+  .pa-top-host {
+    display: none;
+  }
+  .pl-hide-sm {
+    display: none;
+  }
+  .pl-actions {
+    width: 100%;
+  }
+  .pl-actions > * {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+}
+.pl-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  min-width: 0;
+}
+.pl-deploys {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+.pl-deploy {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 6px 12px 6px 4px;
+  border-top: 1px solid var(--line);
+}
+.pl-deploy:first-child {
+  border-top: 0;
+}
+.pl-deploy.is-sel {
+  background: var(--surface-sunk);
+}
+.pl-deploy-pick {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 8px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pl-deploy-pick:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-ring);
+}
+.pl-deploy-pick:hover .pl-deploy-id {
+  text-decoration: underline;
+}
+.pl-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.pl-tag-serving {
+  background: var(--water-soft);
+  color: var(--water-ink);
+}
+.pl-tag-plain {
+  background: var(--surface-sunk);
+  color: var(--ink-muted);
+}
+.pl-addr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  border-top: 1px solid var(--line);
+}
+.pl-addr:first-child {
+  border-top: 0;
+}
+.pl-code {
+  margin: 0;
+  padding: 12px 16px;
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+  font: 400 13px / 20px var(--font-mono);
+  color: var(--ink);
+  white-space: pre;
+  overflow-x: auto;
+}
+.pl-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+.pl-or::before,
+.pl-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+@media (max-width: 560px) {
+  .pl-deploy {
+    flex-wrap: wrap;
+    padding-left: 4px;
+  }
+  .pl-deploy-meta {
+    display: none;
+  }
+}
+
+/* Beyond the prototype: what the working app needs. */
+html,
+body,
+#root {
+  min-height: 100%;
+}
+.pl-main {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+.pl-main-narrow {
+  max-width: 880px;
+}
+.pl-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.pl-h2 {
+  margin: 0;
+  font: 650 19px / 26px var(--font-display);
+}
+.pl-title {
+  margin: 0;
+  font: 700 28px / 34px var(--font-display);
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.pl-muted {
+  margin: 0;
+  color: var(--ink-muted);
+}
+.pl-small {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--ink-muted);
+}
+.pl-mono {
+  font-family: var(--font-mono);
+}
+.pl-note {
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunk);
+  color: var(--ink);
+}
+.pl-note-failed {
+  background: var(--failed-soft);
+}
+.pl-note-failed strong {
+  color: var(--failed);
+}
+.pl-url {
+  font: 400 14px / 20px var(--font-mono);
+  color: var(--link);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+  border-radius: 2px;
+}
+.pl-url:hover {
+  text-decoration: underline;
+}
+.pl-url:focus-visible,
+.pl-link-btn:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-ring);
+}
+.pl-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 16px;
+  font-size: 14px;
+}
+.pl-facts dt {
+  color: var(--ink-muted);
+}
+.pl-facts dd {
+  margin: 0;
+}

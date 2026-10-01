@@ -1,10 +1,12 @@
 // Package server is Pail's one HTTP listener. It routes by the Host header:
 // <name>.<base domain> is a pail's site; the base domain itself (or the
-// server's bare address) is the installation, which answers the REST API.
+// server's bare address) is the installation, which answers the REST API and
+// serves the web UI.
 package server
 
 import (
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,11 +21,14 @@ type Server struct {
 	pails   *pails.Service
 	log     *slog.Logger
 	version string
+	ui      fs.FS
 	install http.Handler
 }
 
-func New(cfg config.Config, svc *pails.Service, logger *slog.Logger, version string) *Server {
-	s := &Server{cfg: cfg, pails: svc, log: logger, version: version}
+// New builds the listener's handler. ui is the built web UI's files, or nil
+// to run without one.
+func New(cfg config.Config, svc *pails.Service, ui fs.FS, logger *slog.Logger, version string) *Server {
+	s := &Server{cfg: cfg, pails: svc, ui: ui, log: logger, version: version}
 	s.install = s.installation()
 	return s
 }

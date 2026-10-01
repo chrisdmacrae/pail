@@ -16,6 +16,7 @@ import (
 	"github.com/chrisdmacrae/pail/internal/pails"
 	"github.com/chrisdmacrae/pail/internal/server"
 	"github.com/chrisdmacrae/pail/internal/storage"
+	"github.com/chrisdmacrae/pail/internal/webui"
 )
 
 // version is set at release with -ldflags "-X main.version=...".
@@ -65,7 +66,7 @@ func run(logger *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(cfg, svc, logger, version),
+		Handler:           server.New(cfg, svc, webui.FS(), logger, version),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errc := make(chan error, 1)

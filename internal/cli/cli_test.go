@@ -31,7 +31,7 @@ func installation(t *testing.T) *httptest.Server {
 	if err := svc.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(server.New(cfg, svc, logger, "test"))
+	ts := httptest.NewServer(server.New(cfg, svc, nil, logger, "test"))
 	t.Cleanup(func() { ts.Close(); svc.Wait() })
 	return ts
 }

@@ -17,7 +17,8 @@ import (
 	"github.com/chrisdmacrae/pail/internal/pails"
 )
 
-// installation serves the base domain: the REST API under /api/v1.
+// installation serves the base domain: the REST API under /api/v1, and the
+// web UI everywhere else.
 func (s *Server) installation() http.Handler {
 	api := http.NewServeMux()
 	api.HandleFunc("GET /api/v1/info", s.handleInfo)
@@ -37,13 +38,7 @@ func (s *Server) installation() http.Handler {
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", s.requireToken(api))
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, "Pail is running on %s. The API is at /api/v1.\n", s.cfg.BaseDomain)
-	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		s.notFound(w, r, "Nothing at "+r.URL.Path+".")
-	})
+	mux.HandleFunc("/", s.serveUI)
 	return mux
 }
 

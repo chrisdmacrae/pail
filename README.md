@@ -15,8 +15,8 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | 1 | API, versitygw storage and Host-header routing for static pails | done |
 | 2 | pail-cli with profiles: login, up, ls, logs | done |
 | 3 | Deploy history and rollback | done |
-| 4 | Web UI from the design system | next |
-| 5 | Custom hostnames and the DNS self-check | |
+| 4 | Web UI from the design system | done |
+| 5 | Custom hostnames and the DNS self-check | next |
 | 6 | Git hosts: token first, then OAuth | |
 | 7 | Firecracker microVMs: the build VM, containers, and the KVM check | |
 | 8 | pail.json functions: base images, snapshots, sleep when idle, and routing | |
@@ -31,33 +31,56 @@ internal/storage     the object store: S3 (versitygw) and an in-memory one for t
 internal/pails       pails, deploys, the live pointer, the deploy pipeline
 internal/server      the listener: Host routing, the REST API, static serving
 internal/cli         the pail command: profiles, packing, the API client
+internal/webui       the built web UI, embedded into pail-server
+web/ui               the web UI's source: Vite, React 18, TypeScript
 web/design-system    tokens, components, fonts and brand marks, as published
 web/prototype        the prototype's source, for matching screens and copy in step 4
 ```
 
 ## Run it
 
-Pail needs versitygw (or any S3 gateway) to keep pails in. For a local one:
+`make` lists every command. The first time:
 
 ```bash
-ROOT_ACCESS_KEY=pail ROOT_SECRET_KEY=pail-dev-secret versitygw --port 127.0.0.1:7070 posix ./data
+make setup
 ```
 
-Then, with `localhost` as the base domain so `<name>.localhost` resolves without DNS:
+That installs the UI's packages and a local versitygw. Then:
 
 ```bash
-PAIL_TOKEN=dev-token PAIL_BASE_DOMAIN=localhost PAIL_LISTEN=127.0.0.1:8080 \
-PAIL_S3_ENDPOINT=http://127.0.0.1:7070 PAIL_S3_ACCESS_KEY=pail PAIL_S3_SECRET_KEY=pail-dev-secret \
-go run ./cmd/pail-server
+make dev
 ```
 
-Install the CLI, point it at that installation and deploy a folder:
+This runs versitygw, the server and the web UI together; Ctrl-C stops all three, and so does any one of them failing. The UI, with hot reload, is at http://localhost:5173. To run them in separate terminals instead, use `make dev-storage`, `make dev-server` and `make dev-ui`.
+
+Point the CLI at it once:
 
 ```bash
-go install ./cmd/pail
 PAIL_TOKEN=dev-token pail login http://localhost:8080 --profile dev
-pail up ./dist --name blog
 ```
+
+`dev-server` runs on `localhost:8080` with `localhost` as the base domain, so `<name>.localhost:8080` resolves without DNS, and its token is `dev-token`. `make install` puts the `pail` command on your path. `dev-server` builds the UI first, so the server also serves it, as of when it started, at http://localhost:8080.
+
+| Command | What it does |
+| --- | --- |
+| `make build` | Builds `bin/pail-server`, with the web UI inside, and `bin/pail`. |
+| `make check` | Lint, then every test. Run it before a commit. |
+| `make test` · `make lint` · `make fmt` | Each on its own; `test-go`, `test-ui`, `lint-go` and `lint-ui` narrow them. |
+| `make dev-ui` | The web UI with hot reload on `:5173`, using `dev-server`'s API. |
+
+`go build ./cmd/pail-server` on its own works too, but without `make ui` first the server has no web UI and says so at `/`.
+
+## Web UI
+
+The base domain serves the UI: your pails, a pail's page, and New pail. It is a plain client of the API below and asks for the installation's token once per browser.
+
+- **Your pails:** the list, with Redeploy and Remove on each row.
+- **A pail:** its deploys and their logs (live while building), Upload a deploy (a `.zip` or a folder), Serve this one, Redeploy, Stop or Start, and Remove.
+- **New pail:** the pail-cli commands, or Upload: drop a folder or a `.zip`. A folder is packed into a `.tar.gz` in the browser.
+
+Not in the UI yet: the git host tiles (step 6), Add a hostname (step 5), the functions panel (step 8), and real install instructions for pail-cli.
+
+It's built from `web/design-system/` as published: the components come from its `bundle.js`, and nothing in that folder is edited. Day or Night follows the device.
 
 ## pail-cli
 
@@ -120,7 +143,7 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 ## How a request is routed
 
 - `<name>.<base domain>` is that pail's site, served from its live deploy.
-- The base domain itself, an IP or `localhost` is the installation: the API.
+- The base domain itself, an IP or `localhost` is the installation: the API under `/api/v1`, the web UI everywhere else.
 - Any other host gets a plain 404 naming the installation.
 - A pail that is Off answers every request with a plain 503 saying so.
 
@@ -143,5 +166,5 @@ Pail keeps the newest `PAIL_MAX_DEPLOYS` good deploys per pail for rollback and 
 ## Test
 
 ```bash
-go test -race ./...
+make check
 ```

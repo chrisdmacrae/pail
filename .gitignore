@@ -3,3 +3,8 @@
 *.tgz
 .DS_Store
 /site/
+node_modules/
+# The built web UI is embedded from here; only the placeholder is kept.
+/internal/webui/dist/*
+!/internal/webui/dist/.gitkeep
+/bin/
