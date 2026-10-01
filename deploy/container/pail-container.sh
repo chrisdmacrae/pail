@@ -5,7 +5,8 @@
 #
 # It starts one container, from one image, that holds:
 #
-#   versitygw     the storage Pail keeps everything in
+#   versitygw     the storage Pail keeps everything in, unless
+#                 PAIL_S3_ENDPOINT says to keep it somewhere else
 #   pail-server   Pail itself
 #
 # and gives it the engine's socket, so that Pail can run builds, containers
@@ -33,6 +34,10 @@
 #   PAIL_IMAGE        where the image comes from       (ghcr.io/chrisdmacrae/pail)
 #   PAIL_SOCKET       the engine's socket, as the
 #                     engine itself sees it            (found by asking it)
+#   PAIL_S3_ENDPOINT, PAIL_S3_ACCESS_KEY, PAIL_S3_SECRET_KEY
+#                     another S3 store to keep everything in, with
+#                     PAIL_S3_BUCKET, PAIL_S3_REGION and
+#                     PAIL_S3_ADDRESSING               (versitygw, in the container)
 #   YES=1             don't ask before starting
 #
 # Any other PAIL_ setting, such as PAIL_TOKEN or PAIL_MAX_UPLOAD_SIZE, is
@@ -54,6 +59,14 @@ die() { printf '\npail-container: %s\n' "$*" >&2; exit 1; }
 
 case "$ACTION" in up | down) ;; *) die "use \"up\" to run Pail (the default) or \"down\" to stop and remove it." ;; esac
 case "$PAIL_TLS" in on | off) ;; *) die "PAIL_TLS is \"on\" or \"off\"." ;; esac
+STORAGE="versitygw, in the container"
+if [ -n "${PAIL_S3_ENDPOINT:-}" ]; then
+  [ -n "${PAIL_S3_ACCESS_KEY:-}" ] && [ -n "${PAIL_S3_SECRET_KEY:-}" ] ||
+    die "with PAIL_S3_ENDPOINT, say the store's keys too: PAIL_S3_ACCESS_KEY and PAIL_S3_SECRET_KEY."
+  STORAGE="the bucket ${PAIL_S3_BUCKET:-pail} at $PAIL_S3_ENDPOINT"
+elif [ -n "${PAIL_S3_ACCESS_KEY:-}${PAIL_S3_SECRET_KEY:-}${PAIL_S3_BUCKET:-}${PAIL_S3_REGION:-}${PAIL_S3_ADDRESSING:-}" ]; then
+  die "PAIL_S3_ACCESS_KEY and the other PAIL_S3_ settings are for a store of your own. Say where it is with PAIL_S3_ENDPOINT."
+fi
 
 # -------------------------------------------------------------- the engine
 
@@ -170,6 +183,7 @@ Pail will run in a container on this machine:
   Container     $PAIL_NAME, from $IMAGE, starts with the engine
   Address       $URL, on $PAIL_BIND
   Base domain   $PAIL_BASE_DOMAIN
+  Storage       $STORAGE
   Data          the volume $PAIL_NAME-data
   Runs code in  containers beside its own, on the network $PAIL_NAME
 
@@ -216,7 +230,7 @@ fi
 while IFS='=' read -r setting _; do
   case "$setting" in
     PAIL_ENGINE | PAIL_NAME | PAIL_PORT | PAIL_HTTPS_PORT | PAIL_BIND | PAIL_BASE_DOMAIN | PAIL_TLS | PAIL_VERSION | PAIL_IMAGE | PAIL_SOCKET) ;;
-    PAIL_LISTEN | PAIL_LISTEN_TLS | PAIL_CONTAINER_NETWORK | PAIL_CONTAINER_SOCKET | PAIL_S3_*) ;;
+    PAIL_LISTEN | PAIL_LISTEN_TLS | PAIL_CONTAINER_NETWORK | PAIL_CONTAINER_SOCKET) ;;
     PAIL_*) args+=(--env "$setting") ;;
   esac
 done < <(env)

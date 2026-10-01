@@ -30,6 +30,18 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if c.S3.Bucket != "pail" || c.S3.Region != "us-east-1" || c.S3.Addressing != "auto" {
+		t.Errorf("storage's defaults: %+v", c.S3)
+	}
+	vars["PAIL_S3_ADDRESSING"] = "Virtual"
+	if c, err := Load(env(vars)); err != nil || c.S3.Addressing != "virtual" {
+		t.Errorf("PAIL_S3_ADDRESSING=Virtual: %+v, %v", c.S3, err)
+	}
+	vars["PAIL_S3_ADDRESSING"] = "sideways"
+	if _, err := Load(env(vars)); err == nil || !strings.Contains(err.Error(), `"auto", "path" or "virtual"`) {
+		t.Errorf("PAIL_S3_ADDRESSING=sideways: %v", err)
+	}
+	delete(vars, "PAIL_S3_ADDRESSING")
 	if c.BaseDomain != "pail.lan" || c.MaxUploadSize != 100<<20 || c.MaxDeploys != 10 || c.MaxFunctionMemory != 1<<30 || c.MaxContainerMemory != 2<<30 {
 		t.Errorf("defaults: %+v", c)
 	}

@@ -8,7 +8,8 @@
 # It makes an unprivileged container, gives it /dev/kvm and /dev/net/tun so
 # Pail can run Firecracker microVMs, and inside it installs and starts:
 #
-#   versitygw     the storage Pail keeps everything in
+#   versitygw     the storage Pail keeps everything in, unless
+#                 S3_ENDPOINT says to keep it somewhere else
 #   pail-server   Pail itself, on ports 80 and 443
 #   firecracker   and a guest kernel, for builds
 #
@@ -30,6 +31,10 @@
 #   PAIL_REPO       where releases come from          (chrisdmacrae/pail)
 #   ACME_DNS_PROVIDER, ACME_DNS_TOKEN, ACME_EMAIL
 #                   for Let's Encrypt certificates and custom hostnames
+#   S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY
+#                   another S3 store to keep everything in, with
+#                   S3_BUCKET, S3_REGION and S3_ADDRESSING
+#                                                     (versitygw, in the container)
 #   YES=1           don't ask before starting
 set -euo pipefail
 
@@ -48,6 +53,12 @@ BASE_DOMAIN=${BASE_DOMAIN:-pail.lan}
 ACME_DNS_PROVIDER=${ACME_DNS_PROVIDER:-}
 ACME_DNS_TOKEN=${ACME_DNS_TOKEN:-}
 ACME_EMAIL=${ACME_EMAIL:-}
+S3_ENDPOINT=${S3_ENDPOINT:-}
+S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+S3_SECRET_KEY=${S3_SECRET_KEY:-}
+S3_BUCKET=${S3_BUCKET:-}
+S3_REGION=${S3_REGION:-}
+S3_ADDRESSING=${S3_ADDRESSING:-}
 
 # What Pail runs microVMs with. The kernel is one of Firecracker's own builds.
 VERSITYGW_VERSION=${VERSITYGW_VERSION:-v1.8.0}
@@ -64,6 +75,11 @@ command -v pct >/dev/null && command -v pveam >/dev/null || die "this isn't a Pr
 [ -e /dev/kvm ] || die "this host has no /dev/kvm. Turn on virtualization in its firmware; Pail needs it for builds."
 if [ -n "$ACME_DNS_PROVIDER$ACME_DNS_TOKEN" ] && { [ -z "$ACME_DNS_PROVIDER" ] || [ -z "$ACME_DNS_TOKEN" ]; }; then
   die "ACME_DNS_PROVIDER and ACME_DNS_TOKEN go together. Set both, or neither."
+fi
+if [ -n "$S3_ENDPOINT" ]; then
+  [ -n "$S3_ACCESS_KEY" ] && [ -n "$S3_SECRET_KEY" ] || die "with S3_ENDPOINT, say the store's keys too: S3_ACCESS_KEY and S3_SECRET_KEY."
+elif [ -n "$S3_ACCESS_KEY$S3_SECRET_KEY$S3_BUCKET$S3_REGION$S3_ADDRESSING" ]; then
+  die "S3_ACCESS_KEY and the other S3_ settings are for a store of your own. Say where it is with S3_ENDPOINT."
 fi
 if [ "$IP" != dhcp ] && [ -z "$GATEWAY" ]; then
   die "with IP=$IP, say the gateway too: GATEWAY=10.0.0.1"
@@ -92,6 +108,7 @@ Pail will be set up in a new container:
   Resources     $CORES cores, ${MEMORY}MB memory, ${DISK}GB disk on $STORAGE
   Network       $BRIDGE, ${IP}${GATEWAY:+ via $GATEWAY}
   Base domain   $BASE_DOMAIN
+  Storage       $([ -n "$S3_ENDPOINT" ] && echo "the bucket ${S3_BUCKET:-pail} at $S3_ENDPOINT" || echo "versitygw, in the container")
   Certificates  $([ -n "$ACME_DNS_PROVIDER" ] && echo "Let's Encrypt through $ACME_DNS_PROVIDER" || echo "Pail's own authority (each device trusts it once)")
   Pail          $PAIL_VERSION from github.com/$PAIL_REPO
 
@@ -154,13 +171,20 @@ pct exec "$CTID" -- sh -c 'getent hosts github.com >/dev/null' || die "container
 
 say "Installing Pail inside the container"
 PAIL_TOKEN=$(openssl rand -hex 32)
-S3_SECRET=$(openssl rand -hex 24)
+# With no store of your own, versitygw in the container is the store, with
+# keys made here.
+OWN_STORE=$([ -n "$S3_ENDPOINT" ] && echo 1 || echo 0)
+if [ "$OWN_STORE" = 0 ]; then
+  S3_ENDPOINT=http://127.0.0.1:7070 S3_ACCESS_KEY=pail S3_SECRET_KEY=$(openssl rand -hex 24)
+fi
 KERNEL_URL=${FC_KERNEL_URL/ARCH/$UNAME_ARCH}
 
 pct exec "$CTID" -- env \
   RELEASE="$RELEASE" PAIL_REPO="$PAIL_REPO" GOARCH="$GOARCH" UNAME_ARCH="$UNAME_ARCH" \
   VERSITYGW_VERSION="$VERSITYGW_VERSION" FC_VERSION="$FC_VERSION" KERNEL_URL="$KERNEL_URL" \
-  PAIL_TOKEN="$PAIL_TOKEN" S3_SECRET="$S3_SECRET" BASE_DOMAIN="$BASE_DOMAIN" \
+  PAIL_TOKEN="$PAIL_TOKEN" BASE_DOMAIN="$BASE_DOMAIN" OWN_STORE="$OWN_STORE" \
+  S3_ENDPOINT="$S3_ENDPOINT" S3_ACCESS_KEY="$S3_ACCESS_KEY" S3_SECRET_KEY="$S3_SECRET_KEY" \
+  S3_BUCKET="$S3_BUCKET" S3_REGION="$S3_REGION" S3_ADDRESSING="$S3_ADDRESSING" \
   ACME_DNS_PROVIDER="$ACME_DNS_PROVIDER" ACME_DNS_TOKEN="$ACME_DNS_TOKEN" ACME_EMAIL="$ACME_EMAIL" \
   bash -s <<'INSIDE'
 set -euo pipefail
@@ -169,7 +193,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates e2fsprogs iptables iproute2 >/dev/null
 
-mkdir -p /etc/pail /var/lib/pail /var/lib/versitygw /usr/local/bin
+mkdir -p /etc/pail /var/lib/pail /usr/local/bin
 tmp=$(mktemp -d)
 cd "$tmp"
 
@@ -177,9 +201,11 @@ echo "  pail-server"
 curl -fsSL "$RELEASE/pail-server_linux_$GOARCH.tar.gz" | tar -xz --no-same-owner
 install -m 0755 pail-server /usr/local/bin/pail-server
 
-echo "  versitygw $VERSITYGW_VERSION"
-curl -fsSL "https://github.com/versity/versitygw/releases/download/$VERSITYGW_VERSION/versitygw_${VERSITYGW_VERSION}_Linux_$( [ "$GOARCH" = amd64 ] && echo x86_64 || echo arm64 ).tar.gz" | tar -xz --no-same-owner
-install -m 0755 "$(find . -type f -name versitygw | head -1)" /usr/local/bin/versitygw
+if [ "$OWN_STORE" = 0 ]; then
+  echo "  versitygw $VERSITYGW_VERSION"
+  curl -fsSL "https://github.com/versity/versitygw/releases/download/$VERSITYGW_VERSION/versitygw_${VERSITYGW_VERSION}_Linux_$( [ "$GOARCH" = amd64 ] && echo x86_64 || echo arm64 ).tar.gz" | tar -xz --no-same-owner
+  install -m 0755 "$(find . -type f -name versitygw | head -1)" /usr/local/bin/versitygw
+fi
 
 echo "  firecracker $FC_VERSION"
 curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-$UNAME_ARCH.tgz" | tar -xz --no-same-owner
@@ -189,11 +215,21 @@ echo "  guest kernel"
 curl -fsSL -o /var/lib/pail/vmlinux "$KERNEL_URL"
 cd / && rm -rf "$tmp"
 
-# Storage: versitygw, listening only inside the container.
+# Storage: versitygw, listening only inside the container. With a store of
+# your own there is none, and Pail's service waits for nothing but the
+# network.
+SERVICES=pail.service
+STORAGE_UNIT=
+if [ "$OWN_STORE" = 0 ]; then
+SERVICES="versitygw.service pail.service"
+STORAGE_UNIT="After=versitygw.service
+Requires=versitygw.service"
+mkdir -p /var/lib/versitygw
 cat > /etc/pail/versitygw.env <<ENV
-ROOT_ACCESS_KEY=pail
-ROOT_SECRET_KEY=$S3_SECRET
+ROOT_ACCESS_KEY=$S3_ACCESS_KEY
+ROOT_SECRET_KEY=$S3_SECRET_KEY
 ENV
+chmod 600 /etc/pail/versitygw.env
 cat > /etc/systemd/system/versitygw.service <<'UNIT'
 [Unit]
 Description=versitygw, the storage Pail keeps everything in
@@ -209,19 +245,24 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 UNIT
+fi
 
 # Pail. Everything it can be told is in this one file.
 cat > /etc/pail/pail.env <<ENV
-# Pail's settings. After changing any: systemctl restart pail
+# Pail's settings, one NAME=value to a line. After changing any:
+#   systemctl restart pail
 PAIL_TOKEN=$PAIL_TOKEN
 PAIL_BASE_DOMAIN=$BASE_DOMAIN
-PAIL_S3_ENDPOINT=http://127.0.0.1:7070
-PAIL_S3_ACCESS_KEY=pail
-PAIL_S3_SECRET_KEY=$S3_SECRET
+PAIL_S3_ENDPOINT=$S3_ENDPOINT
+PAIL_S3_ACCESS_KEY=$S3_ACCESS_KEY
+PAIL_S3_SECRET_KEY=$S3_SECRET_KEY
 PAIL_DATA_DIR=/var/lib/pail
 PAIL_FIRECRACKER=/usr/local/bin/firecracker
 PAIL_KERNEL=/var/lib/pail/vmlinux
 ENV
+[ -z "$S3_BUCKET" ] || echo "PAIL_S3_BUCKET=$S3_BUCKET" >> /etc/pail/pail.env
+[ -z "$S3_REGION" ] || echo "PAIL_S3_REGION=$S3_REGION" >> /etc/pail/pail.env
+[ -z "$S3_ADDRESSING" ] || echo "PAIL_S3_ADDRESSING=$S3_ADDRESSING" >> /etc/pail/pail.env
 if [ -n "$ACME_DNS_PROVIDER" ]; then
   cat >> /etc/pail/pail.env <<ENV
 PAIL_ACME_DNS_PROVIDER=$ACME_DNS_PROVIDER
@@ -229,16 +270,16 @@ PAIL_ACME_DNS_TOKEN=$ACME_DNS_TOKEN
 ENV
   [ -n "$ACME_EMAIL" ] && echo "PAIL_ACME_EMAIL=$ACME_EMAIL" >> /etc/pail/pail.env
 fi
-chmod 600 /etc/pail/pail.env /etc/pail/versitygw.env
+chmod 600 /etc/pail/pail.env
 
 # Pail runs as root: each microVM gets a network device and firewall rules
 # of its own, and only root in the container may make those.
-cat > /etc/systemd/system/pail.service <<'UNIT'
+cat > /etc/systemd/system/pail.service <<UNIT
 [Unit]
 Description=Pail
-After=versitygw.service network-online.target
-Requires=versitygw.service
+After=network-online.target
 Wants=network-online.target
+$STORAGE_UNIT
 
 [Service]
 EnvironmentFile=/etc/pail/pail.env
@@ -275,7 +316,8 @@ UPDATE
 chmod 0755 /usr/local/bin/pail-update
 
 systemctl daemon-reload
-systemctl enable --now versitygw.service pail.service >/dev/null 2>&1
+# shellcheck disable=SC2086
+systemctl enable --now $SERVICES >/dev/null 2>&1
 INSIDE
 
 # ----------------------------------------------------------------- the end

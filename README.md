@@ -29,7 +29,7 @@ The spec is the handoff doc; the look and copy come from the design system and t
 cmd/pail-server      the server binary
 cmd/pail             pail-cli, installed as the pail command
 internal/config      environment variables
-internal/storage     the object store: S3 (versitygw) and an in-memory one for tests
+internal/storage     the object store: S3 (versitygw, or another store) and an in-memory one for tests
 internal/certs       TLS certificates: Pail's own authority, or Let's Encrypt
 internal/githost     git hosts: GitHub, GitLab, Bitbucket, Gitea and Forgejo
 internal/microvm     Firecracker microVMs: base images, networking, builds, containers
@@ -168,10 +168,11 @@ Everything is an environment variable on the server.
 | `PAIL_LISTEN` | `:80` | Address the plain-HTTP listener binds. |
 | `PAIL_LISTEN_TLS` | `:443` | Address the HTTPS listener binds. |
 | `PAIL_TLS` | on | `off` serves everything over plain HTTP: for development, or behind a proxy that terminates TLS itself. Custom hostnames are allowed, since the proxy holds their certificates. |
-| `PAIL_S3_ENDPOINT` | none (required) | versitygw's URL, e.g. `http://versitygw:7070`. |
-| `PAIL_S3_ACCESS_KEY` · `PAIL_S3_SECRET_KEY` | none (required) | versitygw credentials. |
+| `PAIL_S3_ENDPOINT` | none (required) | Where storage is: versitygw's URL, e.g. `http://versitygw:7070`, or any other store that speaks S3. |
+| `PAIL_S3_ACCESS_KEY` · `PAIL_S3_SECRET_KEY` | none (required) | The store's keys. |
 | `PAIL_S3_BUCKET` | `pail` | Bucket Pail keeps everything in; created if missing. |
-| `PAIL_S3_REGION` | `us-east-1` | Region sent with requests. |
+| `PAIL_S3_REGION` | `us-east-1` | Region requests are signed for. |
+| `PAIL_S3_ADDRESSING` | `auto` | Where the bucket's name goes in a request: `path` for after the host, `virtual` for in front of it, or `auto`, which is `virtual` for Amazon's, Google's and Alibaba's stores and `path` for every other. |
 
 ## API so far
 
@@ -255,7 +256,7 @@ Where there is no KVM, a laptop mostly, Pail runs the same things in the contain
 - **What it isn't.** A container shares the machine's kernel, and containers on the network can reach each other and the home network. That is fine for your own code on your own machine. It is not the isolation a microVM gives, so it isn't for running code you don't trust.
 - **Deploys don't move between the two.** What a deploy keeps for a microVM is not what it keeps for a container. A Pail switched from one runtime to the other serves its static files as before, and says of anything else to deploy it again.
 
-`deploy/container/Dockerfile` builds the image: pail-server and versitygw, with `deploy/container/entrypoint.sh` running both and keeping everything under `/data`. `make image` builds it as `pail:dev`. `deploy/container/pail-container.sh` runs it, on Docker or Podman, and `make test-container` runs `scripts/container-smoke`, which does the same from this checkout and deploys one of everything to it.
+`deploy/container/Dockerfile` builds the image: pail-server and versitygw, with `deploy/container/entrypoint.sh` running both and keeping everything under `/data`. Given a `PAIL_S3_ENDPOINT`, the entrypoint runs pail-server alone against that store, and `pail-container.sh` hands the `PAIL_S3_` settings through. `make image` builds it as `pail:dev`. `deploy/container/pail-container.sh` runs it, on Docker or Podman, and `make test-container` runs `scripts/container-smoke`, which does the same from this checkout and deploys one of everything to it.
 
 ## Containers
 
@@ -496,7 +497,7 @@ The Rust crate, `pail-fn` in `sdk/rust`, is released on its own, with no tag. A 
 
 ## Running on Proxmox
 
-`deploy/proxmox/pail-lxc.sh` sets Pail up in an unprivileged LXC container on a Proxmox host: versitygw and pail-server as services, Firecracker and a guest kernel, and `/dev/kvm` and `/dev/net/tun` passed through for builds. On the host, as root:
+`deploy/proxmox/pail-lxc.sh` sets Pail up in an unprivileged LXC container on a Proxmox host: versitygw and pail-server as services, Firecracker and a guest kernel, and `/dev/kvm` and `/dev/net/tun` passed through for builds. Pail's settings are one file in the container, `/etc/pail/pail.env`, which its service reads as it starts. With `S3_ENDPOINT`, `S3_ACCESS_KEY` and `S3_SECRET_KEY` the installer points Pail at that store and leaves versitygw out. On the host, as root:
 
 ```bash
 bash -c "$(curl -fsSL https://github.com/chrisdmacrae/pail/releases/latest/download/pail-proxmox.sh)"

@@ -1,5 +1,5 @@
 // pail-server is a Pail installation: the REST API and every pail's site on
-// one listener, with storage on versitygw.
+// one listener, with storage on versitygw or any other store that speaks S3.
 package main
 
 import (
@@ -92,6 +92,8 @@ func run(logger *slog.Logger) error {
 		SecretKey: cfg.S3.SecretKey,
 		Bucket:    cfg.S3.Bucket,
 		Region:    cfg.S3.Region,
+
+		Addressing: cfg.S3.Addressing,
 	})
 	if err != nil {
 		return err

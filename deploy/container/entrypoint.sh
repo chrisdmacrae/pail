@@ -7,19 +7,31 @@
 #   /data/token     the installation's token, made on the first start
 #
 # Pail's settings are the container's environment. A PAIL_TOKEN given there
-# is used instead of the one in /data/token.
+# is used instead of the one in /data/token. A PAIL_S3_ENDPOINT given there
+# is where Pail keeps everything instead: versitygw isn't started, and
+# /data/storage isn't used.
 set -euo pipefail
 
-mkdir -p /data/storage /data/pail
+mkdir -p /data/pail
 secret() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 umask 077
 [ -s /data/token ] || secret 32 > /data/token
-[ -s /data/storage-secret ] || secret 24 > /data/storage-secret
 umask 022
 
 export PAIL_TOKEN=${PAIL_TOKEN:-$(cat /data/token)}
 export PAIL_DATA_DIR=${PAIL_DATA_DIR:-/data/pail}
 export PAIL_RUNTIME=${PAIL_RUNTIME:-container}
+
+if [ -n "${PAIL_S3_ENDPOINT:-}" ]; then
+  # Storage is somewhere else, so Pail is all this container runs. It takes
+  # the container's signals itself.
+  exec pail-server
+fi
+
+mkdir -p /data/storage
+umask 077
+[ -s /data/storage-secret ] || secret 24 > /data/storage-secret
+umask 022
 export PAIL_S3_ENDPOINT=http://127.0.0.1:7070
 export PAIL_S3_ACCESS_KEY=pail
 PAIL_S3_SECRET_KEY=$(cat /data/storage-secret)

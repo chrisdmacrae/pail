@@ -63,6 +63,7 @@ PAIL_PORT=9000 bash -c "$(curl -fsSL https://github.com/chrisdmacrae/pail/releas
 | `PAIL_TLS`, `PAIL_HTTPS_PORT` | `off`, `8443` | `on` serves HTTPS as well, on that port. |
 | `PAIL_VERSION` | `latest` | A release to run, such as `v0.1.0`. |
 | `PAIL_SOCKET` | found by asking Docker | Docker’s socket, where the script can’t find it. |
+| `PAIL_S3_ENDPOINT`, `PAIL_S3_ACCESS_KEY`, `PAIL_S3_SECRET_KEY` | versitygw, in the container | Another S3 store to keep everything in. See [other storage](/running/storage/). |
 | `YES` | unset | `1` skips the question before it starts. |
 
 Any of [Pail’s own settings](/running/#settings) set the same way, such as `PAIL_MAX_UPLOAD_SIZE`, is handed to Pail as it is.

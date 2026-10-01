@@ -14,7 +14,7 @@ next:
 A Pail installation is two programs on one Linux machine.
 
 - **pail-server** is Pail itself: the web UI, the API that `pail-cli` talks to, and every pail’s site, all from one listener on ports 80 and 443.
-- **versitygw** is where Pail keeps everything: each deploy’s files, its own records, certificates and git connections. It is a small S3 gateway over an ordinary folder.
+- **versitygw** is where Pail keeps everything: each deploy’s files, its own records, certificates and git connections. It is a small S3 gateway over an ordinary folder. Pail can keep it all in [another S3 store](/running/storage/) instead.
 
 For builds, functions and containers, Pail also uses **Firecracker**, which runs each one in a small virtual machine of its own so it can’t touch the server.
 
@@ -50,14 +50,15 @@ On a server, three things come next. Pail on Docker or Podman, at `localhost`, n
 
 ## Settings
 
-Pail is configured entirely by environment variables. There is no settings screen and no config file to learn.
+Pail is configured entirely by environment variables. There is no settings screen and no config file to learn. On Proxmox they are kept in [one file](/running/proxmox/#pails-settings-file); on Docker and Podman they go in front of the script.
 
 | Variable | Default | What it sets |
 | --- | --- | --- |
 | `PAIL_TOKEN` | none, required | The installation’s secret. Every client sends it; Pail won’t start without it. |
 | `PAIL_BASE_DOMAIN` | `pail.lan` | The domain every pail gets a name under. |
-| `PAIL_S3_ENDPOINT` | none, required | Where versitygw listens, such as `http://127.0.0.1:7070`. |
-| `PAIL_S3_ACCESS_KEY`, `PAIL_S3_SECRET_KEY` | none, required | versitygw’s credentials. |
+| `PAIL_S3_ENDPOINT` | none, required | Where storage is: versitygw, such as `http://127.0.0.1:7070`, or [another S3 store](/running/storage/). |
+| `PAIL_S3_ACCESS_KEY`, `PAIL_S3_SECRET_KEY` | none, required | The store’s keys. |
+| `PAIL_S3_BUCKET`, `PAIL_S3_REGION`, `PAIL_S3_ADDRESSING` | `pail`, `us-east-1`, `auto` | The bucket Pail keeps everything in, the region requests are signed for, and where the bucket’s name goes in a request: `path`, `virtual`, or `auto`. |
 | `PAIL_MAX_UPLOAD_SIZE` | `100MB` | The largest upload, or repo, Pail accepts. |
 | `PAIL_MAX_DEPLOYS` | `10` | How many good deploys each pail keeps to roll back to. |
 | `PAIL_MAX_CONTAINER_MEMORY` | `2GB` | The most memory one container may ask for. |

@@ -10,7 +10,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// S3 stores objects in one bucket of an S3-compatible gateway.
+// S3 stores objects in one bucket of a store that speaks S3.
 type S3 struct {
 	client *minio.Client
 	bucket string
@@ -22,19 +22,30 @@ type S3Options struct {
 	SecretKey string
 	Bucket    string
 	Region    string
+	// Addressing is "path", "virtual" or "auto"; "" is "auto".
+	Addressing string
 }
 
-// NewS3 connects to the gateway and creates the bucket if it isn't there.
+// NewS3 connects to the store and creates the bucket if it isn't there.
 func NewS3(ctx context.Context, o S3Options) (*S3, error) {
 	u, err := url.Parse(o.Endpoint)
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("PAIL_S3_ENDPOINT %q is not a URL like http://versitygw:7070", o.Endpoint)
 	}
+	// Left to itself, the client puts the bucket in front of the host for
+	// the stores known to want it there, and after the host for the rest.
+	lookup := minio.BucketLookupAuto
+	switch o.Addressing {
+	case "path":
+		lookup = minio.BucketLookupPath
+	case "virtual":
+		lookup = minio.BucketLookupDNS
+	}
 	client, err := minio.New(u.Host, &minio.Options{
 		Creds:        credentials.NewStaticV4(o.AccessKey, o.SecretKey, ""),
 		Secure:       u.Scheme == "https",
 		Region:       o.Region,
-		BucketLookup: minio.BucketLookupPath,
+		BucketLookup: lookup,
 	})
 	if err != nil {
 		return nil, err
@@ -42,11 +53,11 @@ func NewS3(ctx context.Context, o S3Options) (*S3, error) {
 
 	ok, err := client.BucketExists(ctx, o.Bucket)
 	if err != nil {
-		return nil, fmt.Errorf("can't reach storage at %s: %w", o.Endpoint, err)
+		return nil, fmt.Errorf("can't reach the bucket %q at %s. Check PAIL_S3_ENDPOINT, the keys, PAIL_S3_REGION and PAIL_S3_BUCKET: %w", o.Bucket, o.Endpoint, err)
 	}
 	if !ok {
 		if err := client.MakeBucket(ctx, o.Bucket, minio.MakeBucketOptions{Region: o.Region}); err != nil {
-			return nil, fmt.Errorf("can't create bucket %q: %w", o.Bucket, err)
+			return nil, fmt.Errorf("there is no bucket %q at %s, and these keys can't make it. Make it there, or name another with PAIL_S3_BUCKET: %w", o.Bucket, o.Endpoint, err)
 		}
 	}
 	return &S3{client: client, bucket: o.Bucket}, nil

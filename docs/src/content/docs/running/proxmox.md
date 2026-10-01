@@ -14,7 +14,7 @@ next:
 
 Run on a Proxmox host, it makes one unprivileged LXC container and, inside it, installs and starts everything Pail needs:
 
-- **versitygw**, as a service, storing in `/var/lib/versitygw` and listening only inside the container.
+- **versitygw**, as a service, storing in `/var/lib/versitygw` and listening only inside the container. With [a store of your own](/running/storage/), it is left out.
 - **pail-server**, as a service, on ports 80 and 443.
 - **Firecracker** and a guest kernel, with `/dev/kvm` and `/dev/net/tun` passed through from the host, so Pail can run builds.
 
@@ -65,6 +65,7 @@ IP=10.0.0.50/24 GATEWAY=10.0.0.1 BASE_DOMAIN=pail.home.example \
 | `BASE_DOMAIN` | `pail.lan` | The domain pails get names under. |
 | `PAIL_VERSION` | `latest` | A release to install, such as `v0.1.0`. |
 | `ACME_DNS_PROVIDER`, `ACME_DNS_TOKEN`, `ACME_EMAIL` | unset | Let’s Encrypt certificates from the start. See [custom domains](/custom-domains/). |
+| `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | versitygw, in the container | Another S3 store to keep everything in, with `S3_BUCKET`, `S3_REGION` and `S3_ADDRESSING`. See [other storage](/running/storage/). |
 | `YES` | unset | `1` skips the question before it starts. |
 
 > **Give builds room.** A build gets 2 cores and 2GB of memory while it runs. The defaults leave space for that; a much smaller container will serve sites well but struggle to build them.
@@ -79,15 +80,7 @@ Everything lives inside the container. From the Proxmox host, with the container
 pct exec 101 -- journalctl -u pail -f
 ```
 
-**Change a setting.** Pail’s settings are in one file. Edit it, then restart Pail.
-
-```bash
-pct exec 101 -- nano /etc/pail/pail.env
-```
-
-```bash
-pct exec 101 -- systemctl restart pail
-```
+**Change a setting.** Pail’s settings are in one file, `/etc/pail/pail.env`. Edit it, then restart Pail. [Pail’s settings file](#pails-settings-file) covers it.
 
 **Update Pail.** This fetches the newest release and restarts Pail. Sites are away for the moment the restart takes.
 
@@ -95,7 +88,89 @@ pct exec 101 -- systemctl restart pail
 pct exec 101 -- pail-update
 ```
 
-**Back it up.** Back the container up as you would any other in Proxmox. Everything Pail knows is on its disk: `/var/lib/versitygw` holds every pail, and `/etc/pail` its settings.
+**Back it up.** Back the container up as you would any other in Proxmox. Everything Pail knows is on its disk: `/var/lib/versitygw` holds every pail, and `/etc/pail` its settings. With [a store of your own](/running/storage/), the pails are there instead, and the store is what to back up.
+
+## Pail’s settings file
+
+Pail is configured by environment variables, and on Proxmox they all come from one file inside the container: `/etc/pail/pail.env`. Pail’s service reads it each time it starts. Nothing else sets Pail up, so this file is where every setting in these docs goes.
+
+### What is in it
+
+The installer writes it. With the defaults it looks like this:
+
+```
+# Pail's settings, one NAME=value to a line. After changing any:
+#   systemctl restart pail
+PAIL_TOKEN=...
+PAIL_BASE_DOMAIN=pail.lan
+PAIL_S3_ENDPOINT=http://127.0.0.1:7070
+PAIL_S3_ACCESS_KEY=pail
+PAIL_S3_SECRET_KEY=...
+PAIL_DATA_DIR=/var/lib/pail
+PAIL_FIRECRACKER=/usr/local/bin/firecracker
+PAIL_KERNEL=/var/lib/pail/vmlinux
+```
+
+What you gave the installer is there too: `PAIL_ACME_DNS_PROVIDER` and `PAIL_ACME_DNS_TOKEN` for Let’s Encrypt, and the other `PAIL_S3_` settings for a store of your own.
+
+The file holds Pail’s token and its storage keys, so only root in the container can read it. Keep it that way.
+
+### Change it
+
+Open the file from the Proxmox host:
+
+```bash
+pct exec 101 -- nano /etc/pail/pail.env
+```
+
+Each setting is a line of its own, `NAME=value`. To add one, add a line; to go back to a default, remove the line.
+
+- No spaces around the `=`, and no `export` in front.
+- A value with a space in it goes in double quotes: `NAME="two words"`.
+- A line that starts with `#` is a note, and is ignored.
+- Nothing is worked out: `$HOME` in a value stays as those five characters.
+
+To add one line without opening an editor:
+
+```bash
+pct exec 101 -- sh -c 'echo "PAIL_MAX_UPLOAD_SIZE=500MB" >> /etc/pail/pail.env'
+```
+
+### Restart Pail
+
+Pail reads the file only as it starts, so a change does nothing until you restart it. Sites are away for the moment that takes.
+
+```bash
+pct exec 101 -- systemctl restart pail
+```
+
+Then check it came up:
+
+```bash
+pct exec 101 -- journalctl -u pail -n 20 --no-pager
+```
+
+The last lines should say “pail is up”. If a setting is wrong, Pail says which and why, and doesn’t start. Fix the line and restart it again.
+
+### What you’ll change there
+
+| To | Set |
+| --- | --- |
+| Change the token | `PAIL_TOKEN`. Every client is locked out until it is given the new one. |
+| Move to another base domain | `PAIL_BASE_DOMAIN`, and point the new name at Pail. |
+| Use Let’s Encrypt | `PAIL_ACME_DNS_PROVIDER`, `PAIL_ACME_DNS_TOKEN` and `PAIL_ACME_EMAIL`. See [custom domains](/custom-domains/). |
+| Let people sign in to a git host | `PAIL_OAUTH_<HOST>_CLIENT_ID` and `_CLIENT_SECRET`. See [git providers](/git-providers/). |
+| Allow bigger uploads | `PAIL_MAX_UPLOAD_SIZE`, such as `500MB`. |
+| Keep storage somewhere else | The `PAIL_S3_` settings. See [other storage](/running/storage/). |
+
+[Every setting](/running/#settings) Pail has can go in this file.
+
+Two things the file doesn’t cover:
+
+- **versitygw’s own keys** are in `/etc/pail/versitygw.env`. They have to match `PAIL_S3_ACCESS_KEY` and `PAIL_S3_SECRET_KEY` for as long as Pail uses it. After changing them, restart both: `systemctl restart versitygw pail`.
+- **The container itself**, its cores, memory, disk and address, is Proxmox’s to change, from its web UI or with `pct set`.
+
+Updating Pail with `pail-update` leaves the file as it is.
 
 ## When it doesn’t work
 

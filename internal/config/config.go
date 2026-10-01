@@ -94,13 +94,18 @@ type ACME struct {
 // Enabled reports whether Let's Encrypt mode is on.
 func (a ACME) Enabled() bool { return a.DNSProvider != "" && a.DNSToken != "" }
 
-// S3 points Pail at versitygw (or any S3-compatible gateway).
+// S3 points Pail at where it keeps everything: versitygw beside it, or any
+// other store that speaks S3.
 type S3 struct {
 	Endpoint  string // PAIL_S3_ENDPOINT, e.g. http://versitygw:7070
 	AccessKey string // PAIL_S3_ACCESS_KEY
 	SecretKey string // PAIL_S3_SECRET_KEY
 	Bucket    string // PAIL_S3_BUCKET
 	Region    string // PAIL_S3_REGION
+	// Addressing is where the bucket's name goes in a request, from
+	// PAIL_S3_ADDRESSING: "path" for after the host, "virtual" for in front
+	// of it, or "auto" for whichever the store is known to want.
+	Addressing string
 }
 
 // Load builds a Config from getenv (normally os.Getenv).
@@ -124,6 +129,8 @@ func Load(getenv func(string) string) (Config, error) {
 			SecretKey: get("PAIL_S3_SECRET_KEY", ""),
 			Bucket:    get("PAIL_S3_BUCKET", "pail"),
 			Region:    get("PAIL_S3_REGION", "us-east-1"),
+
+			Addressing: strings.ToLower(get("PAIL_S3_ADDRESSING", "auto")),
 		},
 	}
 	if c.Token == "" {
@@ -197,7 +204,12 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	if c.S3.Endpoint == "" || c.S3.AccessKey == "" || c.S3.SecretKey == "" {
-		return c, errors.New("PAIL_S3_ENDPOINT, PAIL_S3_ACCESS_KEY and PAIL_S3_SECRET_KEY must point at versitygw")
+		return c, errors.New("PAIL_S3_ENDPOINT, PAIL_S3_ACCESS_KEY and PAIL_S3_SECRET_KEY must point at Pail's storage: versitygw, or another store that speaks S3")
+	}
+	switch c.S3.Addressing {
+	case "auto", "path", "virtual":
+	default:
+		return c, fmt.Errorf("PAIL_S3_ADDRESSING is %q. It is \"auto\", \"path\" or \"virtual\"", c.S3.Addressing)
 	}
 	return c, nil
 }
