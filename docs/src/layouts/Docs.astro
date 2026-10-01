@@ -1,0 +1,124 @@
+---
+import { getCollection } from 'astro:content';
+import '../../../web/design-system/tokens.css';
+import '../../../web/design-system/components/bundle.css';
+import '../styles/docs.css';
+
+interface Props {
+  title: string;
+  description: string;
+}
+const { title, description } = Astro.props;
+
+// The sidebar is the collection: sections in a fixed order, pages by their
+// order, and provider guides nested under their section.
+const pages = (await getCollection('docs')).sort((a, b) => a.data.order - b.data.order);
+const sections = ['Start here', 'Custom domains'].map((name) => ({
+  name,
+  pages: pages.filter((p) => p.data.section === name && !p.data.provider),
+  providers: pages.filter((p) => p.data.section === name && p.data.provider),
+}));
+const href = (id: string) => `/${id}/`;
+const here = Astro.url.pathname.replace(/\/?$/, '/');
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title === 'Pail docs' ? title : `${title} · Pail docs`}</title>
+    <script is:inline>
+      // Day or Night follows the device, set before the page paints.
+      (function () {
+        var night = window.matchMedia('(prefers-color-scheme: dark)');
+        function apply() {
+          document.documentElement.dataset.theme = night.matches ? 'dark' : 'light';
+        }
+        apply();
+        night.addEventListener('change', apply);
+      })();
+    </script>
+  </head>
+  <body>
+    <header class="pa-top">
+      <a class="pa-top-brand dx-home" href="/" aria-label="Pail docs, home">
+        <svg class="pa-mark" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true">
+          <path class="pa-mark-fill" d="M7.4 17.5h17.2l-1.35 8.3H8.75z"></path>
+          <g fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8.5 12.5a7.5 7.5 0 0 1 15 0"></path>
+            <path d="M4.5 12.5h23M6.3 12.5l2.1 13.4a1.6 1.6 0 0 0 1.6 1.4h12a1.6 1.6 0 0 0 1.6-1.4l2.1-13.4"></path>
+          </g>
+        </svg>
+        <span class="pa-top-word">pail</span>
+        <span class="pa-top-host">docs</span>
+      </a>
+    </header>
+
+    <div class="dx-shell">
+      <nav class="dx-nav" aria-label="Docs">
+        {
+          sections.map((section) => (
+            <div class="dx-nav-group">
+              <p class="dx-nav-title">{section.name}</p>
+              {section.pages.map((p) => (
+                <a href={href(p.id)} aria-current={here === href(p.id) ? 'page' : undefined}>
+                  {p.data.navLabel ?? p.data.title}
+                </a>
+              ))}
+              {section.providers.length > 0 && (
+                <div class="dx-nav-group dx-nav-sub">
+                  {section.providers.map((p) => (
+                    <a href={href(p.id)} aria-current={here === href(p.id) ? 'page' : undefined}>
+                      {p.data.navLabel ?? p.data.title}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))
+        }
+      </nav>
+
+      <main class="dx-main">
+        <slot />
+      </main>
+    </div>
+
+    <script>
+      // Every code block gets a Copy button, like the design system's
+      // Command: it flips to "Copied" for 1.6 seconds.
+      const ICONS = {
+        copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/>',
+        check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+      };
+      const icon = (name: keyof typeof ICONS) =>
+        `<svg class="pa-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+
+      for (const pre of document.querySelectorAll<HTMLPreElement>('.dx-main pre')) {
+        const wrap = document.createElement('div');
+        wrap.className = 'dx-code';
+        pre.replaceWith(wrap);
+        wrap.append(pre);
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'pa-cmd-copy';
+        const show = (copied: boolean) => {
+          button.innerHTML = `${icon(copied ? 'check' : 'copy')}<span>${copied ? 'Copied' : 'Copy'}</span>`;
+          button.setAttribute('aria-label', copied ? 'Copied' : 'Copy');
+        };
+        show(false);
+        button.addEventListener('click', () => {
+          navigator.clipboard?.writeText(pre.textContent?.trimEnd() ?? '');
+          show(true);
+          window.setTimeout(() => show(false), 1600);
+        });
+        wrap.append(button);
+      }
+    </script>
+  </body>
+</html>

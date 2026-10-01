@@ -1,6 +1,7 @@
 # Pail's everyday commands. `make` on its own lists them.
 
 UI := web/ui
+DOCS := docs
 BIN := bin
 
 # What the dev targets run with. Override any of them: make dev-server PAIL_LISTEN=:9000
@@ -27,15 +28,16 @@ GOFILES   := $(shell git ls-files '*.go')
 
 .DEFAULT_GOAL := help
 .PHONY: help setup build ui install test test-go test-ui lint lint-go lint-ui fmt check \
-        dev dev-storage dev-server dev-ui clean
+        dev dev-storage dev-server dev-ui dev-docs docs clean
 
 help: ## List these commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 ## Setting up
 
-setup: ## Install what development needs: UI packages and a local versitygw
+setup: ## Install what development needs: UI and docs packages, and a local versitygw
 	cd $(UI) && pnpm install
+	cd $(DOCS) && pnpm install
 	go install github.com/versity/versitygw/cmd/versitygw@latest
 
 ## Building
@@ -46,6 +48,9 @@ build: ui ## Build bin/pail-server (with the web UI inside) and bin/pail
 
 ui: ## Build the web UI into the folder pail-server embeds
 	cd $(UI) && pnpm install --frozen-lockfile && pnpm build
+
+docs: ## Build the documentation site into docs/dist
+	cd $(DOCS) && pnpm install --frozen-lockfile && pnpm build
 
 install: ## Install the pail command into your Go bin
 	go install ./cmd/pail
@@ -74,7 +79,7 @@ fmt: ## Format Go and the web UI in place
 	gofmt -w $(GOFILES)
 	cd $(UI) && pnpm format
 
-check: lint test ## What to run before a commit: lint, then test
+check: lint test docs ## What to run before a commit: lint, test, and build the docs
 
 ## Running locally
 
@@ -106,6 +111,9 @@ dev-server: ui ## Build the web UI, then run pail-server on :8080 against dev-st
 dev-ui: ## Run the web UI with hot reload on :5173, using dev-server's API
 	cd $(UI) && PAIL_DEV_API=http://$(PAIL_LISTEN) pnpm dev
 
+dev-docs: ## Run the documentation site with hot reload on :4321
+	cd $(DOCS) && pnpm dev
+
 clean: ## Remove what the build made
-	rm -rf $(BIN)
+	rm -rf $(BIN) $(DOCS)/dist $(DOCS)/.astro
 	find internal/webui/dist -mindepth 1 ! -name .gitkeep -delete

@@ -1,0 +1,62 @@
+---
+import { getCollection, render } from 'astro:content';
+import Docs from '../layouts/Docs.astro';
+
+export async function getStaticPaths() {
+  const pages = await getCollection('docs');
+  return pages.map((page) => ({ params: { slug: page.id }, props: { page } }));
+}
+
+const { page } = Astro.props;
+const { Content } = await render(page);
+
+// Guides by provider, for pages that offer the choice.
+const providers = page.data.providerTiles
+  ? (await getCollection('docs', (p) => !!p.data.provider)).sort((a, b) => a.data.order - b.data.order)
+  : [];
+---
+
+<Docs title={page.data.title} description={page.data.lead}>
+  <h1>{page.data.title}</h1>
+  <p class="dx-lead">{page.data.lead}</p>
+
+  {
+    providers.length > 0 && (
+      <ul class="dx-tiles" aria-label="Guides by DNS provider">
+        {providers.map((p) => (
+          <li>
+            <a class="pa-source dx-tile" href={`/${p.id}/`}>
+              <svg
+                class="pa-icon"
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="M3 12h18M12 3c2.4 2.6 3.6 5.6 3.6 9s-1.2 6.4-3.6 9c-2.4-2.6-3.6-5.6-3.6-9S9.6 5.6 12 3z" />
+              </svg>
+              <span class="pa-source-label">{p.data.navLabel ?? p.data.title}</span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    )
+  }
+
+  <Content />
+
+  {
+    page.data.next && (
+      <div class="dx-next">
+        <span />
+        <a href={page.data.next.href}>{page.data.next.label} →</a>
+      </div>
+    )
+  }
+</Docs>

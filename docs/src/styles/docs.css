@@ -1,0 +1,375 @@
+/* Layout and long-form type for the docs. Colour, type families, spacing and
+   radii all come from the design system's tokens; the header, command blocks
+   and tiles use its component classes as published. */
+
+/* The header stays put: 64px tall, as the design system's TopBar is. A jump
+   to a heading lands below it. */
+html {
+  scroll-padding-top: calc(64px + var(--space-6));
+}
+.pa-top {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+body {
+  min-height: 100vh;
+}
+a {
+  color: var(--link);
+  text-underline-offset: 3px;
+}
+a:focus-visible,
+.dx-nav a:focus-visible,
+.dx-tile:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-ring);
+  border-radius: 2px;
+}
+
+/* Header: the design system's TopBar, linking home. */
+.dx-home {
+  color: inherit;
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+}
+
+.dx-shell {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: var(--space-12) var(--space-8) 80px;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  gap: var(--space-12);
+  align-items: start;
+}
+
+/* Sidebar */
+.dx-nav {
+  position: sticky;
+  top: calc(64px + var(--space-6));
+  /* A long list scrolls by itself rather than running off the screen. */
+  max-height: calc(100vh - 64px - var(--space-12));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+.dx-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dx-nav-title {
+  margin: 0 0 var(--space-1);
+  padding: 0 var(--space-2);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--ink-muted);
+}
+.dx-nav a {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  text-decoration: none;
+}
+.dx-nav a:hover {
+  background: var(--surface-sunk);
+}
+.dx-nav a[aria-current='page'] {
+  background: var(--water-soft);
+  color: var(--water-ink);
+  font-weight: 600;
+}
+.dx-nav-sub a {
+  padding-left: var(--space-4);
+  color: var(--ink-muted);
+}
+
+/* Prose */
+.dx-main {
+  min-width: 0;
+  max-width: 680px;
+  line-height: 24px;
+}
+.dx-main > * + * {
+  margin-top: var(--space-4);
+}
+.dx-main h1 {
+  margin: 0;
+  font: 700 44px/48px var(--font-display);
+  letter-spacing: -0.02em;
+}
+.dx-lead {
+  margin-top: var(--space-3);
+  font-size: 17px;
+  line-height: 26px;
+  color: var(--ink-muted);
+}
+.dx-main h2 {
+  margin: var(--space-12) 0 0;
+  font: 700 28px/34px var(--font-display);
+  letter-spacing: -0.01em;
+}
+.dx-main h3 {
+  margin: var(--space-8) 0 0;
+  font: 650 19px/26px var(--font-display);
+}
+.dx-main p,
+.dx-main ul,
+.dx-main ol {
+  margin-bottom: 0;
+}
+.dx-main ul,
+.dx-main ol {
+  padding-left: var(--space-6);
+}
+.dx-main li + li {
+  margin-top: var(--space-2);
+}
+.dx-main li > .pa-cmd,
+.dx-main li > .dx-code,
+.dx-main li > .dx-note {
+  margin-top: var(--space-3);
+}
+.dx-main code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.dx-main :not(pre) > code:not(.pa-cmd-text) {
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunk);
+  overflow-wrap: anywhere;
+}
+
+/* Numbered steps */
+.dx-steps {
+  list-style: none;
+  padding: 0;
+  counter-reset: step;
+}
+.dx-steps > li {
+  position: relative;
+  padding-left: 44px;
+  counter-increment: step;
+}
+.dx-steps > li + li {
+  margin-top: var(--space-6);
+}
+.dx-steps > li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: -2px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  font: 650 14px/1 var(--font-display);
+}
+.dx-steps > li > * + * {
+  margin-top: var(--space-3);
+}
+.dx-step-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* Blocks you read rather than click: on the sunk surface, like the design
+   system's command block. */
+.dx-code {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) 0;
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+}
+/* The text scrolls in its own space, so a long line never runs under the
+   Copy button beside it. */
+.dx-code pre {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 6px 0 6px var(--space-4);
+  font: 400 13px/20px var(--font-mono);
+  color: var(--ink);
+  white-space: pre;
+  overflow-x: auto;
+}
+.dx-code .pa-cmd-copy {
+  flex: none;
+}
+.pa-cmd-copy:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-ring);
+}
+
+/* Notes: the design system's info tint. */
+.dx-note {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--water-soft);
+  color: var(--ink);
+}
+.dx-note > :first-child {
+  margin-top: 0;
+}
+.dx-note strong:first-child {
+  color: var(--water-ink);
+}
+
+/* Tables */
+.dx-main table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  line-height: 20px;
+}
+.dx-main th,
+.dx-main td {
+  padding: var(--space-3) var(--space-4);
+  text-align: left;
+  vertical-align: top;
+  border-top: 1px solid var(--line);
+}
+.dx-main thead th {
+  border-top: 0;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--ink-muted);
+}
+
+/* Tiles: the design system's source tile, as a link. */
+.dx-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: var(--space-2);
+  padding: 0;
+  list-style: none;
+}
+.dx-tiles li {
+  margin: 0;
+}
+.dx-tile {
+  text-decoration: none;
+  min-height: 72px;
+  height: 100%;
+  box-sizing: border-box;
+}
+.dx-tile.pa-source:focus-visible {
+  border-radius: var(--radius-md);
+}
+
+/* Where to go next */
+.dx-next {
+  margin-top: var(--space-12);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.dx-next a {
+  font-weight: 600;
+  text-decoration: none;
+}
+.dx-next a:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 860px) {
+  .dx-shell {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-8);
+    padding: var(--space-6) var(--space-4) 56px;
+  }
+  .dx-nav {
+    position: static;
+    max-height: none;
+    overflow: visible;
+    padding-bottom: var(--space-6);
+    border-bottom: 1px solid var(--line);
+  }
+  .dx-main h1 {
+    font-size: 32px;
+    line-height: 38px;
+  }
+  .dx-main h2 {
+    font-size: 24px;
+    line-height: 30px;
+  }
+  .pa-top {
+    padding: 0 var(--space-4);
+  }
+  .dx-nav-sub {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  }
+  .dx-nav a {
+    min-height: 44px;
+  }
+}
+
+/* Markdown: a quoted block is a note; tables scroll rather than squeeze. */
+.dx-main blockquote {
+  margin-left: 0;
+  margin-right: 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--water-soft);
+  color: var(--ink);
+}
+.dx-main blockquote > :first-child {
+  margin-top: 0;
+}
+.dx-main blockquote strong:first-child {
+  color: var(--water-ink);
+}
+.dx-main table {
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+.dx-main td code {
+  white-space: normal;
+}
+.dx-main tbody tr:first-child td {
+  border-top: 1px solid var(--line);
+}
+.dx-main ol > li::marker {
+  font-family: var(--font-display);
+  font-weight: 650;
+}
+.dx-main li > pre,
+.dx-main li > .dx-code {
+  margin-top: var(--space-3);
+}
+/* Before the script wraps it, a code block already looks the part. */
+.dx-main > pre,
+.dx-main li > pre {
+  margin: var(--space-4) 0 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+  font: 400 13px/20px var(--font-mono);
+  overflow-x: auto;
+}
+.dx-code pre {
+  background: none;
+}

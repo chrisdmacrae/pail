@@ -1,0 +1,27 @@
+---
+import { getCollection } from 'astro:content';
+import Docs from '../layouts/Docs.astro';
+
+const pages = (await getCollection('docs', (p) => !p.data.provider)).sort((a, b) => a.data.order - b.data.order);
+---
+
+<Docs title="Pail docs" description="How to run Pail and put the things you host at home in it.">
+  <h1>Pail docs</h1>
+  <p class="dx-lead">
+    Pail is where you toss the things you host at home: static sites, PWAs and small server apps, each with one name,
+    one URL and one status. Toss it in the pail. It’s live.
+  </p>
+
+  <ul class="dx-tiles" style="grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));">
+    {
+      pages.map((p) => (
+        <li>
+          <a class="pa-source dx-tile" href={`/${p.id}/`}>
+            <span class="pa-source-label">{p.data.title}</span>
+            <span class="pa-source-hint">{p.data.lead}</span>
+          </a>
+        </li>
+      ))
+    }
+  </ul>
+</Docs>

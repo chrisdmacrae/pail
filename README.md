@@ -35,6 +35,7 @@ internal/server      the listener: Host routing, the REST API, static serving
 internal/cli         the pail command: profiles, packing, the API client
 internal/webui       the built web UI, embedded into pail-server
 web/ui               the web UI's source: Vite, React 18, TypeScript
+docs                 the documentation site: Astro, with pages in docs/src/content/docs
 web/design-system    tokens, components, fonts and brand marks, as published
 web/prototype        the prototype's source, for matching screens and copy in step 4
 ```
@@ -69,6 +70,8 @@ PAIL_TOKEN=dev-token pail login http://localhost:8080 --profile dev
 | `make check` | Lint, then every test. Run it before a commit. |
 | `make test` · `make lint` · `make fmt` | Each on its own; `test-go`, `test-ui`, `lint-go` and `lint-ui` narrow them. |
 | `make dev-ui` | The web UI with hot reload on `:5173`, using `dev-server`'s API. |
+| `make dev-docs` | The documentation site with hot reload on `:4321`. |
+| `make docs` | Builds the documentation site into `docs/dist`. |
 
 `go build ./cmd/pail-server` on its own works too, but without `make ui` first the server has no web UI and says so at `/`.
 
@@ -212,4 +215,12 @@ Pail keeps the newest `PAIL_MAX_DEPLOYS` good deploys per pail for rollback and 
 
 ```bash
 make check
+```
+
+## Documentation site
+
+`docs/` is a static site built with Astro and styled from `web/design-system/`. Every page is a Markdown file in `docs/src/content/docs`, an Astro content collection: a file's path is its URL, and its front matter (title, lead, section, order) puts it in the sidebar. Adding a page is adding a file.
+
+```bash
+make dev-docs
 ```
