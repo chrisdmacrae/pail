@@ -13,8 +13,8 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | Step | What | State |
 | --- | --- | --- |
 | 1 | API, versitygw storage and Host-header routing for static pails | done |
-| 2 | pail-cli with profiles: login, up, ls, logs | next |
-| 3 | Deploy history and rollback | |
+| 2 | pail-cli with profiles: login, up, ls, logs | done |
+| 3 | Deploy history and rollback | next |
 | 4 | Web UI from the design system | |
 | 5 | Custom hostnames and the DNS self-check | |
 | 6 | Git hosts: token first, then OAuth | |
@@ -25,10 +25,12 @@ The spec is the handoff doc; the look and copy come from the design system and t
 
 ```
 cmd/pail-server      the server binary
+cmd/pail             pail-cli, installed as the pail command
 internal/config      environment variables
 internal/storage     the object store: S3 (versitygw) and an in-memory one for tests
 internal/pails       pails, deploys, the live pointer, the deploy pipeline
 internal/server      the listener: Host routing, the REST API, static serving
+internal/cli         the pail command: profiles, packing, the API client
 web/design-system    tokens, components, fonts and brand marks, as published
 web/prototype        the prototype's source, for matching screens and copy in step 4
 ```
@@ -49,13 +51,31 @@ PAIL_S3_ENDPOINT=http://127.0.0.1:7070 PAIL_S3_ACCESS_KEY=pail PAIL_S3_SECRET_KE
 go run ./cmd/pail-server
 ```
 
-Deploy a folder and open it:
+Install the CLI, point it at that installation and deploy a folder:
 
 ```bash
-tar -czf site.tgz -C ./dist .
-curl -H "Authorization: Bearer dev-token" --data-binary @site.tgz "http://localhost:8080/api/v1/pails/blog/deploys?source=cli"
-open http://blog.localhost:8080
+go install ./cmd/pail
+PAIL_TOKEN=dev-token pail login http://localhost:8080 --profile dev
+pail up ./dist --name blog
 ```
+
+## pail-cli
+
+| Command | What it does |
+| --- | --- |
+| `pail login <url>` | Checks the installation answers with the token, then saves a profile. The token comes from `PAIL_TOKEN`, or a hidden prompt on a terminal. Without `--profile`, the profile is named after the host (`pail.lan` becomes `pail-lan`). |
+| `pail profiles` · `pail profiles use <name>` · `pail profiles rm <name>` | Lists profiles, sets the default, removes one. |
+| `pail up [dir] [--name <pail>]` | Packs `dir` (default `.`), deploys it, follows the log on stderr and prints the URL on stdout. |
+| `pail ls` | Every pail: name, status, URL, last deploy. |
+| `pail logs <pail> [deploy] [--follow]` | A deploy's log; the latest by default. |
+
+Every command takes `--profile`/`-p`, `--json`, `--quiet`/`-q` and `--yes`/`-y`.
+
+- **Name:** `pail up` uses `--name`, else `name` in `pail.json`, else the name of the folder holding `.git`, else the current folder's name, stepping out of `dist`, `build`, `out`, `output`, `public`, `_site` and `www`.
+- **What's packed:** every file under `dir` except `.git`, `node_modules` and `.DS_Store`.
+- **Which installation:** `--profile`, then `PAIL_PROFILE`, then `PAIL_URL` with `PAIL_TOKEN` (no file needed), then `default` in the config, then the only profile. On a terminal each command first prints the one it picked to stderr.
+- **Config:** `~/.pail/config` (TOML, mode 0600 in a 0700 folder); `PAIL_CONFIG` moves it. pail won't read it if other users can.
+- **Exit codes:** 0 done; 1 the deploy failed; 2 usage or config error; 3 installation unreachable; 4 pail or deploy not found; 5 the token was rejected.
 
 ## Configuration
 
@@ -84,7 +104,7 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 | `GET /api/v1/pails` | Every pail, most recently updated first. |
 | `GET /api/v1/pails/{name}` | One pail. |
 | `POST /api/v1/pails/{name}/deploys` | Body is a `.tar.gz` or `.zip`. Creates the pail on its first deploy. Answers `202` with the deploy as soon as the archive arrives. `?source=cli\|upload`, `?file=<name>` for the history label. |
-| `GET /api/v1/pails/{name}/deploys/{id}/log` | Server-sent events: a `line` event per log line, then one `done` event with the finished deploy. |
+| `GET /api/v1/pails/{name}/deploys/{id}/log` | Server-sent events: a `line` event per log line, then one `done` event with the finished deploy. `?follow=false` sends a building deploy's lines so far and stops. |
 | `DELETE /api/v1/pails/{name}` | Removes the pail and every deploy. |
 
 ## How a request is routed

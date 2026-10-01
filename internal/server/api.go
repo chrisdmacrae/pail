@@ -182,9 +182,12 @@ func (s *Server) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 
 // handleDeployLog streams a deploy's log as server-sent events: a "line"
 // event per line, then one "done" event carrying the finished deploy. A
-// deploy that already finished replays its log and ends the same way.
+// deploy that already finished replays its log and ends the same way. With
+// ?follow=false a deploy still building sends the lines so far and stops,
+// without a "done".
 func (s *Server) handleDeployLog(w http.ResponseWriter, r *http.Request) {
 	name, id := r.PathValue("name"), r.PathValue("id")
+	follow := r.URL.Query().Get("follow") != "false"
 	lg, err := s.pails.Log(r.Context(), name, id)
 	if err != nil {
 		s.writePailError(w, r, err)
@@ -216,6 +219,9 @@ func (s *Server) handleDeployLog(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		flusher.Flush()
+		if !follow {
+			return
+		}
 		select {
 		case <-wake:
 		case <-r.Context().Done():
