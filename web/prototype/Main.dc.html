@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pail — your pails</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/pail/tokens.css">
+<link rel="stylesheet" href="ds/pail/components/bundle.css">
+<link rel="stylesheet" href="app.css">
+<script src="ds/pail/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div class="pl-app" data-theme="{{theme}}">
+<x-import component-from-global-scope="Pail.TopBar" host="pail.lan" on-new="{{goNew}}"></x-import>
+
+<sc-if value="{{isList}}" hint-placeholder-val="{{ true }}">
+<main class="pl-main" style="display: flex; flex-direction: column; gap: 32px;">
+<div class="pl-head">
+<div style="display: flex; flex-direction: column; gap: 6px;">
+<h1 class="pl-display">Your pails</h1>
+<p style="margin: 0; color: var(--ink-muted);">{{countLine}}</p>
+</div>
+</div>
+
+<sc-if value="{{hasPails}}" hint-placeholder-val="{{ true }}">
+<div class="pl-split">
+<div style="display: flex; flex-direction: column; gap: 12px;">
+<sc-for list="{{pails}}" as="p" hint-placeholder-count="4">
+<x-import component-from-global-scope="Pail.PailRow" name="{{p.name}}" url="{{p.url}}" status="{{p.status}}" source="{{p.source}}" revision="{{p.revision}}" updated="{{p.updated}}" on-open="{{p.open}}" on-redeploy="{{p.redeploy}}" on-remove="{{p.remove}}"></x-import>
+</sc-for>
+</div>
+<aside class="pl-card">
+<h2 style="margin: 0; font: 650 19px/26px var(--font-display);">Deploy from CI</h2>
+<p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted);">Add one line to your pipeline after the build step. Same name, same pail: every run is a new deploy, and the last ten stay around to roll back to.</p>
+<x-import component-from-global-scope="Pail.Command" comment="after npm run build">pail up ./dist --name blog</x-import>
+</aside>
+</div>
+</sc-if>
+
+<sc-if value="{{isEmpty}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-direction: column; align-items: flex-start; gap: 16px; max-width: 560px; padding: 48px 0;">
+<h2 style="margin: 0; font: 700 28px/34px var(--font-display); letter-spacing: -0.01em;">Nothing in the pail yet.</h2>
+<p style="margin: 0; color: var(--ink-muted);">Run this from the folder you build, or press New pail to pick a repo or drop a folder.</p>
+<x-import component-from-global-scope="Pail.Command" style="align-self: stretch;">pail up ./dist</x-import>
+<x-import component-from-global-scope="Pail.Button" variant="primary" icon="plus" on-click="{{goNew}}">New pail</x-import>
+</div>
+</sc-if>
+</main>
+</sc-if>
+
+<sc-if value="{{isNew}}" hint-placeholder-val="{{ false }}">
+<main class="pl-main" style="display: flex; flex-direction: column; gap: 32px; max-width: 880px;">
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<button type="button" class="pl-back" onClick="{{goList}}">← All pails</button>
+<h1 class="pl-display">New pail</h1>
+</div>
+
+<section style="display: flex; flex-direction: column; gap: 12px;">
+<h2 style="margin: 0; font: 650 19px/26px var(--font-display);">Where is your site?</h2>
+<x-import component-from-global-scope="Pail.SourcePicker" value="{{source}}" on-change="{{pickSource}}"></x-import>
+</section>
+
+<sc-if value="{{srcCli}}" hint-placeholder-val="{{ false }}">
+<section style="display: flex; flex-direction: column; gap: 12px;">
+<h2 style="margin: 0; font: 650 19px/26px var(--font-display);">Run it from your terminal or CI</h2>
+<p style="margin: 0; color: var(--ink-muted);">Get pail-cli: [INSTALL INSTRUCTIONS]. Then, from the folder you build:</p>
+<x-import component-from-global-scope="Pail.Command" comment="the folder name becomes the pail name">pail up ./dist</x-import>
+<x-import component-from-global-scope="Pail.Command" comment="or name it yourself">pail up ./dist --name blog</x-import>
+<p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted);">Got server code? Put a <code style="font-family: var(--font-mono);">pail.json</code> beside it and <code style="font-family: var(--font-mono);">pail up</code> sends it along. Your pail shows up in the list as soon as the command finishes.</p>
+<div class="pl-actions">
+<x-import component-from-global-scope="Pail.Button" on-click="{{goList}}">Back to pails</x-import>
+</div>
+</section>
+</sc-if>
+
+<sc-if value="{{srcUpload}}" hint-placeholder-val="{{ false }}">
+<section style="display: flex; flex-direction: column; gap: 16px;">
+<h2 style="margin: 0; font: 650 19px/26px var(--font-display);">Drop it in</h2>
+<x-import component-from-global-scope="Pail.Field" label="Name" default-value="my-site" suffix=".pail.lan" mono="{{ true }}" hint="Lowercase letters, numbers and dashes. Pail uses the folder name if you leave it." on-change="{{setName}}" style="max-width: 420px;"></x-import>
+<x-import component-from-global-scope="Pail.DropZone" on-files="{{onFiles}}" progress="{{progress}}" file-name="{{fileName}}" hint="Static files with an index.html at the top — plus a pail.json if it has functions."></x-import>
+</section>
+</sc-if>
+
+<sc-if value="{{gitNeedsConnect}}" hint-placeholder-val="{{ false }}">
+<section style="display: flex; flex-direction: column; gap: 16px; max-width: 560px;">
+<h2 style="margin: 0; font: 650 19px/26px var(--font-display);">Connect {{hostLabel}}</h2>
+<sc-if value="{{oauthOn}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-direction: column; gap: 16px;">
+<div class="pl-actions">
+<x-import component-from-global-scope="Pail.Button" variant="primary" icon="git" on-click="{{connect}}">Sign in with {{hostLabel}}</x-import>
+</div>
+<div class="pl-or">or use a token</div>
+</div>
+</sc-if>
+<div class="pl-card">
+<sc-if value="{{selfHostable}}" hint-placeholder-val="{{ true }}">
+<x-import component-from-global-scope="Pail.Field" label="Server" default-value="{{serverDefault}}" placeholder="https://git.home.example" mono="{{ true }}"></x-import>
+</sc-if>
+<x-import component-from-global-scope="Pail.Field" label="Access token" type="password" placeholder="paste it here" mono="{{ true }}" hint="Needs read access to your repos and permission to add a webhook, so pushes deploy."></x-import>
+<div class="pl-actions">
+<x-import component-from-global-scope="Pail.Button" variant="{{tokenVariant}}" on-click="{{connect}}">Connect</x-import>
+</div>
+</div>
+<sc-if value="{{oauthOff}}" hint-placeholder-val="{{ true }}">
+<p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted);">“Sign in with {{hostLabel}}” shows up here once Pail is reachable from the internet and has an OAuth app set up for {{hostLabel}}.</p>
+</sc-if>
+</section>
+</sc-if>
+
+<sc-if value="{{gitReady}}" hint-placeholder-val="{{ false }}">
+<section style="display: flex; flex-direction: column; gap: 16px;">
+<div style="display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+<h2 style="margin: 0; font: 650 19px/26px var(--font-display);">Pick a repo on {{hostLabel}}</h2>
+<span style="font-size: 13px; color: var(--ink-muted);">Connected with a token</span>
+</div>
+<div style="display: flex; flex-direction: column; gap: 8px;" role="radiogroup" aria-label="Repository">
+<sc-for list="{{repos}}" as="r" hint-placeholder-count="4">
+<button type="button" class="{{r.cls}}" role="radio" aria-checked="{{r.on}}" onClick="{{r.pick}}">
+<span style="flex-grow: 1; display: flex; flex-direction: column; min-width: 0;">
+<span style="font: 500 14px/20px var(--font-mono);">{{r.full}}</span>
+<span style="font-size: 13px; line-height: 18px; color: var(--ink-muted);">{{r.detected}}</span>
+</span>
+<span style="font: 400 13px/20px var(--font-mono); color: var(--ink-muted);">{{r.branch}}</span>
+</button>
+</sc-for>
+</div>
+<sc-if value="{{repoPicked}}" hint-placeholder-val="{{ false }}">
+<div class="pl-card" style="gap: 16px;">
+<x-import component-from-global-scope="Pail.Field" label="Name" value="{{newName}}" suffix=".pail.lan" mono="{{ true }}" hint="Pail redeploys every push to the branch above. Add your own hostname after." on-change="{{setName}}" style="max-width: 420px;"></x-import>
+<div class="pl-actions">
+<x-import component-from-global-scope="Pail.Button" variant="primary" on-click="{{createFromRepo}}">Put it in the pail</x-import>
+</div>
+</div>
+</sc-if>
+</section>
+</sc-if>
+</main>
+</sc-if>
+
+<sc-if value="{{isDetail}}" hint-placeholder-val="{{ false }}">
+<main class="pl-main" style="display: flex; flex-direction: column; gap: 32px;">
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<button type="button" class="pl-back" onClick="{{goList}}">← All pails</button>
+<div class="pl-head">
+<div style="display: flex; flex-direction: column; gap: 6px; min-width: 0;">
+<div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+<h1 style="margin: 0; font: 700 28px/34px var(--font-display); letter-spacing: -0.01em;">{{d.name}}</h1>
+<x-import component-from-global-scope="Pail.Status" state="{{d.status}}"></x-import>
+</div>
+<a href="{{d.href}}" style="font: 400 14px/20px var(--font-mono); color: var(--link); text-decoration: none; overflow-wrap: anywhere;">{{d.primaryUrl}} ↗</a>
+</div>
+<div class="pl-actions">
+<x-import component-from-global-scope="Pail.Button" icon="redeploy" on-click="{{d.redeploy}}" disabled="{{d.busy}}">Redeploy</x-import>
+<a class="pa-btn pa-btn-primary pl-link-btn" href="{{d.href}}">Open site</a>
+</div>
+</div>
+</div>
+
+<sc-if value="{{d.failed}}" hint-placeholder-val="{{ false }}">
+<div style="padding: 12px 16px; background: var(--failed-soft); color: var(--ink); border-radius: var(--radius-md);">
+<strong style="color: var(--failed);">The last deploy failed.</strong> {{d.url}} is still serving {{d.serving}}. The log says why — or serve an older deploy below.
+</div>
+</sc-if>
+
+<div class="pl-detail">
+<div style="display: flex; flex-direction: column; gap: 32px; min-width: 0;">
+<section style="display: flex; flex-direction: column; gap: 12px; min-width: 0;">
+<h2 style="margin: 0; font: 650 19px/26px var(--font-display);">Deploys</h2>
+<div class="pl-deploys">
+<sc-for list="{{d.deploys}}" as="dp" hint-placeholder-count="3">
+<div class="{{dp.cls}}">
+<button type="button" class="pl-deploy-pick" onClick="{{dp.select}}" aria-pressed="{{dp.selAttr}}">
+<span class="pl-deploy-id" style="font: 500 13px/20px var(--font-mono);">{{dp.id}}</span>
+<span class="pl-deploy-meta" style="flex-grow: 1; min-width: 0; font-size: 13px; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{dp.label}}</span>
+<span style="font-size: 13px; color: var(--ink-muted); white-space: nowrap;">{{dp.when}}</span>
+</button>
+<sc-if value="{{dp.isServing}}" hint-placeholder-val="{{ false }}">
+<span class="pl-tag pl-tag-serving">Serving</span>
+</sc-if>
+<sc-if value="{{dp.isFailed}}" hint-placeholder-val="{{ false }}">
+<x-import component-from-global-scope="Pail.Status" state="failed"></x-import>
+</sc-if>
+<sc-if value="{{dp.isBuilding}}" hint-placeholder-val="{{ false }}">
+<x-import component-from-global-scope="Pail.Status" state="building"></x-import>
+</sc-if>
+<sc-if value="{{dp.canServe}}" hint-placeholder-val="{{ false }}">
+<x-import component-from-global-scope="Pail.Button" size="sm" on-click="{{dp.serve}}">Serve this one</x-import>
+</sc-if>
+</div>
+</sc-for>
+</div>
+<x-import component-from-global-scope="Pail.BuildLog" lines="{{d.log}}"></x-import>
+</section>
+
+<section style="display: flex; flex-direction: column; gap: 12px; min-width: 0;">
+<h2 style="margin: 0; font: 650 19px/26px var(--font-display);">Functions and routes</h2>
+<sc-if value="{{d.hasConfig}}" hint-placeholder-val="{{ false }}">
+<div class="pl-card" style="gap: 16px;">
+<p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted);">From <code style="font-family: var(--font-mono); color: var(--ink);">pail.json</code> in deploy {{d.serving}}. Change it in your repo; Pail re-reads it on every deploy.</p>
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<span style="font-size: 12px; font-weight: 600; letter-spacing: .03em;">ROUTES</span>
+<sc-for list="{{d.routes}}" as="rt" hint-placeholder-count="2">
+<div style="display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; font: 400 13px/20px var(--font-mono);">
+<span style="min-width: 120px;">{{rt.path}}</span>
+<span style="color: var(--ink-muted);">→ {{rt.to}}</span>
+</div>
+</sc-for>
+</div>
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<span style="font-size: 12px; font-weight: 600; letter-spacing: .03em;">FUNCTIONS</span>
+<div style="display: flex; gap: 8px; flex-wrap: wrap;">
+<sc-for list="{{d.functions}}" as="fn" hint-placeholder-count="2">
+<span class="pl-tag pl-tag-plain" style="font-family: var(--font-mono);">{{fn}}</span>
+</sc-for>
+</div>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{d.noConfig}}" hint-placeholder-val="{{ true }}">
+<div class="pl-card">
+<p style="margin: 0; color: var(--ink-muted);">No <code style="font-family: var(--font-mono); color: var(--ink);">pail.json</code>, so Pail serves the files as they are. Add one beside your app for functions, rewrites and redirects:</p>
+<pre class="pl-code">{
+  "functions": { "api": "./server/api.js" },
+  "routes": [
+    { "path": "/api/*", "to": "function:api" },
+    { "path": "/*", "to": "./dist", "fallback": "index.html" }
+  ]
+}</pre>
+<p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted);">[PAIL.JSON SCHEMA — the shape above is a sketch.]</p>
+</div>
+</sc-if>
+</section>
+</div>
+
+<aside style="display: flex; flex-direction: column; gap: 32px; min-width: 0;">
+<section style="display: flex; flex-direction: column; gap: 12px;">
+<h2 style="margin: 0; font: 650 19px/26px var(--font-display);">Addresses</h2>
+<div class="pl-card" style="gap: 0; padding: 4px 16px;">
+<sc-for list="{{d.addrs}}" as="ad" hint-placeholder-count="2">
+<div class="pl-addr">
+<a href="{{ad.href}}" style="flex-grow: 1; min-width: 0; font: 400 13px/20px var(--font-mono); color: var(--link); text-decoration: none; overflow-wrap: anywhere;">{{ad.host}}</a>
+<sc-if value="{{ad.isDefault}}" hint-placeholder-val="{{ true }}">
+<span class="pl-tag pl-tag-plain">Default</span>
+</sc-if>
+<sc-if value="{{ad.isCustom}}" hint-placeholder-val="{{ false }}">
+<x-import component-from-global-scope="Pail.Button" size="sm" variant="ghost" icon="trash" aria-label="{{ad.removeLabel}}" title="Remove hostname" on-click="{{ad.remove}}"></x-import>
+</sc-if>
+</div>
+</sc-for>
+</div>
+<div style="display: flex; gap: 8px; align-items: flex-end;">
+<x-import component-from-global-scope="Pail.Field" label="Add a hostname" value="{{draftHost}}" placeholder="recipes.home.example" mono="{{ true }}" on-change="{{setDraftHost}}" style="flex: 1 1 auto; min-width: 0;"></x-import>
+<x-import component-from-global-scope="Pail.Button" on-click="{{addHost}}">Add</x-import>
+</div>
+<p style="margin: 0; font-size: 13px; line-height: 18px; color: var(--ink-muted);">Point it at this Pail server: a CNAME to pail.lan, or an A record to [YOUR PAIL IP].</p>
+</section>
+
+<dl style="margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; font-size: 14px;">
+<dt style="color: var(--ink-muted);">Source</dt><dd style="margin: 0;">{{d.sourceLabel}}</dd>
+<dt style="color: var(--ink-muted);">Branch</dt><dd style="margin: 0; font-family: var(--font-mono); font-size: 13px;">{{d.revisionLabel}}</dd>
+<dt style="color: var(--ink-muted);">Serving</dt><dd style="margin: 0; font-family: var(--font-mono); font-size: 13px;">{{d.serving}}</dd>
+</dl>
+
+<section style="display: flex; flex-direction: column; gap: 8px;">
+<h2 style="margin: 0; font: 650 16px/22px var(--font-display);">Same thing, from a terminal</h2>
+<x-import component-from-global-scope="Pail.Command">{{d.cmd}}</x-import>
+</section>
+</aside>
+</div>
+
+<section style="display: flex; flex-direction: column; gap: 12px; padding-top: 24px; border-top: 1px solid var(--line);">
+<sc-if value="{{notConfirming}}" hint-placeholder-val="{{ true }}">
+<div class="pl-actions">
+<x-import component-from-global-scope="Pail.Button" icon="trash" on-click="{{askRemove}}">Remove pail</x-import>
+</div>
+</sc-if>
+<sc-if value="{{confirming}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-direction: column; gap: 12px; padding: 16px; background: var(--failed-soft); border-radius: var(--radius-md);">
+<p style="margin: 0;"><strong>Remove {{d.name}}?</strong> {{d.url}} and its hostnames stop answering, and every deploy is deleted. This can’t be undone.</p>
+<div class="pl-actions">
+<x-import component-from-global-scope="Pail.Button" variant="danger" on-click="{{doRemove}}">Remove pail</x-import>
+<x-import component-from-global-scope="Pail.Button" on-click="{{cancelRemove}}">Keep it</x-import>
+</div>
+</div>
+</sc-if>
+</section>
+</main>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"start":{"editor":"enum","options":["list","empty","new","detail"],"default":"list"},"source":{"editor":"enum","options":["none","cli","upload","github","gitlab","bitbucket","gitea","forgejo"],"default":"none"},"pailId":{"editor":"enum","options":["blog","recipes","grafana-notes","home-dashboard","old-portfolio"],"default":"blog"},"oauth":{"editor":"boolean","default":false},"confirm":{"editor":"boolean","default":false},"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":900}}'>
+var HOSTS = { github: 'GitHub', gitlab: 'GitLab', bitbucket: 'Bitbucket', gitea: 'Gitea', forgejo: 'Forgejo', cli: 'pail-cli', upload: 'Upload' };
+var SERVERS = { github: '', bitbucket: '', gitlab: 'https://gitlab.com', gitea: '', forgejo: '' };
+var GIT = ['github', 'gitlab', 'bitbucket', 'gitea', 'forgejo'];
+
+function hash() { return Math.random().toString(16).slice(2, 9); }
+
+function logFor(p, dp) {
+  if (!dp) return [];
+  if (dp.state === 'failed') return [
+    { time: '13:01:40', text: '→ push to ' + (p.revision || 'main') + ' on ' + HOSTS[p.source] + ' (' + dp.id + ')', level: 'step' },
+    { time: '13:01:41', text: 'found pail.json · 1 function, 2 routes' },
+    { time: '13:01:44', text: 'running npm run build' },
+    { time: '13:02:09', text: 'error: Cannot find module "./notes.config.js"', level: 'error' },
+    { time: '13:02:09', text: '✗ build failed · still serving ' + p.serving, level: 'error' }
+  ];
+  if (dp.state === 'building') return [
+    { time: 'now', text: '→ ' + dp.label, level: 'step' },
+    { time: 'now', text: 'unpacking…' }
+  ];
+  var lines = [
+    { time: '14:02:11', text: '→ ' + dp.label + ' (' + dp.id + ')', level: 'step' },
+    { time: '14:02:11', text: 'unpacking 184 files · found index.html' }
+  ];
+  if (p.config) lines.push({ time: '14:02:12', text: 'found pail.json · ' + p.config.functions.length + ' function' + (p.config.functions.length === 1 ? '' : 's') + ', ' + p.config.routes.length + ' routes' });
+  if (p.config) lines.push({ time: '14:02:12', text: 'starting ' + p.config.functions.join(', ') });
+  lines.push({ time: '14:02:13', text: '→ swapping ' + p.url + ' to ' + dp.id, level: 'step' });
+  lines.push({ time: '14:02:13', text: '✓ live at http://' + p.url, level: 'ok' });
+  return lines;
+}
+
+function seed() {
+  var git = function (rev) { return 'push to ' + rev; };
+  var list = [
+    { name: 'blog', status: 'live', source: 'github', revision: 'main', updated: '2 min ago', domains: ['blog.home.example'], config: null,
+      deploys: [{ id: '4f2a91c', label: git('main'), when: '2 min ago', state: 'ok' }, { id: '9b1e07d', label: git('main'), when: 'yesterday', state: 'ok' }, { id: '31cc8a2', label: git('main'), when: '3 days ago', state: 'ok' }] },
+    { name: 'recipes', status: 'live', source: 'cli', revision: '', updated: '40 min ago', domains: [], config: null,
+      deploys: [{ id: 'd71e0a3', label: 'pail up from 10.0.0.23', when: '40 min ago', state: 'ok' }, { id: '5c08b2e', label: 'pail up from 10.0.0.23', when: 'last week', state: 'ok' }] },
+    { name: 'grafana-notes', status: 'failed', source: 'forgejo', revision: 'main', updated: '1 hr ago', domains: [],
+      config: { functions: ['search'], routes: [{ path: '/api/search', to: 'function search' }, { path: '/*', to: './dist' }] },
+      deploys: [{ id: 'a1f9e02', label: git('main'), when: '1 hr ago', state: 'failed' }, { id: 'b77c3d1', label: git('main'), when: 'yesterday', state: 'ok' }, { id: '0c9d4e4', label: git('main'), when: '4 days ago', state: 'ok' }] },
+    { name: 'home-dashboard', status: 'live', source: 'gitea', revision: 'main', updated: 'yesterday', domains: ['dash.home.example'],
+      config: { functions: ['api', 'weather'], routes: [{ path: '/api/*', to: 'function api' }, { path: '/weather', to: 'function weather' }, { path: '/*', to: './build · falls back to index.html' }] },
+      deploys: [{ id: 'e03bb17', label: git('main'), when: 'yesterday', state: 'ok' }, { id: '7aa41f0', label: git('main'), when: '2 weeks ago', state: 'ok' }] },
+    { name: 'old-portfolio', status: 'off', source: 'upload', revision: '', updated: '3 weeks ago', domains: [], config: null,
+      deploys: [{ id: '2d6f9b8', label: 'uploaded portfolio.zip', when: '3 weeks ago', state: 'ok' }] }
+  ];
+  return list.map(function (p) {
+    var ok = p.deploys.filter(function (d) { return d.state === 'ok'; })[0];
+    return Object.assign({ url: p.name + '.pail.lan', serving: ok ? ok.id : '' }, p);
+  });
+}
+
+var REPOS = [
+  { full: 'homelab/garden-journal', branch: 'main', detected: 'Vite app · builds to ./dist' },
+  { full: 'homelab/recipes', branch: 'main', detected: 'Static files · index.html at the top' },
+  { full: 'homelab/home-dashboard', branch: 'main', detected: 'PWA · pail.json: 2 functions, 3 routes' },
+  { full: 'homelab/wedding-site', branch: 'live', detected: 'Astro site · builds to ./dist' }
+];
+
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    var start = props.start || 'list';
+    this.timers = [];
+    this.state = {
+      screen: start === 'empty' ? 'list' : start,
+      pails: start === 'empty' ? [] : seed(),
+      openId: props.pailId || 'blog',
+      selDeploy: null,
+      source: props.source && props.source !== 'none' ? props.source : null,
+      connected: { github: true },
+      repo: null,
+      newName: 'my-site',
+      draftHost: '',
+      progress: undefined,
+      fileName: undefined,
+      confirming: !!props.confirm
+    };
+  }
+  componentWillUnmount() { this.timers.forEach(function (t) { clearTimeout(t); clearInterval(t); }); }
+  later(fn, ms) { this.timers.push(setTimeout(fn, ms)); }
+
+  update(name, fn) {
+    this.setState(function (s) {
+      return { pails: s.pails.map(function (p) { return p.name === name ? Object.assign({}, p, fn(p)) : p; }) };
+    });
+  }
+  deploy(name, label) {
+    var self = this, id = hash();
+    this.update(name, function (p) {
+      return { status: 'building', updated: 'just now', deploys: [{ id: id, label: label || (GIT.indexOf(p.source) >= 0 ? 'redeploy of ' + (p.revision || 'main') : 'redeploy of the last upload'), when: 'just now', state: 'building' }].concat(p.deploys).slice(0, 10) };
+    });
+    this.setState({ selDeploy: null });
+    this.later(function () {
+      self.update(name, function (p) {
+        return { status: 'live', serving: id, deploys: p.deploys.map(function (d) { return d.id === id ? Object.assign({}, d, { state: 'ok' }) : d; }) };
+      });
+    }, 2400);
+  }
+  addPail(p, label) {
+    var name = (p.name || 'my-site').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'my-site';
+    var pail = Object.assign({ status: 'building', updated: 'just now', revision: '', domains: [], config: null, deploys: [], serving: '' }, p, { name: name, url: name + '.pail.lan' });
+    this.setState(function (s) {
+      return { pails: [pail].concat(s.pails.filter(function (x) { return x.name !== name; })), screen: 'detail', openId: name, selDeploy: null, source: null, repo: null, progress: undefined, fileName: undefined, confirming: false };
+    });
+    var self = this;
+    this.later(function () { self.deploy(name, label); }, 10);
+  }
+
+  renderVals() {
+    var self = this, s = this.state;
+    var open = s.pails.find(function (p) { return p.name === s.openId; }) || s.pails[0] || { name: '', url: '', status: 'off', source: 'upload', deploys: [], domains: [], serving: '' };
+    var sel = open.deploys.find(function (d) { return d.id === s.selDeploy; }) || open.deploys[0];
+    var pails = s.pails.map(function (p) {
+      return Object.assign({}, p, {
+        open: function () { self.setState({ screen: 'detail', openId: p.name, selDeploy: null, confirming: false }); },
+        redeploy: function () { self.deploy(p.name); },
+        remove: function () { self.setState({ screen: 'detail', openId: p.name, selDeploy: null, confirming: true }); }
+      });
+    });
+    var isGit = !!s.source && GIT.indexOf(s.source) >= 0;
+    var oauth = !!this.props.oauth;
+    var n = s.pails.length, live = s.pails.filter(function (p) { return p.status === 'live'; }).length;
+    var primary = open.domains && open.domains[0] ? open.domains[0] : open.url;
+    return {
+      theme: this.props.theme || 'light',
+      isList: s.screen === 'list', isNew: s.screen === 'new', isDetail: s.screen === 'detail',
+      hasPails: s.screen === 'list' && n > 0, isEmpty: s.screen === 'list' && n === 0,
+      countLine: n === 0 ? 'Running on pail.lan.' : n + (n === 1 ? ' pail' : ' pails') + ' on pail.lan · ' + live + ' live',
+      pails: pails,
+      goList: function () { self.setState({ screen: 'list', confirming: false }); },
+      goNew: function () { self.setState({ screen: 'new', source: null, repo: null, progress: undefined }); },
+      source: s.source,
+      pickSource: function (id) { self.setState({ source: id, repo: null }); },
+      srcCli: s.source === 'cli', srcUpload: s.source === 'upload',
+      gitNeedsConnect: isGit && !s.connected[s.source], gitReady: isGit && !!s.connected[s.source],
+      hostLabel: HOSTS[s.source] || '',
+      oauthOn: oauth, oauthOff: !oauth, tokenVariant: oauth ? 'quiet' : 'primary',
+      selfHostable: ['gitlab', 'gitea', 'forgejo'].indexOf(s.source) >= 0,
+      serverDefault: SERVERS[s.source] || '',
+      connect: function () { var c = Object.assign({}, self.state.connected); c[self.state.source] = true; self.setState({ connected: c }); },
+      repos: REPOS.map(function (r) {
+        var on = s.repo === r.full;
+        return Object.assign({}, r, { on: on ? 'true' : 'false', cls: on ? 'pl-repo is-on' : 'pl-repo', pick: function () { self.setState({ repo: r.full, newName: r.full.split('/')[1] }); } });
+      }),
+      repoPicked: !!s.repo,
+      newName: s.newName,
+      setName: function (e) { self.setState({ newName: e && e.target ? e.target.value : e }); },
+      createFromRepo: function () {
+        var r = REPOS.find(function (x) { return x.full === s.repo; }) || REPOS[0];
+        var cfg = r.full === 'homelab/home-dashboard' ? { functions: ['api', 'weather'], routes: [{ path: '/api/*', to: 'function api' }, { path: '/weather', to: 'function weather' }, { path: '/*', to: './build · falls back to index.html' }] } : null;
+        self.addPail({ name: s.newName, source: s.source, revision: r.branch, config: cfg }, 'first deploy from ' + r.full + '@' + r.branch);
+      },
+      progress: s.progress, fileName: s.fileName,
+      onFiles: function (files) {
+        var f = files && files[0];
+        var label = f ? f.name : 'site.zip';
+        var t = setInterval(function () {
+          var p = (self.state.progress || 0) + 0.12;
+          if (p >= 1) { clearInterval(t); self.addPail({ name: self.state.newName, source: 'upload' }, 'uploaded ' + label); }
+          else self.setState({ progress: p });
+        }, 140);
+        self.timers.push(t);
+        self.setState({ progress: 0, fileName: label });
+      },
+      draftHost: s.draftHost,
+      setDraftHost: function (e) { self.setState({ draftHost: e && e.target ? e.target.value : e }); },
+      addHost: function () {
+        var h = (self.state.draftHost || '').trim().toLowerCase();
+        if (!h) return;
+        self.update(open.name, function (p) { return { domains: p.domains.indexOf(h) >= 0 ? p.domains : p.domains.concat([h]) }; });
+        self.setState({ draftHost: '' });
+      },
+      d: Object.assign({}, open, {
+        href: 'http://' + primary,
+        primaryUrl: primary,
+        failed: open.status === 'failed',
+        busy: open.status === 'building',
+        log: logFor(open, sel),
+        sourceLabel: HOSTS[open.source] || open.source,
+        revisionLabel: open.revision || '—',
+        serving: open.serving || '—',
+        cmd: 'pail up ./dist --name ' + open.name,
+        hasConfig: !!open.config, noConfig: !open.config,
+        routes: open.config ? open.config.routes : [],
+        functions: open.config ? open.config.functions : [],
+        addrs: [{ host: open.url, href: 'http://' + open.url, isDefault: true, isCustom: false }].concat((open.domains || []).map(function (h) {
+          return { host: h, href: 'http://' + h, isDefault: false, isCustom: true, removeLabel: 'Remove ' + h,
+            remove: function () { self.update(open.name, function (p) { return { domains: p.domains.filter(function (x) { return x !== h; }) }; }); } };
+        })),
+        deploys: open.deploys.map(function (dp) {
+          var isSel = sel && sel.id === dp.id;
+          return Object.assign({}, dp, {
+            cls: isSel ? 'pl-deploy is-sel' : 'pl-deploy',
+            selAttr: isSel ? 'true' : 'false',
+            isServing: dp.id === open.serving,
+            isFailed: dp.state === 'failed',
+            isBuilding: dp.state === 'building',
+            canServe: dp.state === 'ok' && dp.id !== open.serving && open.status !== 'building',
+            select: function () { self.setState({ selDeploy: dp.id }); },
+            serve: function () { self.update(open.name, function () { return { serving: dp.id, status: 'live', updated: 'just now' }; }); }
+          });
+        }),
+        redeploy: function () { self.deploy(open.name); }
+      }),
+      confirming: s.confirming, notConfirming: !s.confirming,
+      askRemove: function () { self.setState({ confirming: true }); },
+      cancelRemove: function () { self.setState({ confirming: false }); },
+      doRemove: function () {
+        self.setState(function (st) { return { pails: st.pails.filter(function (p) { return p.name !== open.name; }), screen: 'list', confirming: false }; });
+      }
+    };
+  }
+}
+</script>
+</body>
+</html>

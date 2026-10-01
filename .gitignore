@@ -1,0 +1,5 @@
+/pail-server
+/data/
+*.tgz
+.DS_Store
+/site/
