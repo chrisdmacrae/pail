@@ -11,6 +11,7 @@ import (
 	"mime"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -98,6 +99,45 @@ func walkArchiveModes(file string, format archiveFormat, fn func(name string, si
 			return err
 		}
 	}
+}
+
+// packDir packs a folder on local disk into a .tar.gz, for what reads an
+// upload to read. Files that may be run stay that way.
+func packDir(dir string) (string, error) {
+	f, err := os.CreateTemp("", "pail-built-*.tar.gz")
+	if err != nil {
+		return "", err
+	}
+	gz, _ := gzip.NewWriterLevel(f, gzip.BestSpeed)
+	tw := tar.NewWriter(gz)
+	err = filepath.WalkDir(dir, func(file string, entry fs.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, file)
+		if err != nil {
+			return err
+		}
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: filepath.ToSlash(rel), Size: info.Size(), Mode: int64(info.Mode().Perm())}); err != nil {
+			return err
+		}
+		src, err := os.Open(file)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		_, err = io.Copy(tw, src)
+		return err
+	})
+	if err = errors.Join(err, tw.Close(), gz.Close(), f.Close()); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 // cleanName turns an archive entry's name into a path inside the deploy.

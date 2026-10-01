@@ -11,3 +11,6 @@ node_modules/
 !/internal/webui/dist/.gitkeep
 /bin/
 /dist/
+# What the Astro adapter's tests build.
+/adapters/astro/test/fixtures/*/dist*/
+/adapters/astro/test/fixtures/*/.astro/

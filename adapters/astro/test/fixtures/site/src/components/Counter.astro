@@ -1,0 +1,8 @@
+<button id="count">0</button>
+<script>
+  import { step } from '../step.ts';
+  const button = document.querySelector('#count');
+  button?.addEventListener('click', () => {
+    button.textContent = String(Number(button.textContent) + step);
+  });
+</script>

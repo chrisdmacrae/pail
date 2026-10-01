@@ -5,8 +5,8 @@ section: Deploying
 order: 5
 navLabel: Run a container
 next:
-  href: /git-providers/
-  label: Set up a git provider
+  href: /deploying/astro/
+  label: Deploy an Astro site
 ---
 
 ## When to use one

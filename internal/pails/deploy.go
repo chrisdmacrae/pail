@@ -90,7 +90,7 @@ func (s *Service) StartDeploy(name string, up Upload) (Deploy, error) {
 		url:  up.URL,
 		done: func() { os.Remove(up.Path) },
 		fill: func(ctx context.Context, e *entry, d *Deploy, lg *Log) (*Manifest, error) {
-			return s.unpack(ctx, e.name, d, up.Path, format, lg)
+			return s.unpack(ctx, e.name, d, up.Path, format, "", lg)
 		},
 	})
 	return d, nil
@@ -337,8 +337,9 @@ func needsBuild(packageJSON []byte) bool {
 }
 
 // unpack copies the archive's files into the deploy's own folder and returns
-// the manifest of what it serves.
-func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive string, format archiveFormat, lg *Log) (*Manifest, error) {
+// the manifest of what it serves. built, when set, is the folder of a
+// project that a build left the archive's files in: they are not built again.
+func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive string, format archiveFormat, built string, lg *Log) (*Manifest, error) {
 	p, err := s.survey(archive, format)
 	if err != nil {
 		return nil, err
@@ -354,7 +355,7 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 	}
 	// A project with server code is built by its Dockerfiles and functions,
 	// not as a site.
-	if needsBuild(p.packageJSON) && len(cfg.containers)+len(cfg.functions) == 0 {
+	if built == "" && needsBuild(p.packageJSON) && len(cfg.containers)+len(cfg.functions) == 0 {
 		return s.buildAndStore(ctx, name, d, archive, format, p, cfg, lg)
 	}
 	static := "./" + strings.TrimSuffix(cfg.root, "/")
@@ -391,7 +392,11 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 		}
 	}
 
-	lg.add("", "unpacking %d %s · found %s", len(p.names), plural(len(p.names), "file"), found)
+	if built != "" {
+		lg.add("", "built ./%s · %d %s · found %s", built, len(p.names), plural(len(p.names), "file"), found)
+	} else {
+		lg.add("", "unpacking %d %s · found %s", len(p.names), plural(len(p.names), "file"), found)
+	}
 
 	man := &Manifest{Root: cfg.root, Fallback: cfg.fallback, Files: map[string]File{}, Routes: cfg.routes}
 	prefix := deployFiles(name, d.ID)
@@ -635,6 +640,18 @@ func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, arc
 		return nil, userErrorf("The build didn’t finish: %v.", err)
 	}
 	defer built.Cleanup()
+
+	// A build that leaves a pail.json of its own, as a framework's adapter
+	// does, has said what it made: files to serve, and functions to answer
+	// beside them. It is deployed as an upload of that folder would be.
+	if _, err := os.Stat(filepath.Join(built.Dir, "pail.json")); err == nil {
+		packed, err := packDir(built.Dir)
+		if err != nil {
+			return nil, err
+		}
+		defer os.Remove(packed)
+		return s.unpack(ctx, name, d, packed, formatTarGz, built.Output, lg)
+	}
 
 	man := &Manifest{Fallback: cfg.fallback, Files: map[string]File{}}
 	prefix := deployFiles(name, d.ID)

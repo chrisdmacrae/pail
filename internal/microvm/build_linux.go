@@ -109,13 +109,18 @@ func (r *Runner) BuildSite(ctx context.Context, req BuildRequest) (BuildResult, 
 	}
 
 	// Find where the site landed: where pail.json says, or the first of the
-	// usual places that has an index.html.
+	// usual places that has an index.html. A build that makes functions too
+	// leaves a pail.json of its own there instead, to say what is what.
 	candidates := outputs
 	if req.Static != "" {
 		candidates = []string{strings.Trim(path.Clean("/"+req.Static), "/")}
 	}
 	for _, out := range candidates {
-		if page, _ := r.read(done.Work, "/src/"+out+"/index.html"); page == "" {
+		page, _ := r.read(done.Work, "/src/"+out+"/index.html")
+		if page == "" {
+			page, _ = r.read(done.Work, "/src/"+out+"/pail.json")
+		}
+		if page == "" {
 			continue
 		}
 		if err := r.Extract(done.Work, "/src/"+out, filepath.Join(dir, "out")); err != nil {

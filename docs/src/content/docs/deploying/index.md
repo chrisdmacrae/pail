@@ -37,6 +37,8 @@ When the upload has a `package.json` with a `build` script, Pail builds it on ev
 
 The build runs in a small virtual machine that is thrown away afterwards. It can reach the internet for dependencies and nothing on your network. Your source is not stored or served, only the result.
 
+A build can make functions too. When it leaves a `pail.json` in its output folder, Pail deploys what that file describes: the files it points `static` at, and the functions it declares. This is how [an Astro site](/deploying/astro/) gets pages rendered on demand.
+
 Builds need `/dev/kvm` on the server. Where there is none, Pail says so, and you can still build on your own machine and send the result with `pail up ./dist`.
 
 ## pail.json

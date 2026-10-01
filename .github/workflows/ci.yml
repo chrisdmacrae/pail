@@ -27,9 +27,11 @@ jobs:
           cache-dependency-path: |
             web/ui/pnpm-lock.yaml
             docs/pnpm-lock.yaml
-      - name: Install the UI's and the docs' packages
+            adapters/astro/pnpm-lock.yaml
+      - name: Install the UI's, the Astro adapter's and the docs' packages
         run: |
           pnpm --dir web/ui install --frozen-lockfile
+          pnpm --dir adapters/astro install --frozen-lockfile
           pnpm --dir docs install --frozen-lockfile
       - name: Lint, test, and build the docs
         run: make check

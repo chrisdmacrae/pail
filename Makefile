@@ -2,6 +2,7 @@
 
 UI := web/ui
 DOCS := docs
+ASTRO := adapters/astro
 BIN := bin
 
 # What the dev targets run with. Override any of them: make dev-server PAIL_LISTEN=:9000
@@ -27,7 +28,7 @@ VERSITYGW := $(shell go env GOPATH)/bin/versitygw
 GOFILES   := $(shell git ls-files '*.go')
 
 .DEFAULT_GOAL := help
-.PHONY: help setup build ui install test test-go test-ui lint lint-go lint-ui fmt check \
+.PHONY: help setup build ui install test test-go test-ui test-astro lint lint-go lint-ui lint-astro fmt check \
         dev dev-storage dev-server dev-ui dev-docs docs clean \
         kvm-up kvm-check kvm-smoke kvm-shell kvm-down dev-kvm test-kvm release
 
@@ -38,6 +39,7 @@ help: ## List these commands
 
 setup: ## Install what development needs: UI and docs packages, and a local versitygw
 	cd $(UI) && pnpm install
+	cd $(ASTRO) && pnpm install
 	cd $(DOCS) && pnpm install
 	go install github.com/versity/versitygw/cmd/versitygw@latest
 
@@ -61,7 +63,7 @@ install: ## Install the pail command into your Go bin
 
 ## Checking
 
-test: test-go test-ui ## Run every test
+test: test-go test-ui test-astro ## Run every test
 
 test-go: ## Run the Go tests with the race detector
 	go test -race ./...
@@ -69,7 +71,10 @@ test-go: ## Run the Go tests with the race detector
 test-ui: ## Run the web UI's tests
 	cd $(UI) && pnpm test
 
-lint: lint-go lint-ui ## Lint everything; changes nothing
+test-astro: ## Run the Astro adapter's tests
+	cd $(ASTRO) && pnpm test
+
+lint: lint-go lint-ui lint-astro ## Lint everything; changes nothing
 
 lint-go: ## go vet, and fail on files gofmt would change
 	go vet ./...
@@ -79,9 +84,13 @@ lint-go: ## go vet, and fail on files gofmt would change
 lint-ui: ## Type-check the web UI and run Biome over it
 	cd $(UI) && pnpm typecheck && pnpm lint
 
-fmt: ## Format Go and the web UI in place
+lint-astro: ## Run Biome over the Astro adapter
+	cd $(ASTRO) && pnpm lint
+
+fmt: ## Format Go, the web UI and the Astro adapter in place
 	gofmt -w $(GOFILES)
 	cd $(UI) && pnpm format
+	cd $(ASTRO) && pnpm format
 
 check: lint test docs ## What to run before a commit: lint, test, and build the docs
 

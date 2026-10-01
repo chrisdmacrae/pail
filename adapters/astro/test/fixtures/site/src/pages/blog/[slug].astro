@@ -1,0 +1,9 @@
+---
+export const prerender = false;
+const { slug } = Astro.params;
+console.log('a page logging to standard output');
+if (slug === 'missing') return new Response(null, { status: 404 });
+Astro.cookies.set('seen', slug);
+Astro.cookies.set('theme', 'night');
+---
+<html><body><h1>Post {slug}</h1><p id="url">{Astro.url.href}</p><p id="ip">{Astro.clientAddress}</p></body></html>

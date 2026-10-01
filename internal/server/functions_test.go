@@ -459,3 +459,57 @@ func TestFunctionPailJSON(t *testing.T) {
 	_ = httptest.NewRecorder
 	_ = pails.ErrFunctionBusy
 }
+
+// A build can leave a pail.json of its own, as a framework's adapter does:
+// what it made is then files and a function, not one folder of files.
+func TestBuildsThatLeaveAPailJSON(t *testing.T) {
+	store := storage.NewMemory()
+	machines := &fakeMachines{t: t, volumes: map[string]bool{}}
+	f := newContainerFixture(t, store, machines, t.TempDir())
+	project := map[string]string{
+		"package.json":          `{"scripts": {"build": "astro build"}}`,
+		"src/pages/index.astro": "the page's source",
+		"makes/pail.json": `{
+			"static": "./client",
+			"functions": {"ssr": {"src": "./server", "lang": "node", "cmd": ["node", "entry.mjs"], "memory": "256MB"}},
+			"routes": [{"path": "/", "to": "static"}, {"path": "/_astro/*", "to": "static"}, {"path": "/*", "to": "function:ssr"}]
+		}`,
+		"makes/client/index.html":     "the prerendered page",
+		"makes/client/_astro/app.css": "h1{}",
+		"makes/server/entry.mjs":      "Content-Type: text/html\n\nrendered $PATH_INFO on demand with $ARGV",
+		"makes/server/package.json":   `{"dependencies": {"sharp": "0.35.5"}}`,
+	}
+
+	d, log := f.deploy("garden", tarGz(t, project))
+	if d.State != "ok" {
+		t.Fatalf("deploy: %+v\n%s", d, log)
+	}
+	for _, want := range []string{"found package.json with a build script", "→ npm run build", "built ./dist · 7 files · found pail.json", "building ssr (node) in a microVM", "→ npm install", "ssr is ready"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log lacks %q:\n%s", want, log)
+		}
+	}
+	wantBody(t, f.site("garden.pail.lan", "/"), 200, "the prerendered page")
+	wantBody(t, f.site("garden.pail.lan", "/_astro/app.css"), 200, "h1{}")
+	wantBody(t, f.site("garden.pail.lan", "/blog/7"), 200, "rendered /blog/7 on demand with node entry.mjs")
+	// Neither the function's files nor the project's source are served.
+	for _, path := range []string{"/server/entry.mjs", "/pail.json", "/src/pages/index.astro"} {
+		wantBody(t, f.site("garden.pail.lan", path), 200, "rendered "+path+" on demand")
+	}
+
+	// A redeploy runs what was built then, with nothing built again.
+	wantBody(t, f.api("POST", "/api/v1/pails/garden/redeploy", nil), http.StatusAccepted, "redeploy of")
+	eventually(t, "the redeploy goes live", func() bool {
+		return !strings.Contains(f.api("GET", "/api/v1/pails/garden", nil).Body.String(), `"serving":"`+d.ID+`"`)
+	})
+	wantBody(t, f.site("garden.pail.lan", "/"), 200, "the prerendered page")
+	wantBody(t, f.site("garden.pail.lan", "/blog/8"), 200, "rendered /blog/8 on demand")
+
+	// What the build's pail.json gets wrong fails the deploy, and says so.
+	project["makes/pail.json"] = `{"static": "./client", "functions": {"ssr": {"src": "./nowhere", "lang": "node"}}, "routes": [{"path": "/*", "to": "function:ssr"}]}`
+	bad, log := f.deploy("garden", tarGz(t, project))
+	if bad.State != "failed" || !strings.Contains(bad.Error, "ssr's src is ./nowhere") {
+		t.Errorf("a build with a wrong pail.json: %+v\n%s", bad, log)
+	}
+	wantBody(t, f.site("garden.pail.lan", "/blog/9"), 200, "rendered /blog/9 on demand")
+}

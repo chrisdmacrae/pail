@@ -1063,6 +1063,8 @@ func (b *fakeBuilder) BuildSite(_ context.Context, req microvm.BuildRequest) (mi
 	os.MkdirAll(filepath.Join(out, "assets"), 0o755)
 	os.WriteFile(filepath.Join(out, "index.html"), []byte("built from "+strings.Join(b.seen, ",")), 0o644)
 	os.WriteFile(filepath.Join(out, "assets", "app.js"), []byte("console.log(1)"), 0o644)
+	// What a project keeps under makes/ is what its build leaves beside them.
+	os.CopyFS(out, os.DirFS(filepath.Join(src, "makes")))
 	return microvm.BuildResult{Dir: out, Output: cmp.Or(req.Static, "dist"), Cleanup: func() { os.RemoveAll(dir) }}, nil
 }
 

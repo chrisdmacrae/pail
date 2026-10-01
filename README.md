@@ -36,14 +36,16 @@ scripts/kvm-host     the KVM host for development: a Lima VM, or a Linux machine
 scripts/release      builds what a release publishes
 scripts/brew-formula prints the Homebrew formula for a release
 scripts/release-notes prints the install instructions a release's description opens with
+scripts/npm-next-version prints the version astro-pail is published to npm as next
 deploy/proxmox       the installer that sets Pail up in a Proxmox container
-.github/workflows    CI, and the release that tags publish
+.github/workflows    CI, the release that tags publish, and astro-pail's release to npm
 internal/pails       pails, deploys, the live pointer, the deploy pipeline
 internal/server      the listener: Host routing, the REST API, static serving
 internal/cli         the pail command: profiles, packing, the API client
 internal/webui       the built web UI, embedded into pail-server
 web/ui               the web UI's source: Vite, React 18, TypeScript
 docs                 the documentation site: Astro, with pages in docs/src/content/docs
+adapters/astro       astro-pail, the Astro adapter: on-demand pages and API routes as a function
 web/design-system    tokens, components, fonts and brand marks, as published
 web/prototype        the prototype's source, for matching screens and copy in step 4
 ```
@@ -78,6 +80,7 @@ PAIL_TOKEN=dev-token pail login http://localhost:8080 --profile dev
 | `make check` | Lint, then every test. Run it before a commit. |
 | `make test` · `make lint` · `make fmt` | Each on its own; `test-go`, `test-ui`, `lint-go` and `lint-ui` narrow them. |
 | `make dev-ui` | The web UI with hot reload on `:5173`, using `dev-server`'s API. |
+| `make test-astro` · `make lint-astro` | The Astro adapter's tests, which build the sites in `adapters/astro/test/fixtures`, and its lint. |
 | `make dev-docs` | The documentation site with hot reload on `:4321`. |
 | `make docs` | Builds the documentation site into `docs/dist`. |
 
@@ -216,7 +219,7 @@ The documentation site has a guide for each host under "Set up a git provider".
 Pail runs builds in Firecracker microVMs, so a project's build can't touch the server. This needs Linux with KVM.
 
 - **The KVM check.** At start Pail looks for `/dev/kvm`, `/dev/net/tun`, the Firecracker binary, the guest kernel, root, and the tools it prepares disks with (`mkfs.ext4`, `debugfs`, `ip`, `iptables`). The log says what it found, and `GET /api/v1/info` reports it under `builds`. Without them Pail serves static files as before, and a deploy that needs a build fails saying why.
-- **What gets built.** A deploy whose `package.json` has a `build` script, from `pail up`, an upload or a git host. Pail installs dependencies with the package manager the lockfile names (npm, pnpm or yarn), runs the build, and serves what it leaves in `dist`, `build`, `out`, `_site`, `.output/public` or `public`, or the folder `static` names in `pail.json`. The source isn't stored or served.
+- **What gets built.** A deploy whose `package.json` has a `build` script, from `pail up`, an upload or a git host. Pail installs dependencies with the package manager the lockfile names (npm, pnpm or yarn), runs the build, and serves what it leaves in `dist`, `build`, `out`, `_site`, `.output/public` or `public`, or the folder `static` names in `pail.json`. The source isn't stored or served. A build that leaves a `pail.json` of its own in that folder, as the Astro adapter in `adapters/astro` does, is deployed as that file describes: its files, and its functions.
 - **The build VM.** A throwaway microVM from the `node:22-slim` image, with 2 vCPUs, 2GB of memory and 15 minutes. Its root filesystem is read-only and shared; everything it writes goes to a work disk that is deleted afterwards.
 - **Isolation.** Each microVM has a network of its own. It can reach the internet through NAT for dependencies, and nothing else: not the home network, not other microVMs, not the server itself.
 - **Guest init.** Inside a microVM, PID 1 is Pail's own binary, so there is nothing extra to install in an image.
