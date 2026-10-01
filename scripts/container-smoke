@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs Pail in a container, as deploy/container/pail-container.sh sets it up,
 # and deploys one of everything to it: a folder, a site that needs a build, a
-# function, a Dockerfile, and an image from a registry. It is the test of the
+# function of each kind, a Dockerfile, and an image from a registry. It is the test of the
 # container runtime against a real engine.
 #
 # It builds the image from this checkout, and leaves nothing behind.
@@ -98,6 +98,19 @@ print(os.environ.get("REQUEST_METHOD"), os.environ.get("PATH_INFO"), "from a fun
 PY
 echo '{ "functions": { "api": { "src": "./api" } } }' >"$work/fn/pail.json"
 up fn && answers fn /some/path "GET /some/path from a function"
+
+step "A function that is a handler"
+mkdir -p "$work/handler/api"
+cat >"$work/handler/api/index.js" <<'JS'
+export default function (req, res) {
+  console.log("answering", req.path);
+  res.status(200);
+  res.contentType("application/json");
+  return res.send(JSON.stringify({ method: req.method, path: req.path, page: req.query.page }));
+}
+JS
+echo '{ "functions": { "api": { "src": "./api" } } }' >"$work/handler/pail.json"
+up handler && answers handler '/some/path?page=2' '{"method":"GET","path":"/some/path","page":"2"}'
 
 step "A Dockerfile, with data that lasts"
 mkdir "$work/app"

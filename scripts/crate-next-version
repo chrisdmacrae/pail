@@ -1,0 +1,52 @@
+#!/usr/bin/env node
+// Prints the version to publish a Rust crate as, so that every push can
+// release without anyone touching its Cargo.toml.
+//
+// The version in Cargo.toml is used the first time. Once that one is on
+// crates.io, each release after it is the next patch: 0.1.0, 0.1.1, 0.1.2.
+// To start a new minor or major, change Cargo.toml; its version is used as
+// it is.
+//
+// Usage: scripts/crate-next-version <crate folder>
+const fs = require('node:fs');
+const path = require('node:path');
+
+const dir = process.argv[2];
+if (!dir) {
+  console.error('usage: scripts/crate-next-version <crate folder>');
+  process.exit(2);
+}
+// The [package] table is the file's first, and holds both.
+const manifest = fs.readFileSync(path.resolve(dir, 'Cargo.toml'), 'utf8');
+const field = (key) => new RegExp(`^${key}\\s*=\\s*"([^"]+)"`, 'm').exec(manifest)?.[1];
+const [name, version] = [field('name'), field('version')];
+if (!name || !version) {
+  console.error(`${dir}/Cargo.toml doesn't give a name and a version.`);
+  process.exit(1);
+}
+
+(async () => {
+  // crates.io asks whoever calls its API to say who they are.
+  const res = await fetch(`https://crates.io/api/v1/crates/${name}`, {
+    headers: { 'User-Agent': 'pail-release (https://github.com/chrisdmacrae/pail)' },
+  });
+  // A crate crates.io has never heard of has no versions, and that isn't a
+  // failure.
+  if (!res.ok && res.status !== 404) {
+    console.error(`crates.io couldn't say which versions of ${name} are published: ${res.status} ${res.statusText}`);
+    process.exit(1);
+  }
+  // Yanked versions are listed too: their numbers can't be used again.
+  const published = res.ok ? ((await res.json()).versions || []).map((v) => v.num) : [];
+
+  if (!published.includes(version)) {
+    console.log(version);
+    return;
+  }
+  const [major, minor] = version.split('.');
+  const patches = published
+    .map((v) => /^(\d+)\.(\d+)\.(\d+)$/.exec(v))
+    .filter((m) => m && m[1] === major && m[2] === minor)
+    .map((m) => Number(m[3]));
+  console.log(`${major}.${minor}.${Math.max(...patches) + 1}`);
+})();

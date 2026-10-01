@@ -9,6 +9,7 @@
 /site
 /docs
 /adapters
+/sdk
 /internal/webui/dist/*
 !/internal/webui/dist/.gitkeep
 *.tgz

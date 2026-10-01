@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -449,7 +450,7 @@ func TestFunctionPailJSON(t *testing.T) {
 		}
 	}
 	wantBody(t, f.site("langs.pail.lan", "/go"), 200, "./fn on alpine:3")
-	wantBody(t, f.site("langs.pail.lan", "/one"), 200, "ruby thing.rb on ruby:3.4-slim")
+	wantBody(t, f.site("langs.pail.lan", "/one"), 200, "ruby .pail-handler.rb thing.rb on ruby:3.4-slim")
 
 	// Where microVMs can't run, a deploy with functions is refused, saying why.
 	machines.down = "this machine has no /dev/kvm"
@@ -512,4 +513,63 @@ func TestBuildsThatLeaveAPailJSON(t *testing.T) {
 		t.Errorf("a build with a wrong pail.json: %+v\n%s", bad, log)
 	}
 	wantBody(t, f.site("garden.pail.lan", "/blog/9"), 200, "rendered /blog/9 on demand")
+}
+
+// A Go function needs nothing of Pail's to be a handler: the standard
+// library's net/http/cgi reads what Pail sends and writes what Pail reads.
+func TestGoFunctionsServeCGI(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a Go program")
+	}
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module api\n\ngo 1.22\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/cgi"
+)
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Add("Set-Cookie", "a=1")
+	w.Header().Add("Set-Cookie", "b=2")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{
+		"method": r.Method, "path": r.URL.Path, "page": r.URL.Query().Get("page"),
+		"agent": r.UserAgent(), "host": r.Host, "body": string(body),
+	})
+}
+
+func main() {
+	cgi.Serve(http.HandlerFunc(handler))
+}
+`), 0o644)
+	bin := filepath.Join(dir, "fn")
+	if out, err := exec.Command("go", "build", "-C", dir, "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+
+	req := httptest.NewRequest("POST", "http://dash.pail.lan/api/notes/7?page=2", strings.NewReader("a note"))
+	req.Header.Set("User-Agent", "tests")
+	cmd := exec.Command(bin)
+	cmd.Env, cmd.Stdin = cgiEnv(req, 6), req.Body
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("the function: %v", err)
+	}
+	status, header, body, err := parseCGI(out)
+	if err != nil || status != http.StatusCreated || header.Get("Content-Type") != "application/json" || len(header.Values("Set-Cookie")) != 2 {
+		t.Fatalf("the answer: %d %v, %v\n%s", status, header, err, out)
+	}
+	var got map[string]string
+	json.Unmarshal(body, &got)
+	for key, want := range map[string]string{"method": "POST", "path": "/api/notes/7", "page": "2", "agent": "tests", "host": "dash.pail.lan", "body": "a note"} {
+		if got[key] != want {
+			t.Errorf("%s: got %q, want %q", key, got[key], want)
+		}
+	}
 }

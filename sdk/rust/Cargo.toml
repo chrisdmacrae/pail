@@ -1,0 +1,13 @@
+[package]
+name = "pail-fn"
+version = "0.1.0"
+edition = "2021"
+description = "Write a Pail function in Rust: a request to read and a response to fill in."
+license = "MIT"
+repository = "https://github.com/chrisdmacrae/pail"
+readme = "README.md"
+keywords = ["pail", "cgi", "serverless", "function"]
+categories = ["web-programming"]
+include = ["src", "README.md", "LICENSE"]
+
+[dependencies]

@@ -1,0 +1,52 @@
+name: Release the Rust crate
+
+# pail-fn is published to crates.io on its own, with no tag: any push to
+# main that changes what the crate ships, its src folder or its Cargo.toml,
+# releases it. A change to its README alone doesn't.
+# scripts/crate-next-version picks the version: the one in Cargo.toml the
+# first time, then the next patch each time after. To start a new minor or
+# major, change Cargo.toml.
+on:
+  push:
+    branches: [main]
+    paths: ['sdk/rust/src/**', 'sdk/rust/Cargo.toml']
+
+permissions:
+  contents: read
+
+# Two pushes close together publish one after the other, never both at once:
+# each has to see the version the other took.
+concurrency:
+  group: release-rust
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # GitHub's Linux runners have cargo.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/rust
+    env:
+      # A crates.io API token that may publish pail-fn. It is the repository
+      # secret CARGO_REGISTRY_TOKEN.
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: cargo test
+      - name: Pick the version
+        id: version
+        run: echo "version=$("$GITHUB_WORKSPACE/scripts/crate-next-version" .)" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::There is no CARGO_REGISTRY_TOKEN secret, so pail-fn $VERSION can't be published. Add a crates.io API token that may publish it to the repository's secrets."
+            exit 1
+          fi
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          # The version was just written in, so the checkout has a change.
+          cargo publish --allow-dirty
+          echo "Published pail-fn $VERSION: https://crates.io/crates/pail-fn/$VERSION" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}

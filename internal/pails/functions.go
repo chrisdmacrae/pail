@@ -56,8 +56,12 @@ func (s *Service) buildFunctions(ctx context.Context, name string, d *Deploy, ar
 			lg.add("step", "→ preparing %s (%s)", f, plan.lang.name)
 		}
 		dir := s.functionDir(name, d.ID, f)
+		fill := extractFunction(archive, format, p.strip, fc.src, p.names[fc.src])
+		if plan.handler != "" {
+			fill = withHandler(fill, plan.handler)
+		}
 		img, err := s.builder.BuildFunction(ctx, microvm.FunctionBuild{
-			Fill:       extractFunction(archive, format, p.strip, fc.src, p.names[fc.src]),
+			Fill:       fill,
 			BuildImage: plan.lang.buildImage, Script: plan.script, RunImage: plan.lang.runImage,
 			MemMB: fc.MemoryMB, Dir: dir, Warm: plan.lang.warm, WarmEnv: plan.env,
 			Log: func(line string) { lg.add("", "%s", line) },

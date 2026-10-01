@@ -28,7 +28,7 @@ VERSITYGW := $(shell go env GOPATH)/bin/versitygw
 GOFILES   := $(shell git ls-files '*.go')
 
 .DEFAULT_GOAL := help
-.PHONY: help setup build ui install test test-go test-ui test-astro lint lint-go lint-ui lint-astro fmt check \
+.PHONY: help setup build ui install test test-go test-ui test-astro test-rust lint lint-go lint-ui lint-astro fmt check \
         dev dev-storage dev-server dev-ui dev-docs docs clean \
         kvm-up kvm-check kvm-smoke kvm-shell kvm-down dev-kvm test-kvm release \
         image test-container
@@ -70,7 +70,7 @@ install: ## Install the pail command into your Go bin
 
 ## Checking
 
-test: test-go test-ui test-astro ## Run every test
+test: test-go test-ui test-astro test-rust ## Run every test
 
 test-go: ## Run the Go tests with the race detector
 	go test -race ./...
@@ -80,6 +80,10 @@ test-ui: ## Run the web UI's tests
 
 test-astro: ## Run the Astro adapter's tests
 	cd $(ASTRO) && pnpm test
+
+test-rust: ## Run the Rust crate's tests, where there is a cargo to run them
+	@command -v cargo >/dev/null || { echo "cargo isn't installed: skipping the Rust crate's tests."; exit 0; }; \
+	cd sdk/rust && cargo test
 
 lint: lint-go lint-ui lint-astro ## Lint everything; changes nothing
 

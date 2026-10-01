@@ -1,7 +1,10 @@
 package pails
 
 import (
+	"embed"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -25,13 +28,41 @@ type language struct {
 	script func(files map[string]bool, single string) string
 	// run is the command that answers a request.
 	run func(files map[string]bool, main string) []string
-	env []string
+	// handler is the program of Pail's own, among handlerFiles, that run
+	// starts the function's file with, or "" when the function's file is run
+	// as it is. It lets a function be a handler, called with a request and a
+	// response to fill in, rather than a program that writes CGI.
+	handler string
+	env     []string
 	// warm is run once before the function is snapshotted, to have the
 	// language's own files read from disk already when a copy wakes.
 	warm []string
 }
 
 const functionDir = "/work/src"
+
+// handlerFiles are the languages' handler programs. A function's gets added
+// to its source as .pail-handler, with the extension it has here.
+//
+//go:embed handlers
+var handlerFiles embed.FS
+
+func handlerName(file string) string { return ".pail-handler" + path.Ext(file) }
+
+// withHandler returns a fill that also adds a language's handler program to
+// the source.
+func withHandler(fill func(dir string) error, file string) func(dir string) error {
+	return func(dir string) error {
+		if err := fill(dir); err != nil {
+			return err
+		}
+		program, err := handlerFiles.ReadFile("handlers/" + file)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, handlerName(file)), program, 0o644)
+	}
+}
 
 // languages are tried in this order, so a folder with a requirements.txt
 // and a package.json is Python's.
@@ -47,7 +78,10 @@ var languages = []language{
 pip install --no-cache-dir --disable-pip-version-check --root-user-action=ignore --target .deps -r requirements.txt
 `
 		},
-		run:  func(_ map[string]bool, main string) []string { return []string{"python3", main} },
+		handler: "handler.py",
+		run: func(_ map[string]bool, main string) []string {
+			return []string{"python3", handlerName("handler.py"), main}
+		},
 		env:  []string{"PYTHONPATH=" + functionDir + "/.deps", "PYTHONDONTWRITEBYTECODE=1", "PYTHONUNBUFFERED=1"},
 		warm: []string{"python3", "-c", "import json, os, sys"},
 	},
@@ -70,12 +104,13 @@ node -p 'require("./package.json").main || "index.js"' > .pail-main
 		},
 		run: func(files map[string]bool, main string) []string {
 			if files["package.json"] {
-				return []string{"sh", "-c", `exec node "$(cat .pail-main)"`}
+				return []string{"sh", "-c", `exec node ` + handlerName("handler.mjs") + ` "$(cat .pail-main)"`}
 			}
-			return []string{"node", main}
+			return []string{"node", handlerName("handler.mjs"), main}
 		},
-		env:  []string{"NODE_ENV=production"},
-		warm: []string{"node", "-e", "require('http')"},
+		handler: "handler.mjs",
+		env:     []string{"NODE_ENV=production"},
+		warm:    []string{"node", "-e", "require('http')"},
 	},
 	{
 		name: "ruby", buildImage: "ruby:3.4-slim", runImage: "ruby:3.4-slim",
@@ -91,11 +126,12 @@ bundle install
 		},
 		run: func(files map[string]bool, main string) []string {
 			if files["Gemfile"] {
-				return []string{"bundle", "exec", "ruby", main}
+				return []string{"bundle", "exec", "ruby", handlerName("handler.rb"), main}
 			}
-			return []string{"ruby", main}
+			return []string{"ruby", handlerName("handler.rb"), main}
 		},
-		warm: []string{"ruby", "-e", "require 'json'"},
+		handler: "handler.rb",
+		warm:    []string{"ruby", "-e", "require 'json'"},
 	},
 	{
 		// A Go program is one file with nothing to link against, so it runs
@@ -190,6 +226,9 @@ type functionPlan struct {
 	script string
 	argv   []string
 	env    []string
+	// handler is the language's handler program, when the function is run
+	// with it: not when pail.json says what to run.
+	handler string
 }
 
 // planFunction decides how to build and run a function. names are every
@@ -239,8 +278,9 @@ func planFunction(name string, fc functionConfig, names map[string]bool) (functi
 	plan.script = l.script(files, single)
 	plan.argv = l.run(files, main)
 	plan.env = l.env
+	plan.handler = l.handler
 	if len(fc.cmd) > 0 {
-		plan.argv = fc.cmd
+		plan.argv, plan.handler = fc.cmd, ""
 	} else if main != "" && !files[main] && single == "" && l.main != "" && !(l.name == "node" && files["package.json"]) {
 		return plan, userErrorf("%s is %s, which runs %s, and ./%s has no such file. Add it, or say what to run with \"cmd\" in pail.json.", name, l.name, l.main, fc.src)
 	}

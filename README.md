@@ -40,9 +40,10 @@ scripts/release      builds what a release publishes
 scripts/brew-formula prints the Homebrew formula for a release
 scripts/release-notes prints the install instructions a release's description opens with
 scripts/npm-next-version prints the version astro-pail is published to npm as next
+scripts/crate-next-version prints the version pail-fn is published to crates.io as next
 deploy/proxmox       the installer that sets Pail up in a Proxmox container
 deploy/container     Pail's image, and the script that runs it on Docker or Podman
-.github/workflows    CI, the release that tags publish, and astro-pail's release to npm
+.github/workflows    CI, the release that tags publish, astro-pail's release to npm, and pail-fn's to crates.io
 internal/pails       pails, deploys, the live pointer, the deploy pipeline
 internal/server      the listener: Host routing, the REST API, static serving
 internal/cli         the pail command: profiles, packing, the API client
@@ -50,6 +51,7 @@ internal/webui       the built web UI, embedded into pail-server
 web/ui               the web UI's source: Vite, React 18, TypeScript
 docs                 the documentation site: Astro, with pages in docs/src/content/docs
 adapters/astro       astro-pail, the Astro adapter: on-demand pages and API routes as a function
+sdk/rust             pail-fn, the Rust crate: the request and response a Rust function is handed
 web/design-system    tokens, components, fonts and brand marks, as published
 web/prototype        the prototype's source, for matching screens and copy in step 4
 ```
@@ -336,13 +338,30 @@ A function is a program Pail runs once per request, with no Dockerfile and no se
 | `max` | `4` | The most copies that run at once. |
 | `env` | none | Environment variables. |
 
-**The interface is CGI** (RFC 3875). The request arrives as `REQUEST_METHOD`, `PATH_INFO` (the full request path), `QUERY_STRING`, `CONTENT_TYPE`, `CONTENT_LENGTH`, each header as `HTTP_<NAME>`, `PAIL_NAME` and `PAIL_DEPLOY`, with the body on stdin. The program writes header lines, a blank line, then the body. `Status: 404` sets the status; without one it is 200, or 302 when there is a `Location`. With no `Content-Type` it is `text/plain`. stderr goes to the pail's output.
+**A function is a handler.** Pail calls it with the request and a response to fill in:
+
+```js
+export default function (req, res) {
+  res.status(200);
+  res.contentType("application/json");
+  return res.send(JSON.stringify({ path: req.path }));
+}
+```
+
+`req` has `method`, `path`, `url`, `query`, `headers`, `body`, `text()`, `json()` and `form()`. `res` has `status`, `set`, `append`, `contentType` (`content_type` outside Node), `send`, `json` and `redirect`, each returning `res`. A handler may return its answer instead of sending it, what it prints goes to the pail's output, and one that throws is a 500.
+
+- **Node, Python and Ruby.** The handler is the file's default export in Node, and a function named `handler` in Python and Ruby. Pail adds a small program of its own to the function's source, `.pail-handler.mjs`, `.py` or `.rb` from `internal/pails/handlers`, and runs the function's file with it. A file with no handler is run as a program that writes CGI, as before; what it writes while it loads is held until Pail knows which it is.
+- **Go.** The standard library is enough: `cgi.Serve(http.HandlerFunc(handler))` from `net/http/cgi`.
+- **Rust.** `sdk/rust` is the `pail-fn` crate, which depends on nothing: `pail_fn::handle(|req, res| { ... })`. A function depends on it with `pail-fn = "0.1"`.
+- **Shell, and any function with a `cmd`**, writes CGI itself.
+
+**Under the handler, the interface is CGI** (RFC 3875). The request arrives as `REQUEST_METHOD`, `PATH_INFO` (the full request path), `QUERY_STRING`, `CONTENT_TYPE`, `CONTENT_LENGTH`, each header as `HTTP_<NAME>`, `PAIL_NAME` and `PAIL_DEPLOY`, with the body on stdin. The program writes header lines, a blank line, then the body. `Status: 404` sets the status; without one it is 200, or 302 when there is a `Location`. With no `Content-Type` it is `text/plain`. stderr goes to the pail's output.
 
 | lang | Detected by | Built with | Runs |
 | --- | --- | --- | --- |
-| python | `requirements.txt` or `main.py` | `pip install -r requirements.txt` | `python3 main.py` |
-| node | `package.json` or `index.js` | `npm ci`, or `npm install` without a lockfile | `node` on `main` in `package.json`, else `index.js` |
-| ruby | `Gemfile` or `main.rb` | `bundle install` | `ruby main.rb`, through `bundle exec` with a Gemfile |
+| python | `requirements.txt` or `main.py` | `pip install -r requirements.txt` | `main.py` |
+| node | `package.json` or `index.js` | `npm ci`, or `npm install` without a lockfile | `main` in `package.json`, else `index.js` |
+| ruby | `Gemfile` or `main.rb` | `bundle install` | `main.rb`, through `bundle exec` with a Gemfile |
 | go | `go.mod` | `go build -o fn` | `./fn` |
 | rust | `Cargo.toml` | `cargo build --release` | the built binary |
 | shell | `main.sh` | nothing | `sh main.sh` |
@@ -470,6 +489,8 @@ Pushing to the tap needs a key: the `HOMEBREW_TAP_KEY` secret on this repo holds
 ```bash
 scripts/brew-formula v0.1.0 dist/release/checksums.txt > ../homebrew-tap/Formula/pail.rb
 ```
+
+The Rust crate, `pail-fn` in `sdk/rust`, is released on its own, with no tag. A push to `main` that changes its `src` folder or its `Cargo.toml` runs `.github/workflows/release-rust.yml`, which tests it and publishes it to crates.io. `scripts/crate-next-version sdk/rust` picks the version: the one in `Cargo.toml` the first time, then the next patch each time after. To start a new minor or major, change `Cargo.toml`. Publishing needs the `CARGO_REGISTRY_TOKEN` secret on this repo: a crates.io API token that may publish new crates, for the first release, and update `pail-fn` after it.
 
 `.github/workflows/ci.yml` runs `make check` on every push and pull request, builds a release without publishing it, runs the microVM tests on GitHub's runners, which have KVM, and runs `scripts/container-smoke` against the runners' Docker.
 

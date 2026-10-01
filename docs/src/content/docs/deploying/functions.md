@@ -17,24 +17,22 @@ For a server that stays up, websockets, or data that has to last, [run a contain
 
 Functions need `/dev/kvm` on the server, or a Pail on [Docker](/running/docker/) or [Podman](/running/podman/). [Running Pail](/running/) covers both.
 
-## 1. Write the program
+## 1. Write the handler
 
-A function reads the request from environment variables and standard input, and writes the response to standard output: header lines, a blank line, then the body. This is CGI, and any language can do it.
+A function is a handler: Pail calls it with the request, and a response for it to fill in.
 
-In Python, as `fn/api/main.py`:
+In Node, as `fn/api/index.js`:
 
-```python
-import json, os, sys
+```js
+export default function (req, res) {
+  res.status(200);
+  res.contentType("application/json");
 
-body = sys.stdin.buffer.read()
-print("Content-Type: application/json")
-print()
-print(json.dumps({
-    "method": os.environ.get("REQUEST_METHOD", ""),
-    "path": os.environ.get("PATH_INFO", ""),
-    "bytes": len(body),
-}))
+  return res.send(JSON.stringify({ method: req.method, path: req.path }));
+}
 ```
+
+[Each language](#handlers-in-each-language) has its own way to write one.
 
 ## 2. Add a pail.json
 
@@ -63,7 +61,144 @@ pail up
 
 Pail works out the language, installs what the function depends on, and gets it ready. The first request wakes it; after five minutes with no requests it goes back to sleep.
 
-## What the program is given
+## The request
+
+`req` is what was asked for.
+
+| On `req` | What it holds |
+| --- | --- |
+| `method` | `GET`, `POST` and so on. |
+| `path` | The full path asked for, like `/api/notes/7`. |
+| `url` | The path, and what follows the `?`. |
+| `query` | What follows the `?`, by name: `req.query.page`. |
+| `headers` | The request’s headers, by name in lower case: `req.headers["user-agent"]`. |
+| `body` | The body, as bytes. |
+| `text()` | The body as text. |
+| `json()` | The body, read as JSON. |
+| `form()` | The body as a form’s fields, by name. |
+
+## The response
+
+`res` is the answer. Each of these returns `res`, so they chain: `res.status(404).send("No such recipe.")`.
+
+| On `res` | What it does |
+| --- | --- |
+| `status(code)` | Sets the status. Without it the status is 200. |
+| `set(name, value)` | Sets a header, in place of any by that name. |
+| `append(name, value)` | Adds a header beside any by that name: one `Set-Cookie` after another. |
+| `contentType(type)` | Sets the `Content-Type`. It is `content_type` in Python, Ruby and Rust. |
+| `send(body)` | Sends the body, once. Text and bytes go as they are; anything else goes as JSON. |
+| `json(value)` | Sends a value as JSON. |
+| `redirect(location, status)` | Sends the visitor elsewhere. The status is 302 unless you give one. |
+
+- Without a `Content-Type`, text is `text/plain`, bytes are `application/octet-stream`, and anything else is `application/json`.
+- A handler can return its answer instead of sending it: `return { ok: true }`.
+- What the handler prints goes to the pail’s output, not the response.
+- A handler that throws answers with a 500, and the pail’s output says why.
+
+## Handlers in each language
+
+### Node
+
+The file’s default export is the handler. It can be `async`. `module.exports = function (req, res) {}` works too.
+
+```js
+export default async function (req, res) {
+  const note = req.json();
+  return res.status(201).json({ saved: note.title });
+}
+```
+
+### Python
+
+Define `handler` in `main.py`. It can be `async`.
+
+```python
+def handler(req, res):
+    note = req.json()
+    return res.status(201).json({"saved": note["title"]})
+```
+
+### Ruby
+
+Define `handler` in `main.rb`.
+
+```ruby
+def handler(req, res)
+  note = req.json
+  res.status(201).json({ saved: note["title"] })
+end
+```
+
+### Go
+
+Go’s standard library has the handler already. Write an `http.HandlerFunc`, and serve it with `net/http/cgi`.
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/cgi"
+)
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"path": r.URL.Path})
+}
+
+func main() {
+	cgi.Serve(http.HandlerFunc(handler))
+}
+```
+
+### Rust
+
+Add the `pail-fn` crate to `Cargo.toml`:
+
+```toml
+[dependencies]
+pail-fn = "0.1"
+```
+
+Then hand `pail_fn::handle` the handler:
+
+```rust
+fn main() {
+    pail_fn::handle(|req, res| {
+        res.status(200);
+        res.content_type("application/json");
+        res.send(format!(r#"{{"path": "{}"}}"#, req.path));
+    });
+}
+```
+
+The crate depends on nothing, so it reads and writes no JSON of its own: `json` takes text that is JSON already, and `redirect` always takes its status. Print with `eprintln!`, since standard output is the response.
+
+## Or write CGI yourself
+
+Under the handler is CGI, and a function can speak it directly. The program reads the request from environment variables and standard input, and writes the response to standard output: header lines, a blank line, then the body. Any language can do it, and it is how a shell function answers.
+
+In Python, a `main.py` with no `handler` is run as a program:
+
+```python
+import json, os, sys
+
+body = sys.stdin.buffer.read()
+print("Content-Type: application/json")
+print()
+print(json.dumps({
+    "method": os.environ.get("REQUEST_METHOD", ""),
+    "path": os.environ.get("PATH_INFO", ""),
+    "bytes": len(body),
+}))
+```
+
+So is a Node file with no default export, a Ruby file with no `handler`, and anything you run with a `cmd` of your own.
+
+### What the program is given
 
 | Variable | What it holds |
 | --- | --- |
@@ -74,9 +209,9 @@ Pail works out the language, installs what the function depends on, and gets it 
 | `HTTP_<NAME>` | Each request header, upper-cased, dashes as underscores: `HTTP_USER_AGENT`. |
 | `PAIL_NAME`, `PAIL_DEPLOY` | The pail, and the deploy that is answering. |
 
-The request’s body is on standard input. Anything you set under `env` in `pail.json` is there too.
+The request’s body is on standard input. Anything you set under `env` in `pail.json` is there too, and a handler has all of these as well: `process.env.PAIL_NAME`.
 
-## What the program writes
+### What the program writes
 
 Header lines, a blank line, then the body.
 
@@ -98,16 +233,16 @@ Pail tells the language from what the source folder holds.
 
 | Language | Pail sees | Before it runs | It runs |
 | --- | --- | --- | --- |
-| Python | `requirements.txt` or `main.py` | `pip install -r requirements.txt` | `python3 main.py` |
+| Python | `requirements.txt` or `main.py` | `pip install -r requirements.txt` | `main.py` |
 | Node | `package.json` or `index.js` | `npm ci` | the `main` in `package.json`, else `index.js` |
-| Ruby | `Gemfile` or `main.rb` | `bundle install` | `ruby main.rb` |
+| Ruby | `Gemfile` or `main.rb` | `bundle install` | `main.rb` |
 | Go | `go.mod` | `go build` | the built program |
 | Rust | `Cargo.toml` | `cargo build --release` | the built program |
 | Shell | `main.sh` | nothing | `sh main.sh` |
 
 `src` can also be a single file, such as `./fn/hello.py`. Pail goes by its extension.
 
-If Pail guesses wrong, say so with `lang`. To run something other than the usual file, give a `cmd`.
+If Pail guesses wrong, say so with `lang`. To run something other than the usual file, give a `cmd`. Pail runs a `cmd` as it is, so its program [writes CGI itself](#or-write-cgi-yourself).
 
 ## Settings
 
@@ -155,8 +290,8 @@ A failed request gets a 500 that says what happened, and the pail’s output say
 
 | It says | What to do |
 | --- | --- |
-| It exited with a status | The program failed. What it wrote to standard error, in the output, says why. |
+| It exited with a status | The program failed, or the handler threw. What it wrote to standard error, in the output, says why. |
 | It ran longer than its timeout | Make it faster, or raise `timeout`. |
 | It ran out of memory | Raise `memory`. |
-| It answered in a way Pail couldn’t read | Write header lines, then a blank line, then the body. |
+| It answered in a way Pail couldn’t read | The file has no handler, and didn’t write CGI either. Export a handler, or write header lines, then a blank line, then the body. |
 | It is busy | Every copy was in use for as long as the request could wait. Raise `max`. |
