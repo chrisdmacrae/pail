@@ -29,9 +29,114 @@ a:focus-visible,
 
 /* Header: the design system's TopBar, linking home. */
 .dx-home {
+  /* The search box gives way on a narrow screen, not the name. */
+  flex: none;
   color: inherit;
   text-decoration: none;
   border-radius: var(--radius-sm);
+}
+
+/* Search: a field in the header, and what it found in a panel under it. */
+.dx-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.dx-search {
+  position: relative;
+  flex: 0 1 300px;
+  min-width: 0;
+}
+.dx-search .pa-field-box {
+  align-items: center;
+  border-radius: var(--radius-md);
+}
+.dx-search-icon {
+  flex: none;
+  margin-left: var(--space-3);
+  color: var(--ink-muted);
+}
+.dx-search .pa-field-input {
+  align-self: stretch;
+  padding-left: var(--space-2);
+  font-size: 15px;
+}
+.dx-search-key {
+  flex: none;
+  margin-right: var(--space-2);
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font: 500 12px/20px var(--font-mono);
+  color: var(--ink-muted);
+}
+.dx-search:focus-within .dx-search-key {
+  display: none;
+}
+.dx-hits {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  width: min(460px, calc(100vw - 2 * var(--space-4)));
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-lg);
+}
+.dx-hits-status {
+  margin: 0;
+  padding: var(--space-2);
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--ink-muted);
+}
+.dx-hits-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dx-hits-list a {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  text-decoration: none;
+}
+.dx-hits-list a:hover,
+.dx-hits-list a:focus-visible {
+  background: var(--surface-sunk);
+}
+.dx-hit-title {
+  font-weight: 600;
+}
+.dx-hit-where {
+  font-size: 12px;
+  line-height: 16px;
+  letter-spacing: 0.03em;
+  color: var(--ink-muted);
+}
+.dx-hit-text {
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--ink-muted);
+}
+.dx-hit-text mark {
+  background: var(--pail-soft);
+  color: var(--ink);
+  border-radius: 2px;
 }
 
 .dx-shell {
@@ -313,6 +418,10 @@ a:focus-visible,
   }
   .dx-nav a {
     min-height: 44px;
+  }
+  /* No keyboard to press / on, and the room is the placeholder's. */
+  .dx-search-key {
+    display: none;
   }
 }
 

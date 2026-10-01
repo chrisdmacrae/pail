@@ -82,7 +82,7 @@ PAIL_TOKEN=dev-token pail login http://localhost:8080 --profile dev
 | `make dev-ui` | The web UI with hot reload on `:5173`, using `dev-server`'s API. |
 | `make test-astro` · `make lint-astro` | The Astro adapter's tests, which build the sites in `adapters/astro/test/fixtures`, and its lint. |
 | `make dev-docs` | The documentation site with hot reload on `:4321`. |
-| `make docs` | Builds the documentation site into `docs/dist`. |
+| `make docs` | Builds the documentation site into `docs/dist`: its pages as files, the function its search runs on, and the `pail.json` that says which is which. `pail up docs/dist` deploys it. |
 
 `go build ./cmd/pail-server` on its own works too, but without `make ui` first the server has no web UI and says so at `/`.
 

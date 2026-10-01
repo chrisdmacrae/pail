@@ -3,6 +3,7 @@ import { getCollection } from 'astro:content';
 import '../../../web/design-system/tokens.css';
 import '../../../web/design-system/components/bundle.css';
 import '../styles/docs.css';
+import Search from '../components/Search.astro';
 
 interface Props {
   title: string;
@@ -60,6 +61,7 @@ const current = guide ? href(pages.find((p) => p.data.section === guide.data.sec
         <span class="pa-top-word">pail</span>
         <span class="pa-top-host">docs</span>
       </a>
+      <Search />
     </header>
 
     <div class="dx-shell">

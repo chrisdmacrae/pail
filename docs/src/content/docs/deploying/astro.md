@@ -15,6 +15,8 @@ An Astro site where every page is prerendered needs nothing: Pail builds it and 
 
 Add the adapter when some pages are rendered on demand, or the site has API routes, actions or server islands. The adapter turns those into one [function](/deploying/functions/), and leaves the rest as files.
 
+These docs are built this way. Every page is a file, and the search box asks one API route, which reads the pages from a content collection.
+
 ## 1. Add the adapter
 
 ```bash

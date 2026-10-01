@@ -1,0 +1,174 @@
+---
+// The search box in the header. What it finds comes from /api/search, which
+// reads the docs collection on the server.
+---
+
+<div class="dx-search" role="search" data-api={`${import.meta.env.BASE_URL.replace(/\/$/, '')}/api/search`}>
+  <label class="dx-sr" for="dx-q">Search the docs</label>
+  <div class="pa-field-box">
+    <svg
+      class="pa-icon dx-search-icon"
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.75"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="11" cy="11" r="6.5"></circle>
+      <path d="m16 16 4.5 4.5"></path>
+    </svg>
+    <input
+      id="dx-q"
+      class="pa-field-input"
+      type="search"
+      placeholder="Search the docs"
+      autocomplete="off"
+      spellcheck="false"
+      aria-controls="dx-hits"
+    />
+    <kbd class="dx-search-key" aria-hidden="true">/</kbd>
+  </div>
+  <div class="dx-hits" id="dx-hits" hidden>
+    <p class="dx-hits-status" role="status"></p>
+    <ul class="dx-hits-list"></ul>
+  </div>
+</div>
+
+<script>
+  import type { Hit } from '../search';
+  import { words } from '../search';
+
+  const root = document.querySelector<HTMLElement>('.dx-search');
+  const input = root?.querySelector<HTMLInputElement>('input');
+  const panel = root?.querySelector<HTMLElement>('.dx-hits');
+  const status = root?.querySelector<HTMLElement>('.dx-hits-status');
+  const list = root?.querySelector<HTMLUListElement>('.dx-hits-list');
+
+  if (root && input && panel && status && list) {
+    let asked: AbortController | undefined;
+    let timer: number | undefined;
+
+    const say = (text: string, quiet = false) => {
+      status.textContent = text;
+      // With results, the count is for screen readers; the list says the rest.
+      status.classList.toggle('dx-sr', quiet);
+    };
+    const open = () => {
+      panel.hidden = false;
+    };
+    const close = () => {
+      panel.hidden = true;
+    };
+    const links = () => [...list.querySelectorAll<HTMLAnchorElement>('a')];
+
+    // The words of the query, marked where the excerpt has them.
+    const marked = (text: string, query: string) => {
+      const out = document.createDocumentFragment();
+      const terms = words(query).map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      if (terms.length === 0) return out.append(text), out;
+      const test = new RegExp(`(?<![\\p{L}\\p{N}])(?:${terms.join('|')})`, 'giu');
+      let from = 0;
+      for (const match of text.matchAll(test)) {
+        out.append(text.slice(from, match.index));
+        const mark = document.createElement('mark');
+        mark.textContent = match[0];
+        out.append(mark);
+        from = match.index + match[0].length;
+      }
+      out.append(text.slice(from));
+      return out;
+    };
+
+    const show = (query: string, hits: Hit[]) => {
+      list.replaceChildren(
+        ...hits.map((hit) => {
+          const item = document.createElement('li');
+          const link = document.createElement('a');
+          link.href = hit.href;
+          const title = document.createElement('span');
+          title.className = 'dx-hit-title';
+          title.textContent = hit.title;
+          const where = document.createElement('span');
+          where.className = 'dx-hit-where';
+          where.textContent = hit.heading ? `${hit.section} · ${hit.heading}` : hit.section;
+          const text = document.createElement('span');
+          text.className = 'dx-hit-text';
+          text.append(marked(hit.excerpt, query));
+          link.append(title, where, text);
+          item.append(link);
+          return item;
+        }),
+      );
+      if (hits.length === 0) say(`Nothing in the docs matches “${query}”.`);
+      else say(`${hits.length} ${hits.length === 1 ? 'result' : 'results'}`, true);
+      open();
+    };
+
+    const ask = async (query: string) => {
+      asked?.abort();
+      asked = new AbortController();
+      try {
+        const res = await fetch(`${root.dataset.api}?q=${encodeURIComponent(query)}`, { signal: asked.signal });
+        if (!res.ok) throw new Error(String(res.status));
+        const { results } = (await res.json()) as { results: Hit[] };
+        show(query, results);
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') return;
+        list.replaceChildren();
+        say('Search isn’t answering. Try again in a moment.');
+        open();
+      }
+    };
+
+    input.addEventListener('input', () => {
+      window.clearTimeout(timer);
+      const query = input.value.trim();
+      if (query === '') {
+        asked?.abort();
+        close();
+        return;
+      }
+      timer = window.setTimeout(() => ask(query), 180);
+    });
+    input.addEventListener('focus', () => {
+      if (input.value.trim() !== '' && status.textContent !== '') open();
+    });
+
+    // Arrow keys walk the results; Escape puts the box away.
+    root.addEventListener('keydown', (event) => {
+      const all = links();
+      const at = all.indexOf(document.activeElement as HTMLAnchorElement);
+      if (event.key === 'ArrowDown' && !panel.hidden && all.length > 0) {
+        event.preventDefault();
+        all[Math.min(at + 1, all.length - 1)].focus();
+      } else if (event.key === 'ArrowUp' && at >= 0) {
+        event.preventDefault();
+        (at === 0 ? input : all[at - 1]).focus();
+      } else if (event.key === 'Enter' && document.activeElement === input && all.length > 0 && !panel.hidden) {
+        all[0].click();
+      } else if (event.key === 'Escape' && !panel.hidden) {
+        close();
+        input.focus();
+      }
+    });
+    document.addEventListener('pointerdown', (event) => {
+      if (!root.contains(event.target as Node)) close();
+    });
+    // A result on this page moves to its heading without loading anything.
+    list.addEventListener('click', close);
+
+    // "/" goes to search from anywhere but another field.
+    document.addEventListener('keydown', (event) => {
+      const target = event.target as HTMLElement;
+      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      event.preventDefault();
+      input.focus();
+      input.select();
+    });
+  }
+</script>
