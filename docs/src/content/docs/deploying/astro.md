@@ -15,7 +15,7 @@ An Astro site where every page is prerendered needs nothing: Pail builds it and 
 
 Add the adapter when some pages are rendered on demand, or the site has API routes, actions or server islands. The adapter turns those into one [function](/deploying/functions/), and leaves the rest as files.
 
-These docs are built this way. Every page is a file, and the search box asks one API route, which reads the pages from a content collection.
+These docs are built this way. Every page is a file, and two API routes are answered by the function: the search box asks one, and the other draws the picture a link to a page unfurls with.
 
 ## 1. Add the adapter
 
@@ -100,6 +100,8 @@ They mean what they mean for [any function](/deploying/functions/#settings).
 The build puts the site’s packages into the function’s own files, so nothing is installed when it runs. A package with a program compiled for one kind of machine can’t be carried that way. Name it in `external`, and Pail installs it where the function runs.
 
 `sharp`, which Astro optimizes images with, is always left out and installed by Pail.
+
+A package that reads files from beside its own code needs the same. These docs name `satori`, which draws their social images and loads its WebAssembly that way.
 
 ## See what it’s printing
 

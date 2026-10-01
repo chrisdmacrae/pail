@@ -8,7 +8,13 @@
     "preview": "astro preview"
   },
   "dependencies": {
+    "@fontsource/bricolage-grotesque": "^5.3.0",
+    "@fontsource/hanken-grotesk": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
     "astro": "^7.3.5",
-    "astro-pail": "file:../adapters/astro"
+    "astro-pail": "file:../adapters/astro",
+    "satori": "^0.33.5",
+    "satori-html": "^0.3.2",
+    "sharp": "^0.35.5"
   }
 }

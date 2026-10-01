@@ -1,0 +1,114 @@
+---
+// The picture a link to the docs unfurls with, 1200 by 630. It is never part
+// of a page: src/pages/api/og.png.ts renders it to markup, then to a PNG.
+//
+// Satori draws it, not a browser, and it lays out with flexbox alone: every
+// div needs display: flex, unless all it holds is text. The colours are the
+// design system's Day tokens, written out, as there are no custom properties.
+interface Props {
+  title: string;
+  lead?: string;
+  section?: string;
+}
+const { title, lead, section } = Astro.props;
+---
+
+<div class="card">
+  <div class="brand">
+    <svg width="64" height="64" viewBox="0 0 32 32">
+      <path d="M7.4 17.5h17.2l-1.35 8.3H8.75z" fill="#f2b134"></path>
+      <g fill="none" stroke="#1e1c17" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8.5 12.5a7.5 7.5 0 0 1 15 0"></path>
+        <path
+          d="M4.5 12.5h23M6.3 12.5l2.1 13.4a1.6 1.6 0 0 0 1.6 1.4h12a1.6 1.6 0 0 0 1.6-1.4l2.1-13.4"
+        ></path>
+      </g>
+    </svg>
+    <span class="word">pail</span>
+    <span class="host">docs</span>
+  </div>
+
+  <div class="text">
+    {section && <p class="section">{section}</p>}
+    <h1 class={title.length > 28 ? 'title long' : 'title'}>{title}</h1>
+    {lead && <p class="lead">{lead}</p>}
+  </div>
+
+  <div class="fill"></div>
+</div>
+
+<style is:inline>
+  .card {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    width: 100%;
+    height: 100%;
+    padding: 64px 72px 96px;
+    background: #f5f1e8;
+    color: #1e1c17;
+    font-family: 'Hanken Grotesk';
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+  }
+  .word {
+    margin-left: 14px;
+    font-family: 'Bricolage Grotesque';
+    font-size: 48px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .host {
+    margin-left: 16px;
+    margin-top: 10px;
+    font-family: 'IBM Plex Mono';
+    font-size: 26px;
+    font-weight: 500;
+    color: #5c564b;
+  }
+  .text {
+    display: flex;
+    flex-direction: column;
+  }
+  .section {
+    margin: 0 0 20px;
+    font-family: 'IBM Plex Mono';
+    font-size: 24px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #865400;
+  }
+  .title {
+    margin: 0;
+    font-family: 'Bricolage Grotesque';
+    font-size: 92px;
+    font-weight: 700;
+    line-height: 1.04;
+    letter-spacing: -0.025em;
+  }
+  .long {
+    font-size: 72px;
+  }
+  .lead {
+    margin: 28px 0 0;
+    max-width: 960px;
+    font-size: 32px;
+    font-weight: 400;
+    line-height: 1.4;
+    color: #5c564b;
+  }
+  /* The pail, filled to the line. Satori wants display: flex even on an
+     element with nothing in it. */
+  .fill {
+    display: flex;
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 1200px;
+    height: 28px;
+    background: #f2b134;
+  }
+</style>

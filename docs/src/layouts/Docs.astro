@@ -8,8 +8,16 @@ import Search from '../components/Search.astro';
 interface Props {
   title: string;
   description: string;
+  // section is drawn above the title in the page's social image.
+  section?: string;
 }
-const { title, description } = Astro.props;
+const { title, description, section } = Astro.props;
+
+// The picture a link to this page unfurls with is drawn on demand by
+// src/pages/api/og.png.ts, from what the address says. Whatever reads the tag
+// wants a whole address, which takes `site` in astro.config.mjs.
+const picture = `/api/og.png?${new URLSearchParams({ title, lead: description, ...(section && { section }) })}`;
+const absolute = (path: string) => (Astro.site ? new URL(path, Astro.site).href : path);
 
 // The sidebar is the collection, two levels deep: sections in a fixed order,
 // and their pages by order. A provider's guide isn't listed; it is reached
@@ -35,6 +43,17 @@ const current = guide ? href(pages.find((p) => p.data.section === guide.data.sec
     <meta name="color-scheme" content="light dark" />
     <meta name="description" content={description} />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="Pail docs" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    {Astro.site && <meta property="og:url" content={absolute(Astro.url.pathname)} />}
+    <meta property="og:image" content={absolute(picture)} />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={`${title}. ${description}`} />
+    <meta name="twitter:card" content="summary_large_image" />
     <title>{title === 'Pail docs' ? title : `${title} · Pail docs`}</title>
     <script is:inline>
       // Day or Night follows the device, set before the page paints.
