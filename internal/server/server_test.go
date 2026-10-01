@@ -1144,3 +1144,44 @@ func TestProjectsThatNeedABuild(t *testing.T) {
 	}
 	wantBody(t, f.site("plain.pail.lan", "/"), 200, "as it is")
 }
+
+// A proxy that handles HTTPS sends every plain request to HTTPS, the check's
+// included. The check follows that, and nothing else.
+func TestCheckFollowsAnUpgradeToHTTPS(t *testing.T) {
+	f := newFixture(t, storage.NewMemory())
+	secure := httptest.NewTLSServer(f.srv)
+	defer secure.Close()
+	redirect := func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusMovedPermanently)
+	}
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirect(w, r) }))
+	defer plain.Close()
+	f.srv.probe.client.Transport = &http.Transport{
+		TLSClientConfig: secure.Client().Transport.(*http.Transport).TLSClientConfig,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			to := plain.Listener.Addr().String()
+			if strings.HasSuffix(addr, ":443") {
+				to = secure.Listener.Addr().String()
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, to)
+		},
+	}
+
+	// httptest's certificate is for example.com.
+	if c := f.srv.probe.check(context.Background(), "http://example.com", "example.com"); !c.PointsHere {
+		t.Errorf("behind an upgrade to HTTPS: %+v", c)
+	}
+	// Sent anywhere but its own path over HTTPS, the check doesn't follow.
+	redirect = func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://"+r.Host+"/", http.StatusMovedPermanently)
+	}
+	if c := f.srv.probe.check(context.Background(), "http://example.com", "example.com"); c.PointsHere {
+		t.Errorf("redirected to another path: %+v", c)
+	}
+	redirect = func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://other.example"+r.URL.RequestURI(), http.StatusMovedPermanently)
+	}
+	if c := f.srv.probe.check(context.Background(), "http://example.com", "example.com"); c.PointsHere {
+		t.Errorf("redirected to another host: %+v", c)
+	}
+}

@@ -41,9 +41,8 @@ func newProber() *prober {
 	p := &prober{pending: map[string]string{}}
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
 	p.client = &http.Client{
-		Timeout: 5 * time.Second,
-		// Something else answering with a redirect isn't this Pail.
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Timeout:       5 * time.Second,
+		CheckRedirect: upgradeOnly,
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -61,6 +60,19 @@ func newProber() *prober {
 		},
 	}
 	return p
+}
+
+// upgradeOnly follows one kind of redirect: the same host and path, sent from
+// HTTP to HTTPS. A proxy in front of Pail that handles HTTPS does that to
+// every plain request, the check's included. Anything else answering with a
+// redirect isn't this Pail.
+func upgradeOnly(req *http.Request, via []*http.Request) error {
+	from := via[0].URL
+	if len(via) == 1 && from.Scheme == "http" && req.URL.Scheme == "https" &&
+		strings.EqualFold(req.URL.Hostname(), from.Hostname()) && req.URL.Path == from.Path {
+		return nil
+	}
+	return http.ErrUseLastResponse
 }
 
 func randomID() string {
@@ -125,7 +137,7 @@ func (p *prober) answer(w http.ResponseWriter, r *http.Request) bool {
 // resolves to. It is for tests, where no real DNS points at the server.
 func (s *Server) DialProbesAt(addr string) { s.probe.dialAt = addr }
 
-// probeBase is where a check of host should connect. The check is always
+// probeBase is where a check of host should connect. The check starts as
 // plain HTTP: on Pail's own plain listener's port when HTTPS is on, else on
 // the port this request reached Pail by.
 func (s *Server) probeBase(r *http.Request, host string) string {
