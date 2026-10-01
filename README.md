@@ -34,6 +34,8 @@ internal/githost     git hosts: GitHub, GitLab, Bitbucket, Gitea and Forgejo
 internal/microvm     Firecracker microVMs: base images, networking, builds, containers
 scripts/kvm-host     the KVM host for development: a Lima VM, or a Linux machine over SSH
 scripts/release      builds what a release publishes
+scripts/brew-formula prints the Homebrew formula for a release
+scripts/release-notes prints the install instructions a release's description opens with
 deploy/proxmox       the installer that sets Pail up in a Proxmox container
 .github/workflows    CI, and the release that tags publish
 internal/pails       pails, deploys, the live pointer, the deploy pipeline
@@ -90,11 +92,18 @@ The base domain serves the UI: your pails, a pail's page, and New pail. It is a 
 - **A pail:** its deploys and their logs (live while building), Upload a deploy (a `.zip` or a folder), Serve this one, Redeploy, Stop or Start, and Remove.
 - **New pail:** the pail-cli commands; Upload, where you drop a folder or a `.zip` (a folder is packed into a `.tar.gz` in the browser); or a git host, where you connect with a token and pick a repo.
 
-Not in the UI yet: the functions panel (step 8), and real install instructions for pail-cli.
 
 It's built from `web/design-system/` as published: the components come from its `bundle.js`, and nothing in that folder is edited. Day or Night follows the device.
 
 ## pail-cli
+
+Install it with Homebrew, on macOS or Linux:
+
+```bash
+brew install chrisdmacrae/tap/pail
+```
+
+Or download it for your system, Windows included, from the [latest release](https://github.com/chrisdmacrae/pail/releases/latest) and put it on your `PATH`. From a checkout, `make install` builds it.
 
 | Command | What it does |
 | --- | --- |
@@ -410,7 +419,21 @@ Pushing a tag like `v0.1.0` to `chrisdmacrae/pail` runs `.github/workflows/relea
 | `pail-proxmox.sh` | The Proxmox installer. |
 | `checksums.txt` | SHA-256 of each file. |
 
+The release's description opens with how to install that version: the server on Proxmox, and pail-cli with Homebrew. `scripts/release-notes <version>` prints that part, and GitHub's list of what changed follows it.
+
 File names carry no version, so `releases/latest/download/<name>` always points at the newest. `make release VERSION=v0.1.0` builds the same files into `dist/release` on your machine.
+
+### The Homebrew tap
+
+`brew install chrisdmacrae/tap/pail` reads `Formula/pail.rb` in [chrisdmacrae/homebrew-tap](https://github.com/chrisdmacrae/homebrew-tap). The formula installs the binary the release built, for macOS and Linux on amd64 and arm64, so brew compiles nothing.
+
+The release workflow rewrites the formula at every release: `scripts/brew-formula <version>` prints it from `checksums.txt`, and the workflow commits it to the tap. A version with a dash in it, like `v0.2.0-rc1`, is a preview and leaves the tap alone.
+
+Pushing to the tap needs a key: the `HOMEBREW_TAP_KEY` secret on this repo holds the private half of a deploy key on the tap that can write. Without the secret the release is still published, and the tap stays as it was. To update the tap by hand:
+
+```bash
+scripts/brew-formula v0.1.0 dist/release/checksums.txt > ../homebrew-tap/Formula/pail.rb
+```
 
 `.github/workflows/ci.yml` runs `make check` on every push and pull request, builds a release without publishing it, and runs the microVM tests on GitHub's runners, which have KVM.
 

@@ -1,7 +1,8 @@
 name: Release
 
 # Pushing a tag like v0.1.0 builds the binaries and publishes a release. The
-# Proxmox installer downloads the server from the newest one.
+# Proxmox installer downloads the server from the newest one, and the
+# Homebrew tap is pointed at it.
 on:
   push:
     tags: ['v*']
@@ -12,6 +13,13 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      # The tap is another repo, so pushing to it needs a key of its own: the
+      # private half of a deploy key on chrisdmacrae/homebrew-tap that can
+      # write. Without the secret, the release is published and the tap is
+      # left as it was.
+      HOMEBREW_TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
+      HOMEBREW_TAP: chrisdmacrae/homebrew-tap
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -31,7 +39,29 @@ jobs:
         run: make ui
       - name: Build the release
         run: scripts/release "$GITHUB_REF_NAME"
+      # The description opens with how to install this version; GitHub's list
+      # of what changed follows it.
       - name: Publish
-        run: gh release create "$GITHUB_REF_NAME" dist/release/* --title "Pail $GITHUB_REF_NAME" --generate-notes
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/release/* --title "Pail $GITHUB_REF_NAME" \
+            --notes "$(scripts/release-notes "$GITHUB_REF_NAME")" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
+      # brew install chrisdmacrae/tap/pail installs what this writes. A
+      # version with a dash, like v0.2.0-rc1, is a preview and stays out.
+      - name: Update the Homebrew tap
+        if: ${{ env.HOMEBREW_TAP_KEY != '' && !contains(github.ref_name, '-') }}
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/tap_key"
+          printf '%s\n' "$HOMEBREW_TAP_KEY" > "$RUNNER_TEMP/tap_key"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/tap_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone --depth 1 "git@github.com:$HOMEBREW_TAP.git" "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Formula"
+          scripts/brew-formula "$GITHUB_REF_NAME" dist/release/checksums.txt > "$RUNNER_TEMP/tap/Formula/pail.rb"
+          cd "$RUNNER_TEMP/tap"
+          git add Formula/pail.rb
+          if git diff --cached --quiet; then echo "The tap already has $GITHUB_REF_NAME."; exit 0; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "pail ${GITHUB_REF_NAME#v}"
+          git push origin HEAD
+          rm -f "$RUNNER_TEMP/tap_key"

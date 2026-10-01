@@ -49,11 +49,22 @@ export function NewPail({ host, info }: { host: string; info: Info | null }) {
   );
 }
 
+const RELEASES = 'https://github.com/chrisdmacrae/pail/releases/latest';
+
 function FromCli() {
   return (
     <section className="pl-stack">
       <h2 className="pl-h2">Run it from your terminal or CI</h2>
-      <p className="pl-muted">Get pail-cli: [INSTALL INSTRUCTIONS]. Point it at this Pail once:</p>
+      <p className="pl-muted">Get pail-cli with Homebrew, on a Mac or on Linux:</p>
+      <Command>brew install chrisdmacrae/tap/pail</Command>
+      <p className="pl-small">
+        No Homebrew, or on Windows?{' '}
+        <a className="pl-url" style={{ font: 'inherit' }} href={RELEASES} target="_blank" rel="noreferrer">
+          Download it from the latest release
+        </a>{' '}
+        and put it somewhere on your PATH.
+      </p>
+      <p className="pl-muted">Point it at this Pail once:</p>
       <Command comment="asks for this Pail’s token">{`pail login ${window.location.origin}`}</Command>
       <p className="pl-muted">Then, from the folder you build:</p>
       <Command comment="the folder you’re in names the pail">pail up ./dist</Command>

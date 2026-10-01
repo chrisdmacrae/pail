@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Prints the Homebrew formula for a release of pail-cli: Formula/pail.rb in
+# the tap, github.com/chrisdmacrae/homebrew-tap. The formula installs the
+# binary the release already built, so brew compiles nothing.
+#
+# Usage: scripts/brew-formula <version> [checksums.txt]
+#        e.g. scripts/brew-formula v0.1.0 dist/release/checksums.txt
+set -euo pipefail
+
+version=${1:?usage: scripts/brew-formula <version> [checksums.txt]}
+sums=${2:-$(cd "$(dirname "$0")/.." && pwd)/dist/release/checksums.txt}
+repo=${PAIL_REPO:-chrisdmacrae/pail}
+case "$version" in v[0-9]*) ;; *) echo "brew-formula: a version looks like v0.1.0, and brew reads it from the download's address" >&2; exit 1 ;; esac
+[ -f "$sums" ] || { echo "brew-formula: no checksums at $sums. Run scripts/release first." >&2; exit 1; }
+
+# sum prints the SHA-256 of one of the release's files.
+sum() {
+  local found
+  found=$(awk -v name="$1" '$2 == name { print $1 }' "$sums")
+  [ -n "$found" ] || { echo "brew-formula: $sums has no checksum for $1" >&2; exit 1; }
+  echo "$found"
+}
+base="https://github.com/$repo/releases/download/$version"
+
+cat <<FORMULA
+# Written by scripts/brew-formula in github.com/$repo at each release.
+# Changes made here are replaced by the next one.
+class Pail < Formula
+  desc "Put sites and small server apps on a Pail installation at home"
+  homepage "https://github.com/$repo"
+
+  on_macos do
+    on_arm do
+      url "$base/pail_darwin_arm64.tar.gz"
+      sha256 "$(sum pail_darwin_arm64.tar.gz)"
+    end
+    on_intel do
+      url "$base/pail_darwin_amd64.tar.gz"
+      sha256 "$(sum pail_darwin_amd64.tar.gz)"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "$base/pail_linux_arm64.tar.gz"
+      sha256 "$(sum pail_linux_arm64.tar.gz)"
+    end
+    on_intel do
+      url "$base/pail_linux_amd64.tar.gz"
+      sha256 "$(sum pail_linux_amd64.tar.gz)"
+    end
+  end
+
+  def install
+    bin.install "pail"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/pail --version")
+  end
+end
+FORMULA

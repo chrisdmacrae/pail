@@ -12,6 +12,16 @@ next:
 
 Until it’s here, the `README.md` in Pail’s repository has the steps to run Pail and deploy to it.
 
+## Get pail-cli
+
+This part is ready. On a Mac or on Linux, with Homebrew:
+
+```bash
+brew install chrisdmacrae/tap/pail
+```
+
+Without Homebrew, or on Windows, download it from the [latest release](https://github.com/chrisdmacrae/pail/releases/latest) and put it somewhere on your `PATH`.
+
 ## What it will cover
 
 1. Installing Pail on your server.

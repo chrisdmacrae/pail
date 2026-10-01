@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Prints the top of a release's description: how to install this version.
+# The release workflow puts it above the list of changes GitHub writes.
+#
+# Usage: scripts/release-notes <version>     e.g. scripts/release-notes v0.1.0
+set -euo pipefail
+
+version=${1:?usage: scripts/release-notes <version>}
+repo=${PAIL_REPO:-chrisdmacrae/pail}
+base="https://github.com/$repo/releases/download/$version"
+
+cat <<NOTES
+## Install
+
+### The server, on Proxmox
+
+On the Proxmox host, as root. This makes a container and sets Pail up in it, with storage and everything builds, functions and containers need.
+
+\`\`\`bash
+PAIL_VERSION=$version bash -c "\$(curl -fsSL $base/pail-proxmox.sh)"
+\`\`\`
+
+Already running Pail from this installer? Update it in place, with the container's ID in place of \`101\`:
+
+\`\`\`bash
+pct exec 101 -- pail-update $version
+\`\`\`
+
+On another kind of Linux machine, \`pail-server_linux_amd64.tar.gz\` and \`pail-server_linux_arm64.tar.gz\` below hold the server by itself. The [README](https://github.com/$repo#readme) says what it needs around it.
+
+### The command line, with Homebrew
+
+On macOS or Linux:
+
+\`\`\`bash
+brew install chrisdmacrae/tap/pail
+\`\`\`
+
+To move an earlier install to this version:
+
+\`\`\`bash
+brew upgrade pail
+\`\`\`
+
+Without Homebrew, or on Windows, download \`pail\` for your system from the files below and put it on your \`PATH\`.
+
+Then point it at your Pail once, and deploy a folder:
+
+\`\`\`bash
+pail login https://pail.lan
+pail up ./dist
+\`\`\`
+NOTES
