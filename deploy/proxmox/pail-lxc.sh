@@ -174,15 +174,15 @@ tmp=$(mktemp -d)
 cd "$tmp"
 
 echo "  pail-server"
-curl -fsSL "$RELEASE/pail-server_linux_$GOARCH.tar.gz" | tar -xz
+curl -fsSL "$RELEASE/pail-server_linux_$GOARCH.tar.gz" | tar -xz --no-same-owner
 install -m 0755 pail-server /usr/local/bin/pail-server
 
 echo "  versitygw $VERSITYGW_VERSION"
-curl -fsSL "https://github.com/versity/versitygw/releases/download/$VERSITYGW_VERSION/versitygw_${VERSITYGW_VERSION}_Linux_$( [ "$GOARCH" = amd64 ] && echo x86_64 || echo arm64 ).tar.gz" | tar -xz
+curl -fsSL "https://github.com/versity/versitygw/releases/download/$VERSITYGW_VERSION/versitygw_${VERSITYGW_VERSION}_Linux_$( [ "$GOARCH" = amd64 ] && echo x86_64 || echo arm64 ).tar.gz" | tar -xz --no-same-owner
 install -m 0755 "$(find . -type f -name versitygw | head -1)" /usr/local/bin/versitygw
 
 echo "  firecracker $FC_VERSION"
-curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-$UNAME_ARCH.tgz" | tar -xz
+curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-$UNAME_ARCH.tgz" | tar -xz --no-same-owner
 install -m 0755 "release-$FC_VERSION-$UNAME_ARCH/firecracker-$FC_VERSION-$UNAME_ARCH" /usr/local/bin/firecracker
 
 echo "  guest kernel"
@@ -266,7 +266,7 @@ case "${1:-latest}" in
   *) url="https://github.com/$repo/releases/download/$1" ;;
 esac
 tmp=$(mktemp -d)
-curl -fsSL "$url/pail-server_linux_$arch.tar.gz" | tar -xz -C "$tmp"
+curl -fsSL "$url/pail-server_linux_$arch.tar.gz" | tar -xz --no-same-owner -C "$tmp"
 install -m 0755 "$tmp/pail-server" /usr/local/bin/pail-server
 rm -rf "$tmp"
 systemctl restart pail
