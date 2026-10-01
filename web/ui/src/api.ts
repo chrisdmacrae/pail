@@ -247,9 +247,10 @@ export const dropConnection = async (conn: GitConnection) =>
   void (await call('DELETE', `/git/${conn.kind}/connections/${encodeURIComponent(conn.id)}`));
 // startSignIn begins signing in to a git host and returns the host's address
 // to send the browser to. It comes back to New pail or, when the sign-in is
-// to reconnect a pail, to that pail's page.
-export const startSignIn = async (kind: string, pail?: string) =>
-  (await json<{ url: string }>('POST', `/git/${kind}/oauth`, pail ? { pail } : undefined)).url;
+// to reconnect a pail, to that pail's page. With repo, the sign-in is to give
+// that pail a repo to deploy from, and comes back to where one is picked.
+export const startSignIn = async (kind: string, pail?: string, repo = false) =>
+  (await json<{ url: string }>('POST', `/git/${kind}/oauth`, pail ? { pail, repo } : undefined)).url;
 export const listRepos = async (conn: GitConnection) =>
   (await json<{ repos: Repo[] }>('GET', `/git/${conn.kind}/repos?connection=${encodeURIComponent(conn.id)}`)).repos;
 // detectRepo looks at the top of a repo, or with dir, at that folder of it.
@@ -269,6 +270,20 @@ export const createFromRepo = (name: string, conn: GitConnection, repo: string, 
     branch,
     dir,
   });
+// connectRepo has a pail there already is deploy from a repo from here on,
+// in place of pail up, uploads, or the repo it deployed from before. The
+// connection becomes the pail's own.
+export const connectRepo = (name: string, conn: GitConnection, repo: string, branch: string, dir = '') =>
+  json<Deploy & { hook: boolean; hook_note?: string }>('PUT', `${pailPath(name)}/repo`, {
+    host: conn.kind,
+    connection: conn.id,
+    repo,
+    branch,
+    dir,
+  });
+// disconnectRepo has a pail stop deploying from its repo. It keeps serving
+// and keeps its deploys, and is deployed by hand from then on.
+export const disconnectRepo = (name: string) => json<Pail>('DELETE', `${pailPath(name)}/repo`);
 // reconnectPail gives a pail from a git host a new connection, in place of
 // the one it pulls with. It answers with whose the new one is.
 export const reconnectPail = (name: string, connection: string) =>

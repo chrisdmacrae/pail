@@ -37,7 +37,7 @@ A token is the quickest way to start. Signing in is worth setting up if you’d 
 
 3. **Paste the token and press Connect.** Pail checks it with the host. A token the host rejects is not kept. One it accepts is held for up to an hour, until you make the pail, and from then on is kept with that pail and used for nothing else.
 
-4. **Pick a repo.** Under each repo, Pail says what it found inside. Pick one it can deploy, check the name, and press **Put it in the pail**. If the site is in a folder of the repo, say which in **Folder**; see More than one pail in a repo, below.
+4. **Pick a repo.** Under each repo, Pail says what it found at the top of it. Pick the repo, check the name, and press **Put it in the pail**. If Pail found nothing to serve at the top, the site is probably in a folder: type it in **Folder**, like `docs`, and Pail looks there instead. See More than one pail in a repo, below.
 
 ## Set up signing in
 
@@ -144,6 +144,42 @@ Pail only skips a push when the host lists every file it changed. It deploys to 
 | A push of twenty commits or more | Hosts list only the first of a long push. |
 
 Only GitHub says when a push was forced. On the others, press **Redeploy** after rewriting a branch.
+
+## Give a pail you already have a repo
+
+A pail made with `pail up` or an upload can deploy from a repo instead, without being made again.
+
+1. **Open the pail’s page and press Deploy from a git repo.** It is in the column on the right, under the pail’s source.
+
+2. **Pick the host and connect,** by token or by signing in, as on New pail. Signing in brings you back to the same place.
+
+3. **Pick the repo,** and type the folder if the site isn’t at the top of it.
+
+4. **Press Deploy … from this repo.** Pail deploys the branch as it stands and adds the webhook, so pushes deploy from then on.
+
+The pail keeps its name, its addresses, its variables and its deploys, so you can still serve an older one. If the first deploy from the repo fails, the pail goes on serving what it was.
+
+A pail that already deploys from a repo has **Change repo** in the same place. It works the same way, and takes Pail’s webhook off the repo the pail is leaving.
+
+## Go back to deploying by hand
+
+A pail that deploys from a repo can stop, and be deployed with `pail up` or an upload again.
+
+1. **Open the pail’s page and press Disconnect.** It is beside **Reconnect** and **Change repo**.
+
+2. **Confirm.** Pail takes its webhook off the repo and forgets the pail’s connection to the host.
+
+The pail keeps serving what it was, and keeps its name, addresses, variables and deploys. Pushes no longer deploy it. To deploy it:
+
+```bash
+pail up ./dist --name blog
+```
+
+or press **Upload a deploy** on its page. **Redeploy** now deploys the pail’s latest files again, since there is no branch to pull.
+
+If Pail can’t reach the host to take the webhook off, the pail is disconnected all the same. The webhook stays at the host until you delete it there, and its deliveries are turned away.
+
+To deploy from a repo again, press **Deploy from a git repo**.
 
 ## Reconnect a pail
 

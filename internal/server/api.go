@@ -49,7 +49,9 @@ func (s *Server) installation() http.Handler {
 	api.HandleFunc("POST /api/v1/git/{kind}/oauth", s.handleStartOAuth)
 	api.HandleFunc("GET /api/v1/git/{kind}/repos", s.handleListRepos)
 	api.HandleFunc("GET /api/v1/git/{kind}/detect", s.handleDetectRepo)
-	api.HandleFunc("POST /api/v1/pails/{name}/repo", s.handleCreateFromRepo)
+	api.HandleFunc("POST /api/v1/pails/{name}/repo", s.handleSetRepo(true))
+	api.HandleFunc("PUT /api/v1/pails/{name}/repo", s.handleSetRepo(false))
+	api.HandleFunc("DELETE /api/v1/pails/{name}/repo", s.handleRemoveRepo)
 	api.HandleFunc("PUT /api/v1/pails/{name}/connection", s.handleReconnect)
 	api.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "No such API path: "+r.URL.Path+".")

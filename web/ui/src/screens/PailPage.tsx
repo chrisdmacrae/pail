@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
   type Deploy,
+  disconnectRepo,
   dropConnection,
   type GitConnection,
   type GitHost,
@@ -22,7 +23,7 @@ import {
 } from '../api';
 import { BuildLog, Button, Command, Status } from '../ds';
 import { message, usePoll } from '../hooks';
-import { navigate, routeState } from '../router';
+import { navigate, pailPath, routeState } from '../router';
 import { ago, clock } from '../time';
 import { UploadZone } from '../UploadZone';
 import { Addresses } from './Addresses';
@@ -88,6 +89,8 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
   const [notice, setNotice] = useState(() => routeState<{ notice?: string }>()?.notice ?? '');
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // Asking whether to stop deploying from the pail's repo.
+  const [leaving, setLeaving] = useState(false);
   // Coming back from a git host's sign-in to reconnect this pail, the address
   // carries the connection the sign-in made, or what went wrong there.
   const [arrived] = useState(() => new URLSearchParams(window.location.search));
@@ -361,6 +364,56 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
               <div className="pl-actions">
                 <Button size="sm" disabled={reconnecting} onClick={() => setReconnecting(true)}>
                   Reconnect to {gitHost.label}
+                </Button>
+                <Button size="sm" variant="quiet" onClick={() => navigate(`${pailPath(name)}/git`)}>
+                  Change repo
+                </Button>
+                <Button size="sm" variant="quiet" disabled={leaving} onClick={() => setLeaving(true)}>
+                  Disconnect
+                </Button>
+              </div>
+              {leaving && (
+                <div className="pl-note pl-stack" style={{ padding: 16 }}>
+                  <p style={{ margin: 0 }}>
+                    <b>
+                      Disconnect {pail.name} from {pail.repo}?
+                    </b>{' '}
+                    Pushes stop deploying it. Pail takes its webhook off the repo and forgets its connection to{' '}
+                    {gitHost.label}. {pail.name} keeps serving, and keeps its deploys: from then on you deploy it with
+                    pail up or an upload.
+                  </p>
+                  <div className="pl-actions">
+                    <Button
+                      variant="danger"
+                      disabled={busy}
+                      onClick={() =>
+                        act(async () => {
+                          const repo = pail.repo;
+                          await disconnectRepo(name);
+                          setLeaving(false);
+                          setReconnecting(false);
+                          setSaid(
+                            `${pail.name} no longer deploys from ${repo}. Deploy it with pail up, or upload a deploy.`,
+                          );
+                        })
+                      }
+                    >
+                      Disconnect
+                    </Button>
+                    <Button onClick={() => setLeaving(false)}>Keep it</Button>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+          {!pail.repo && (
+            <section className="pl-stack" style={{ gap: 8 }}>
+              <p className="pl-small" style={{ margin: 0 }}>
+                {pail.name} is deployed by hand. It can deploy from a git repo instead, on every push.
+              </p>
+              <div className="pl-actions">
+                <Button size="sm" icon="git" onClick={() => navigate(`${pailPath(name)}/git`)}>
+                  Deploy from a git repo
                 </Button>
               </div>
             </section>

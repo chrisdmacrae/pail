@@ -141,6 +141,9 @@ type signIn struct {
 	// pail is the pail the sign-in is to reconnect, or "" when it is for a
 	// pail about to be made.
 	pail string
+	// repo says the sign-in is to give pail a repo to deploy from, rather
+	// than a new connection to the one it has.
+	repo bool
 }
 
 // handleStartOAuth begins signing in to a git host. It answers with the
@@ -148,7 +151,8 @@ type signIn struct {
 // is how the callback, which carries no Pail token, is known to be the end
 // of a sign-in someone with the token began. With {"pail": "recipes"} the
 // sign-in is to reconnect that pail, and comes back to its page rather than
-// to New pail.
+// to New pail. With "repo": true as well, it is to give that pail a repo to
+// deploy from, and comes back to where one is picked.
 func (s *Server) handleStartOAuth(w http.ResponseWriter, r *http.Request) {
 	kind, ok := s.gitKind(w, r)
 	if !ok {
@@ -156,10 +160,20 @@ func (s *Server) handleStartOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Pail string `json:"pail"`
+		Repo bool   `json:"repo"`
 	}
 	// No body at all is a sign-in for a new pail.
 	json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body)
-	if body.Pail != "" {
+	switch {
+	case body.Pail == "":
+		body.Repo = false
+	case body.Repo:
+		r.SetPathValue("name", body.Pail)
+		if _, err := s.pails.Get(body.Pail); err != nil {
+			s.writePailError(w, r, err)
+			return
+		}
+	default:
 		r.SetPathValue("name", body.Pail)
 		git, ok := s.pailGit(w, r)
 		if !ok {
@@ -176,7 +190,7 @@ func (s *Server) handleStartOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := randomID()
-	in := signIn{kind: kind, redirectURI: origin(r, hostname(r.Host)) + "/oauth/callback/" + string(kind), started: time.Now(), pail: body.Pail}
+	in := signIn{kind: kind, redirectURI: origin(r, hostname(r.Host)) + "/oauth/callback/" + string(kind), started: time.Now(), pail: body.Pail, repo: body.Repo}
 	s.signInsMu.Lock()
 	for old, v := range s.signIns {
 		if time.Since(v.started) > signInWindow {
@@ -191,7 +205,8 @@ func (s *Server) handleStartOAuth(w http.ResponseWriter, r *http.Request) {
 // handleOAuthCallback is where a git host sends the browser back after a
 // sign-in. Whatever happens, the person lands where the sign-in began, with
 // either the connection it made or what went wrong: on the page of the pail
-// it is to reconnect, or else on New pail with the host selected.
+// it is to reconnect, where a repo is picked for the pail it is to give one,
+// or else on New pail, with the host selected.
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	kind := githost.Kind(r.PathValue("kind"))
 	state := r.URL.Query().Get("state")
@@ -202,7 +217,10 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	arrive := func(with, value string) {
 		to, q := "/new", url.Values{"source": {string(kind)}, with: {value}}
-		if in.pail != "" {
+		switch {
+		case in.repo:
+			to = "/pails/" + url.PathEscape(in.pail) + "/git"
+		case in.pail != "":
 			to, q = "/pails/"+url.PathEscape(in.pail), url.Values{with: {value}}
 		}
 		http.Redirect(w, r, to+"?"+q.Encode(), http.StatusSeeOther)
@@ -318,14 +336,23 @@ func (s *Server) deployFromGit(ctx context.Context, r *http.Request, client gith
 	})
 }
 
-// handleCreateFromRepo makes a new pail from a repo:
+// handleSetRepo says which repo a pail deploys from:
 // {"host": "forgejo", "connection": "...", "repo": "homelab/recipes",
 // "branch": "main"}. It deploys the branch as it stands, then asks the host
 // to say when the branch is pushed to, so every push is a deploy. With
 // "dir": "apps/web" the pail is that folder of the repo, which lets one repo
 // hold several pails. The connection becomes the pail's own: the next pail
 // is made with another.
-func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
+//
+// With create it makes a new pail. Without, it is for a pail there already
+// is, one from pail up or an upload or one that deploys from another repo:
+// the pail keeps its name, addresses, variables and deploys, and deploys
+// from this repo from here on.
+func (s *Server) handleSetRepo(create bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { s.setRepo(w, r, create) }
+}
+
+func (s *Server) setRepo(w http.ResponseWriter, r *http.Request, create bool) {
 	name := r.PathValue("name")
 	if !pails.ValidName(name) {
 		s.writePailError(w, r, pails.ErrBadName)
@@ -347,9 +374,18 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, err := s.pails.Get(name); err == nil {
+	switch _, err := s.pails.Get(name); {
+	case create && err == nil:
 		writeError(w, http.StatusConflict, "name_taken", name+" is already a pail. Pick another name.")
 		return
+	case !create && err != nil:
+		s.writePailError(w, r, err)
+		return
+	}
+	// The repo the pail deploys from now, if it does from one.
+	var before *pails.GitSource
+	if !create {
+		before, _ = s.pails.Git(name)
 	}
 	client, err := s.git.WaitingClient(r.Context(), kind, body.Connection)
 	if err != nil {
@@ -371,11 +407,18 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 	if dir != "" {
 		from += ":" + dir
 	}
-	d, err := s.deployFromGit(r.Context(), r, client, name, git, "first deploy from "+from)
+	label := "first deploy from " + from
+	if !create {
+		label = "now deploys from " + from
+	}
+	d, err := s.deployFromGit(r.Context(), r, client, name, git, label)
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
 	}
+	// The repo it deployed from before stops calling. Its hook comes off
+	// while the pail still has the connection that added it.
+	s.removeHook(r.Context(), name, before)
 	// The pail exists now, and the connection is its own from here on.
 	if err := s.git.Give(r.Context(), body.Connection, name); err != nil {
 		s.writeGitError(w, r, kind, err)
@@ -388,7 +431,7 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 	hookNote := ""
 	if git.HookID, err = client.AddHook(r.Context(), git.Repo, hookURL, git.HookSecret, s.TLSMode() != "internal"); err != nil {
 		s.log.Warn("add webhook", "pail", name, "repo", git.Repo, "err", err)
-		hookNote = "Pail couldn’t add a webhook to " + body.Repo + ", so pushes won’t deploy by themselves. Use Redeploy after a push, or give the token permission to add webhooks and make the pail again."
+		hookNote = "Pail couldn’t add a webhook to " + body.Repo + ", so pushes won’t deploy by themselves. Use Redeploy after a push, or give the token permission to add webhooks and connect the repo again."
 	}
 	if err := s.pails.SetGit(r.Context(), name, &git); err != nil {
 		s.writePailError(w, r, err)
@@ -416,6 +459,35 @@ func (s *Server) pailGit(w http.ResponseWriter, r *http.Request) (*pails.GitSour
 		return nil, false
 	}
 	return git, true
+}
+
+// handleRemoveRepo has a pail stop deploying from its repo. Pail's webhook
+// comes off the repo and the pail's connection to the git host is forgotten.
+// The pail keeps serving what it serves, and keeps its deploys: from here on
+// it is deployed by hand, with pail up or an upload, and Redeploy deploys its
+// latest files again rather than pulling a branch.
+func (s *Server) handleRemoveRepo(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	git, ok := s.pailGit(w, r)
+	if !ok {
+		return
+	}
+	// The hook comes off while the pail still has the connection that
+	// added it. One that can't be removed is left: its deliveries get a 404.
+	s.removeHook(r.Context(), name, git)
+	if err := s.pails.SetGit(r.Context(), name, nil); err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	if err := s.git.Forget(r.Context(), name); err != nil {
+		s.log.Warn("forget git connection", "pail", name, "err", err)
+	}
+	p, err := s.pails.Get(name)
+	if err != nil {
+		s.writePailError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.pailJSON(r, p))
 }
 
 // handleReconnect gives a pail from a git host a new connection, for when

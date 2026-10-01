@@ -1,13 +1,16 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ApiError,
   connectGit,
+  connectRepo,
   createFromRepo,
   type Detection,
   detectRepo,
   dropConnection,
   type GitConnection,
   type GitHost,
+  getConnection,
+  listGitHosts,
   listRepos,
   type Repo,
   startSignIn,
@@ -35,11 +38,72 @@ const cleanDir = (dir: string) =>
 // A connection waits a while for its pail, then Pail forgets it.
 const lost = (err: unknown) => err instanceof ApiError && err.code === 'not_connected';
 
+// useGitSources is what a screen that asks where a site is keeps: the source
+// picked, the git hosts, and the connections made on the page. Each
+// connection is for the one pail the page is about. Coming back from a git
+// host's sign-in, the address says which host it was, and the connection the
+// sign-in made or what went wrong there.
+export function useGitSources() {
+  const [arrived] = useState(() => new URLSearchParams(window.location.search));
+  const [source, setSource] = useState<string | null>(arrived.get('source'));
+  const [hosts, setHosts] = useState<GitHost[]>([]);
+  const [connections, setConnections] = useState<Record<string, GitConnection | null>>({});
+  const [arriving, setArriving] = useState(() => arrived.has('connection'));
+
+  const setConnection = useCallback(
+    (kind: string, conn: GitConnection | null) => setConnections((prev) => ({ ...prev, [kind]: conn })),
+    [],
+  );
+
+  useEffect(() => {
+    listGitHosts().then(setHosts, () => {});
+  }, []);
+
+  useEffect(() => {
+    const kind = arrived.get('source');
+    const id = arrived.get('connection');
+    if (!kind || !id) return;
+    let live = true;
+    getConnection(kind, id)
+      .then(
+        (conn) => live && setConnection(kind, conn),
+        () => {},
+      )
+      .finally(() => live && setArriving(false));
+    // The connection is this page's now, and has no place in the address.
+    window.history.replaceState(window.history.state, '', window.location.pathname);
+    return () => {
+      live = false;
+    };
+  }, [arrived, setConnection]);
+
+  const git = hosts.find((g) => g.kind === source);
+  const back = git?.kind === arrived.get('source');
+  return {
+    source,
+    setSource,
+    hosts,
+    // What FromGit needs for the host that is picked, once a sign-in to it
+    // has finished arriving.
+    fromGit:
+      git && !(arriving && back)
+        ? {
+            git,
+            problem: back ? (arrived.get('error') ?? undefined) : undefined,
+            connection: connections[git.kind] ?? null,
+            onConnection: (conn: GitConnection | null) => setConnection(git.kind, conn),
+          }
+        : null,
+  };
+}
+
 // FromGit is New pail from a git host: connect to it, by signing in or with
-// a token, then pick a repo. The connection is for this pail alone.
+// a token, then pick a repo. The connection is for this pail alone. With
+// pail, the repo is for that pail, which is there already.
 export function FromGit(props: {
   git: GitHost;
   host: string;
+  pail?: string;
   problem?: string;
   connection: GitConnection | null;
   onConnection: (conn: GitConnection | null) => void;
@@ -50,6 +114,7 @@ export function FromGit(props: {
       git={props.git}
       conn={props.connection}
       host={props.host}
+      pail={props.pail}
       onLost={() => {
         setRanOut(true);
         props.onConnection(null);
@@ -62,6 +127,8 @@ export function FromGit(props: {
   ) : (
     <Connect
       git={props.git}
+      pail={props.pail}
+      forRepo={!!props.pail}
       problem={ranOut ? `Pail no longer has that connection to ${props.git.label}. Connect again.` : props.problem}
       onConnected={props.onConnection}
     />
@@ -69,11 +136,12 @@ export function FromGit(props: {
 }
 
 // Connect makes a connection to a git host, by signing in or with a token.
-// It is for the pail about to be made or, with pail, for that pail in place
-// of the connection it has.
+// It is for the pail about to be made or, with pail, for that pail: in place
+// of the connection it has or, with forRepo, to pick it a repo with.
 export function Connect({
   git,
   pail,
+  forRepo,
   title,
   intro,
   problem,
@@ -81,6 +149,7 @@ export function Connect({
 }: {
   git: GitHost;
   pail?: string;
+  forRepo?: boolean;
   title?: string;
   intro?: string;
   problem?: string;
@@ -111,7 +180,7 @@ export function Connect({
     setBusy(true);
     try {
       // Off to the git host; it sends the browser back to where this is.
-      window.location.assign(await startSignIn(git.kind, pail));
+      window.location.assign(await startSignIn(git.kind, pail, forRepo));
     } catch (err) {
       setSignInError(message(err));
       setBusy(false);
@@ -189,12 +258,15 @@ function PickRepo({
   git,
   conn,
   host,
+  pail,
   onLost,
   onChange,
 }: {
   git: GitHost;
   conn: GitConnection;
   host: string;
+  // The pail the repo is for, when it is one there already is.
+  pail?: string;
   // The connection ran out before its pail was made.
   onLost: () => void;
   // The person wants to connect another way.
@@ -300,9 +372,11 @@ function PickRepo({
     setError('');
     setBusy(true);
     try {
-      const made = await createFromRepo(name, conn, picked.full, picked.branch, folder);
+      const made = pail
+        ? await connectRepo(pail, conn, picked.full, picked.branch, folder)
+        : await createFromRepo(name, conn, picked.full, picked.branch, folder);
       // If the webhook couldn't be added, the pail's page says so.
-      navigate(pailPath(name), made.hook_note ? { notice: made.hook_note } : undefined);
+      navigate(pailPath(pail ?? name), made.hook_note ? { notice: made.hook_note } : undefined);
     } catch (err) {
       if (lost(err)) return onLost();
       setError(message(err));
@@ -410,13 +484,32 @@ function PickRepo({
 
           {detected?.deployable === false && (
             <div className="pl-note">
-              <strong>Pail can’t deploy {folder ? `${folder} in ${picked.full}` : picked.full} yet.</strong>{' '}
-              {detected.summary}. For now, Pail serves a repo’s files as they are: an index.html at the top, or a
-              pail.json that says where the files live.
+              <strong>Pail can’t deploy {folder ? `${folder} in ${picked.full}` : `the top of ${picked.full}`}.</strong>{' '}
+              {detected.summary}.
+              {!folder &&
+                ' If the site is in a folder of the repo, such as docs or apps/web, type it in Folder above and Pail looks there.'}
             </div>
           )}
 
-          {detected?.deployable && (
+          {detected?.deployable && pail && (
+            <>
+              {error && (
+                <div className="pl-note pl-note-failed" role="alert">
+                  {error}
+                </div>
+              )}
+              <p className="pl-small" style={{ margin: 0 }}>
+                Pail deploys {picked.branch} to {pail} now, and again on every push to it.
+              </p>
+              <div className="pl-actions">
+                <Button variant="primary" type="submit" disabled={busy}>
+                  Deploy {pail} from this repo
+                </Button>
+              </div>
+            </>
+          )}
+
+          {detected?.deployable && !pail && (
             <>
               <div style={{ maxWidth: 420 }}>
                 <Field

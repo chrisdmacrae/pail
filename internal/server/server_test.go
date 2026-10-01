@@ -953,6 +953,58 @@ func TestPailsFromAGitHost(t *testing.T) {
 	f.svc.Wait()
 	wantBody(t, f.site("recipes.pail.lan", "/"), 200, "recipes v3")
 
+	// A pail there already is can be given a repo. It keeps its name and
+	// its deploys, and deploys from the repo from then on.
+	byHand, _ := f.deploy("handmade", tarGz(t, map[string]string{"index.html": "made by hand"}))
+	wantBody(t, put("/api/v1/pails/nope/repo", from("homelab/recipes", "")), http.StatusNotFound, "No pail called nope")
+	wantBody(t, put("/api/v1/pails/handmade/repo", from("homelab/nope", "")), http.StatusConflict, "No index.html at the top")
+	wantBody(t, f.site("handmade.pail.lan", "/"), 200, "made by hand")
+	wantBody(t, put("/api/v1/pails/handmade/repo", from("homelab/recipes", "")), http.StatusAccepted, `"label":"now deploys from homelab/recipes@main"`)
+	f.svc.Wait()
+	wantBody(t, f.site("handmade.pail.lan", "/"), 200, "recipes v3")
+	wantBody(t, f.api("GET", "/api/v1/pails/handmade", nil), 200, `"repo":"homelab/recipes"`)
+	wantBody(t, f.api("GET", "/api/v1/pails/handmade/deploys", nil), 200, byHand.ID)
+	if host.secrets["handmade"] == "" || len(host.gone) != 0 {
+		t.Errorf("webhooks after giving a pail a repo: added for %v, removed %v", host.secrets, host.gone)
+	}
+	// Given another repo, it leaves the first: its webhook comes off.
+	wantBody(t, put("/api/v1/pails/handmade/repo", from("homelab/mono", `, "dir": "apps/web"`)), http.StatusAccepted, `"hook":true`)
+	f.svc.Wait()
+	wantBody(t, f.site("handmade.pail.lan", "/"), 200, "the web app")
+	wantBody(t, f.api("GET", "/api/v1/pails/handmade", nil), 200, `"dir":"apps/web"`)
+	if len(host.gone) != 1 || host.gone[0] != "homelab/recipes#41" {
+		t.Errorf("webhooks removed on changing repo: %v", host.gone)
+	}
+	// Disconnected, it goes back to being deployed by hand. It keeps
+	// serving, the webhook comes off, and its connection is forgotten.
+	host.gone = nil
+	wantBody(t, f.api("DELETE", "/api/v1/pails/nope/repo", nil), http.StatusNotFound, "No pail called nope")
+	left := f.api("DELETE", "/api/v1/pails/handmade/repo", nil)
+	wantBody(t, left, 200, `"name":"handmade"`)
+	if strings.Contains(left.Body.String(), `"repo"`) || strings.Contains(left.Body.String(), `"dir"`) {
+		t.Errorf("a disconnected pail still names its repo: %s", left.Body)
+	}
+	if len(host.gone) != 1 || host.gone[0] != "homelab/mono#41" {
+		t.Errorf("webhooks removed on disconnecting: %v", host.gone)
+	}
+	if keys, _ := store.List(context.Background(), "git/pails/handmade"); len(keys) != 0 {
+		t.Errorf("a disconnected pail's connection is still stored: %v", keys)
+	}
+	wantBody(t, f.site("handmade.pail.lan", "/"), 200, "the web app")
+	wantBody(t, f.api("DELETE", "/api/v1/pails/handmade/repo", nil), http.StatusConflict, "doesn’t deploy from a git host")
+	wantBody(t, f.do("POST", "pail.lan", "/api/v1/hooks/handmade", []byte(`{"ref": "refs/heads/main"}`)), http.StatusNotFound, "No pail here takes webhooks")
+	// Redeploy deploys its files again, with no branch to pull, and an
+	// upload is a deploy like any other.
+	wantBody(t, post("/api/v1/pails/handmade/redeploy", ""), http.StatusAccepted, `"label":"redeploy of `)
+	f.svc.Wait()
+	wantBody(t, f.site("handmade.pail.lan", "/"), 200, "the web app")
+	if d, log := f.deploy("handmade", tarGz(t, map[string]string{"index.html": "by hand again"})); d.State != "ok" {
+		t.Errorf("an upload after disconnecting: %+v\n%s", d, log)
+	}
+	wantBody(t, f.site("handmade.pail.lan", "/"), 200, "by hand again")
+	f.api("DELETE", "/api/v1/pails/handmade", nil)
+	host.gone = nil
+
 	// What Pail won't take.
 	wantBody(t, post("/api/v1/pails/garden/repo", from("homelab/garden-journal", "")), http.StatusConflict, "needs a build")
 	wantBody(t, post("/api/v1/pails/recipes/repo", from("homelab/recipes", "")), http.StatusConflict, "already a pail")
@@ -1236,6 +1288,17 @@ func TestSigningInToAGitHost(t *testing.T) {
 	if err := f.svc.SetGit(context.Background(), "recipes", &pails.GitSource{Host: "forgejo", Repo: "homelab/recipes", Branch: "main"}); err != nil {
 		t.Fatal(err)
 	}
+	// A sign-in to give a pail a repo comes back to where one is picked for
+	// it, with the host chosen, and needs only that the pail exists.
+	wantBody(t, f.api("POST", "/api/v1/git/forgejo/oauth", []byte(`{"pail": "nope", "repo": true}`)), http.StatusNotFound, "No pail called nope")
+	var forRepo struct{ URL string }
+	json.Unmarshal(f.api("POST", "/api/v1/git/forgejo/oauth", []byte(`{"pail": "recipes", "repo": true}`)).Body.Bytes(), &forRepo)
+	signIn, _ := url.Parse(forRepo.URL)
+	picking := callback("code=the-code&state=" + signIn.Query().Get("state"))
+	if to, _ := url.Parse(picking.Header().Get("Location")); picking.Code != http.StatusSeeOther || to.Path != "/pails/recipes/git" || to.Query().Get("source") != "forgejo" || to.Query().Get("connection") == "" {
+		t.Errorf("sign-in to give a pail a repo: %d, to %s", picking.Code, to)
+	}
+
 	backAtPail := func(rec *httptest.ResponseRecorder) url.Values {
 		t.Helper()
 		to, _ := url.Parse(rec.Header().Get("Location"))
