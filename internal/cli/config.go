@@ -118,7 +118,7 @@ func (a *app) resolve() (target, error) {
 			if token == "" {
 				return target{}, usagef("PAIL_URL is set but PAIL_TOKEN isn't. Set both, or neither.")
 			}
-			return target{name: "PAIL_URL", profile: profile{URL: normalizeURL(url), Token: token}}, nil
+			return target{name: "PAIL_URL", profile: profile{URL: normalizeURL(url), Token: token, CA: a.env.Getenv("PAIL_CA")}}, nil
 		}
 	}
 

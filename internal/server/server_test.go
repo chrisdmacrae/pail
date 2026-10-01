@@ -6,15 +6,20 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"testing/fstest"
 
+	"github.com/chrisdmacrae/pail/internal/certs"
 	"github.com/chrisdmacrae/pail/internal/config"
 	"github.com/chrisdmacrae/pail/internal/pails"
 	"github.com/chrisdmacrae/pail/internal/storage"
@@ -45,7 +50,7 @@ func newFixture(t *testing.T, store *storage.Memory) *fixture {
 	if err := svc.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return &fixture{t: t, store: store, svc: svc, srv: New(cfg, svc, testUI, logger, "test")}
+	return &fixture{t: t, store: store, svc: svc, srv: New(Options{Config: cfg, Pails: svc, UI: testUI, Logger: logger, Version: "test"})}
 }
 
 func (f *fixture) do(method, host, target string, body []byte, header ...string) *httptest.ResponseRecorder {
@@ -478,7 +483,7 @@ func TestWebUI(t *testing.T) {
 	wantBody(t, f.site("blog.pail.lan", "/"), 404, "No pail called blog.")
 
 	// A server built without the UI says so instead.
-	f.srv = New(config.Config{Token: token, BaseDomain: "pail.lan"}, f.svc, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	f.srv = New(Options{Config: config.Config{Token: token, BaseDomain: "pail.lan"}, Pails: f.svc, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Version: "test"})
 	wantBody(t, f.site("pail.lan", "/"), 200, "This build has no web UI")
 	wantBody(t, f.site("pail.lan", "/new"), 404, "This is Pail on pail.lan.")
 }
@@ -549,8 +554,164 @@ func TestCustomHostnames(t *testing.T) {
 	wantBody(t, add("blog", "recipes.pail-test.invalid"), http.StatusCreated, "recipes.pail-test.invalid")
 
 	// Without Let's Encrypt set up, hostnames are refused, and info says so.
-	plain := New(config.Config{Token: token, BaseDomain: "pail.lan"}, f.svc, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	plain := New(Options{Config: config.Config{Token: token, BaseDomain: "pail.lan"}, Pails: f.svc, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Version: "test"})
 	f.srv = plain
 	wantBody(t, add("blog", "x.home.example"), http.StatusConflict, "PAIL_ACME_DNS_PROVIDER and PAIL_ACME_DNS_TOKEN")
 	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"custom_hostnames":false`)
+}
+
+func TestHTTPS(t *testing.T) {
+	store := storage.NewMemory()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := pails.New(pails.Options{Store: store, BaseDomain: "pail.lan", MaxDeploys: 3, Logger: logger})
+	manager, err := certs.New(context.Background(), certs.Options{Store: store, BaseDomain: "pail.lan", Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Token: token, BaseDomain: "pail.lan", MaxUploadSize: 1 << 20, MaxDeploys: 3, Listen: ":80", ListenTLS: ":8443"}
+	srv := New(Options{Config: cfg, Pails: svc, UI: testUI, Certs: manager, Logger: logger, Version: "test"})
+	f := &fixture{t: t, store: store, svc: svc, srv: srv}
+
+	secure := httptest.NewUnstartedServer(srv)
+	secure.TLS = &tls.Config{GetCertificate: manager.GetCertificate}
+	secure.StartTLS()
+	defer secure.Close()
+
+	// A device that trusts Pail's root, with every name resolving to Pail.
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(manager.RootPEM())
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: pool},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, secure.Listener.Addr().String())
+		},
+	}}
+	get := func(url string, header ...string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest("GET", url, nil)
+		for i := 0; i+1 < len(header); i += 2 {
+			req.Header.Set(header[i], header[i+1])
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", url, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+
+	f.deploy("blog", tarGz(t, map[string]string{"index.html": "over https"}))
+	if code, body := get("https://blog.pail.lan/"); code != 200 || body != "over https" {
+		t.Errorf("site over https: %d %q", code, body)
+	}
+	if code, body := get("https://pail.lan/api/v1/info", "Authorization", "Bearer "+token); code != 200 || !strings.Contains(body, `"tls":"internal"`) {
+		t.Errorf("info over https: %d %s", code, body)
+	}
+	if code, body := get("https://pail.lan/api/v1/pails", "Authorization", "Bearer "+token); code != 200 || !strings.Contains(body, `"url":"https://blog.pail.lan"`) {
+		t.Errorf("pail urls should be https: %d %s", code, body)
+	}
+	if code, body := get("https://pail.lan/ca.crt"); code != 200 || body != string(manager.RootPEM()) {
+		t.Errorf("ca.crt over https: %d", code)
+	}
+	// A device that hasn't trusted the root is refused by its own TLS.
+	if _, err := http.Get(secure.URL); err == nil {
+		t.Error("an untrusting client connected")
+	} else if unknown := (x509.UnknownAuthorityError{}); !errors.As(err, &unknown) {
+		t.Errorf("untrusting client: %v", err)
+	}
+
+	// The plain listener: the root certificate, the self-check, and a
+	// redirect to HTTPS for everything else.
+	plain := func(host, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", target, nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		srv.Plain().ServeHTTP(rec, req)
+		return rec
+	}
+	wantBody(t, plain("pail.lan", "/ca.crt"), 200, "BEGIN CERTIFICATE")
+	for host, want := range map[string]string{
+		"blog.pail.lan":    "https://blog.pail.lan:8443/docs/?page=2",
+		"blog.pail.lan:80": "https://blog.pail.lan:8443/docs/?page=2",
+		"pail.lan":         "https://pail.lan:8443/docs/?page=2",
+	} {
+		rec := plain(host, "/docs/?page=2")
+		if rec.Code != http.StatusPermanentRedirect || rec.Header().Get("Location") != want {
+			t.Errorf("%s: %d to %q, want %q", host, rec.Code, rec.Header().Get("Location"), want)
+		}
+	}
+	if rec := plain("blog.pail.lan", "/ca.crt"); rec.Code != http.StatusPermanentRedirect {
+		t.Errorf("a pail's own /ca.crt on plain http: %d", rec.Code)
+	}
+
+	// The self-check goes to the plain listener, whatever port the API call
+	// came in on.
+	plainSrv := httptest.NewServer(srv.Plain())
+	defer plainSrv.Close()
+	srv.DialProbesAt(plainSrv.Listener.Addr().String())
+	if code, body := get("https://pail.lan/api/v1/check", "Authorization", "Bearer "+token); code != 200 || !strings.Contains(body, `"points_here":true`) {
+		t.Errorf("self-check with https on: %d %s", code, body)
+	}
+
+	// On Pail's own authority there are no custom hostnames.
+	wantBody(t, f.api("POST", "/api/v1/pails/blog/hosts", []byte(`{"host":"blog.home.example"}`)), http.StatusConflict, "PAIL_ACME_DNS_PROVIDER")
+}
+
+// fakeCerts stands in for Let's Encrypt: it issues for any hostname but the
+// ones it is told the DNS token can't speak for.
+type fakeCerts struct {
+	refuse string
+	have   map[string]bool
+}
+
+func (c *fakeCerts) Mode() string    { return "acme" }
+func (c *fakeCerts) RootPEM() []byte { return nil }
+func (c *fakeCerts) AddHost(_ context.Context, host string) error {
+	if host == c.refuse {
+		return errors.New("zone not found")
+	}
+	c.have[host] = true
+	return nil
+}
+func (c *fakeCerts) RemoveHost(_ context.Context, host string) { delete(c.have, host) }
+
+func TestCustomHostnamesGetCertificates(t *testing.T) {
+	f := newFixture(t, storage.NewMemory())
+	fake := &fakeCerts{refuse: "blog.not-mine.example", have: map[string]bool{}}
+	cfg := config.Config{Token: token, BaseDomain: "pail.example", MaxUploadSize: 1 << 20, MaxDeploys: 3}
+	cfg.ACME = config.ACME{DNSProvider: "test", DNSToken: "test"}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := pails.New(pails.Options{Store: f.store, BaseDomain: cfg.BaseDomain, MaxDeploys: 3, Logger: logger})
+	f.svc, f.srv = svc, New(Options{Config: cfg, Pails: svc, Certs: fake, Logger: logger, Version: "test"})
+	api := func(method, target, body string) *httptest.ResponseRecorder {
+		return f.do(method, "pail.example", target, []byte(body), "Authorization", "Bearer "+token)
+	}
+	rec := api("POST", "/api/v1/pails/blog/deploys", string(tarGz(t, map[string]string{"index.html": "blog"})))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("deploy: %d %s", rec.Code, rec.Body)
+	}
+	svc.Wait()
+
+	wantBody(t, api("GET", "/api/v1/info", ""), 200, `"tls":"acme"`)
+	wantBody(t, api("POST", "/api/v1/pails/blog/hosts", `{"host":"blog.home.example"}`), http.StatusCreated, "blog.home.example")
+	if !fake.have["blog.home.example"] {
+		t.Error("the hostname was added without a certificate")
+	}
+
+	// A hostname Let's Encrypt won't issue for is refused, and not kept.
+	wantBody(t, api("POST", "/api/v1/pails/blog/hosts", `{"host":"blog.not-mine.example"}`), http.StatusUnprocessableEntity, "PAIL_ACME_DNS_TOKEN can edit")
+	wantBody(t, api("GET", "/api/v1/pails/blog", ""), 200, `"hosts":["blog.home.example"]`)
+	wantBody(t, f.site("blog.not-mine.example", "/"), 404, "Nothing is hosted")
+
+	// Certificates go when the hostname does, and when its pail does.
+	api("DELETE", "/api/v1/pails/blog/hosts/blog.home.example", "")
+	if fake.have["blog.home.example"] {
+		t.Error("removing the hostname kept its certificate")
+	}
+	api("POST", "/api/v1/pails/blog/hosts", `{"host":"blog.home.example"}`)
+	api("DELETE", "/api/v1/pails/blog", "")
+	if len(fake.have) != 0 {
+		t.Errorf("removing the pail kept certificates: %v", fake.have)
+	}
 }

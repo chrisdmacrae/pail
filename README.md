@@ -17,6 +17,7 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | 3 | Deploy history and rollback | done |
 | 4 | Web UI from the design system | done |
 | 5 | Custom hostnames and the DNS self-check | done |
+| — | TLS: Pail's own certificate authority, and Let's Encrypt by DNS-01 | done |
 | 6 | Git hosts: token first, then OAuth | next |
 | 7 | Firecracker microVMs: the build VM, containers, and the KVM check | |
 | 8 | pail.json functions: base images, snapshots, sleep when idle, and routing | |
@@ -28,6 +29,7 @@ cmd/pail-server      the server binary
 cmd/pail             pail-cli, installed as the pail command
 internal/config      environment variables
 internal/storage     the object store: S3 (versitygw) and an in-memory one for tests
+internal/certs       TLS certificates: Pail's own authority, or Let's Encrypt
 internal/pails       pails, deploys, the live pointer, the deploy pipeline
 internal/server      the listener: Host routing, the REST API, static serving
 internal/cli         the pail command: profiles, packing, the API client
@@ -75,6 +77,7 @@ PAIL_TOKEN=dev-token pail login http://localhost:8080 --profile dev
 The base domain serves the UI: your pails, a pail's page, and New pail. It is a plain client of the API below and asks for the installation's token once per browser.
 
 - **Your pails:** the list, with Redeploy and Remove on each row.
+- **Trust this Pail:** when the installation has its own authority, how each kind of device comes to trust it.
 - **A pail:** its deploys and their logs (live while building), Upload a deploy (a `.zip` or a folder), Serve this one, Redeploy, Stop or Start, and Remove.
 - **New pail:** the pail-cli commands, or Upload: drop a folder or a `.zip`. A folder is packed into a `.tar.gz` in the browser.
 
@@ -97,6 +100,7 @@ It's built from `web/design-system/` as published: the components come from its 
 | `pail stop <pail>` · `pail start <pail>` | Turns a pail Off or back on. It keeps its deploys. |
 | `pail hosts <pail>` · `pail hosts add <pail> <hostname>` · `pail hosts rm <pail> <hostname>` | Lists, adds or removes custom hostnames, and says whether each points at the installation yet. |
 | `pail open <pail>` | Opens the pail's URL in a browser, and prints it. |
+| `pail ca` | Prints the installation's root certificate, when it has its own authority. |
 | `pail rm <pail> [--yes]` | Removes a pail and all its deploys; asks first unless `--yes`. |
 
 Every command takes `--profile`/`-p`, `--json`, `--quiet`/`-q` and `--yes`/`-y`.
@@ -105,6 +109,7 @@ Every command takes `--profile`/`-p`, `--json`, `--quiet`/`-q` and `--yes`/`-y`.
 - **What's packed:** every file under `dir` except `.git`, `node_modules` and `.DS_Store`.
 - **Which installation:** `--profile`, then `PAIL_PROFILE`, then `PAIL_URL` with `PAIL_TOKEN` (no file needed), then `default` in the config, then the only profile. On a terminal each command first prints the one it picked to stderr.
 - **Config:** `~/.pail/config` (TOML, mode 0600 in a 0700 folder); `PAIL_CONFIG` moves it. pail won't read it if other users can.
+- **Trust:** when an installation has its own certificate authority, `pail login` takes its root from the TLS handshake, prints its SHA-256 fingerprint, saves it beside the config and sets the profile's `ca`. In CI, `PAIL_CA` names a root certificate file to trust, with `PAIL_URL` and `PAIL_TOKEN`.
 - **Exit codes:** 0 done; 1 the deploy failed; 2 usage or config error; 3 installation unreachable; 4 pail or deploy not found; 5 the token was rejected.
 
 ## Configuration
@@ -118,8 +123,13 @@ Everything is an environment variable on the server.
 | `PAIL_MAX_UPLOAD_SIZE` | `100MB` | Largest archive accepted; bigger ones get a 413. |
 | `PAIL_MAX_DEPLOYS` | `10` | Good deploys kept per pail for rollback. Failed ones don't count. |
 | `PAIL_MAX_FUNCTION_MEMORY` | `1GB` | Reported by `/api/v1/info`; not enforced until functions exist. |
-| `PAIL_ACME_DNS_PROVIDER` · `PAIL_ACME_DNS_TOKEN` | unset | Set both to allow custom hostnames. Pail doesn't issue certificates yet, so today this is all they do. |
-| `PAIL_LISTEN` | `:80` | Address the listener binds. |
+| `PAIL_ACME_DNS_PROVIDER` · `PAIL_ACME_DNS_TOKEN` | unset | Set both to get certificates from Let's Encrypt by DNS-01, and to allow custom hostnames. The provider is one of `bunny`, `cloudflare`, `desec`, `digitalocean`, `duckdns`, `gandi`, `hetzner`, `netlify`, `njalla`. |
+| `PAIL_ACME_EMAIL` | unset | Optional address for Let's Encrypt's expiry notices. |
+| `PAIL_ACME_DIRECTORY` | Let's Encrypt production | Another ACME directory, such as Let's Encrypt's staging one while you're trying things out. |
+| `PAIL_ACME_RESOLVERS` | the system's | DNS servers to check the challenge record with, comma-separated, e.g. `1.1.1.1:53`. Set it when your home resolver answers for the domain itself and would never see the public record. |
+| `PAIL_LISTEN` | `:80` | Address the plain-HTTP listener binds. |
+| `PAIL_LISTEN_TLS` | `:443` | Address the HTTPS listener binds. |
+| `PAIL_TLS` | on | `off` serves everything over plain HTTP: for development, or behind a proxy that terminates TLS itself. |
 | `PAIL_S3_ENDPOINT` | none (required) | versitygw's URL, e.g. `http://versitygw:7070`. |
 | `PAIL_S3_ACCESS_KEY` · `PAIL_S3_SECRET_KEY` | none (required) | versitygw credentials. |
 | `PAIL_S3_BUCKET` | `pail` | Bucket Pail keeps everything in; created if missing. |
@@ -163,7 +173,23 @@ Pail routes by the Host header, so every pail name and custom hostname has to re
 - **In the UI**, Your pails shows a note when names under the base domain don't reach Pail, and a pail's Addresses show "Points here" or "Not pointing here yet" for each hostname.
 - **`pail hosts`** reports the same.
 
-A hostname is added whether or not its DNS is ready; it starts answering as soon as it points here. Custom hostnames are refused unless `PAIL_ACME_DNS_PROVIDER` and `PAIL_ACME_DNS_TOKEN` are both set, because the handoff ties them to Let's Encrypt mode. TLS itself isn't built yet.
+A hostname is added whether or not its DNS is ready; it starts answering as soon as it points here. Custom hostnames need Let's Encrypt mode (see TLS).
+
+## TLS
+
+Pail serves every pail over HTTPS from its own listener. The plain listener answers only the DNS self-check and `/ca.crt`, and redirects everything else to HTTPS. There are two ways Pail gets certificates.
+
+**Pail's own authority (the default).** On first start Pail makes a root certificate, valid ten years, that can only sign for the base domain: it carries a critical name constraint, so even its key can't be used to impersonate another site. From it Pail issues a wildcard for the base domain that lasts a week and is replaced at half-life; nobody handles those. Each device trusts the root once: it's at `http://<base domain>/ca.crt`, `pail ca` prints it, and the web UI's "Trust this Pail" page has the steps per platform. This mode has no custom hostnames.
+
+**Let's Encrypt (when `PAIL_ACME_DNS_PROVIDER` and `PAIL_ACME_DNS_TOKEN` are set).** The base domain must be a real one you control. Pail proves ownership by having the DNS provider publish a TXT record, so it works on a server with private addresses and no open ports. It gets a wildcard for the base domain, and a certificate of its own for each custom hostname, and renews them when a third of their life is left.
+
+- **First start waits.** Pail doesn't begin serving until it has the wildcard, and refuses to start, saying why, if it can't get one.
+- **Adding a hostname waits too.** `pail hosts add` and the UI return once the hostname's certificate is issued. If Let's Encrypt won't issue one, because the hostname isn't in a zone the token can edit, the hostname isn't added.
+- **Try it on staging first.** Let's Encrypt's production directory has rate limits. Set `PAIL_ACME_DIRECTORY=https://acme-staging-v02.api.letsencrypt.org/directory` until it works, then remove it.
+
+The base domain needs at least two labels (`pail.lan`, not `localhost`): browsers refuse a wildcard certificate directly under a single-label name. `make dev` runs with `PAIL_TLS=off` for that reason.
+
+The root's key, the ACME account and the certificates are kept in the object store under `tls/`, beside everything else Pail stores.
 
 ## Storage layout
 
@@ -173,6 +199,9 @@ meta/<name>/state.json                    the pail and its live pointer
 meta/<name>/deploys/<id>.json             the deploy record
 meta/<name>/deploys/<id>.log              its log
 meta/<name>/deploys/<id>.manifest.json    what it serves
+tls/internal/root.pem                     Pail's own root certificate and its key
+tls/acme/<directory>/account.json         the Let's Encrypt account
+tls/acme/<directory>/certs/<name>.pem     each certificate and its key
 ```
 
 Going live is one write of `state.json`. If anything fails before it, the pointer never moves. A rollback is the same write, aimed at an older deploy.

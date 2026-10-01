@@ -6,6 +6,7 @@ import { NewPail } from './screens/NewPail';
 import { PailList } from './screens/PailList';
 import { PailPage } from './screens/PailPage';
 import { TokenStep } from './screens/TokenStep';
+import { Trust } from './screens/Trust';
 
 export function App() {
   const [authed, setAuthed] = useState(hasToken);
@@ -38,6 +39,7 @@ export function App() {
   const pail = path.match(/^\/pails\/([^/]+)\/?$/);
   if (pail) screen = <PailPage key={pail[1]} name={decodeURIComponent(pail[1])} info={info} />;
   else if (path === '/new') screen = <NewPail host={host} info={info} />;
+  else if (path === '/trust') screen = <Trust host={host} info={info} />;
   else screen = <PailList host={host} info={info} />;
 
   return (

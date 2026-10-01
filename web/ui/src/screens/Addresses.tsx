@@ -105,6 +105,11 @@ export function Addresses({ pail, info }: { pail: Pail; info: Info | null }) {
               Add
             </Button>
           </form>
+          {busy && info.tls === 'acme' && draft && (
+            <p className="pl-small" role="status">
+              Getting {draft.trim()} a certificate. This waits for DNS and can take a minute or two.
+            </p>
+          )}
           <p className="pl-small">
             Point it at this Pail server: a CNAME to {info.base_domain}, or an A record to this server’s address.
           </p>

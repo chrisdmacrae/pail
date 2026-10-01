@@ -48,9 +48,12 @@ type Env struct {
 type exitError struct {
 	code int
 	msg  string
+	// cause is what went wrong underneath, when there is more to tell.
+	cause error
 }
 
 func (e *exitError) Error() string { return e.msg }
+func (e *exitError) Unwrap() error { return e.cause }
 
 type flags struct {
 	profile string
@@ -87,6 +90,7 @@ const usage = `pail puts things you host at home on a Pail installation.
   pail hosts add <pail> <host>   Add a custom hostname
   pail hosts rm <pail> <host>    Remove one
   pail open <pail>               Open the pail's URL in a browser
+  pail ca                        Print the installation's root certificate
   pail rm <pail>                 Remove a pail and all its deploys; asks first
 
 Flags for every command:
@@ -97,6 +101,7 @@ Flags for every command:
 
 In CI, skip the config file:
   PAIL_URL=https://pail.lan PAIL_TOKEN=$PAIL_TOKEN pail up ./dist --name blog
+  (add PAIL_CA=<file from pail ca> if the installation has its own authority)
 `
 
 // Run runs one pail command and returns its exit code.
@@ -170,6 +175,8 @@ func (a *app) dispatch(args []string) error {
 		return a.hosts(args)
 	case "open":
 		return a.open(args)
+	case "ca":
+		return a.ca(args)
 	case "rm":
 		return a.rm(args)
 	}
@@ -230,24 +237,44 @@ func (a *app) login(args []string) error {
 	if name == "" {
 		name = strings.NewReplacer(".", "-", ":", "-").Replace(u.Hostname())
 	}
-	c, err := a.newClient(target{name: name, profile: profile{URL: base, Token: token}})
-	if err != nil {
-		return err
-	}
-	var info apiInfo
-	if err := c.get("/api/v1/info", &info); err != nil {
-		return err
-	}
-	if info.BaseDomain == "" {
-		return &exitError{code: ExitUnreachable, msg: fmt.Sprintf("%s answered, but not as Pail's API. Check the URL.", base)}
-	}
-
 	cfg, err := a.loadConfig()
 	if err != nil {
 		return err
 	}
 	saved := cfg.Profiles[name]
 	saved.URL, saved.Token = base, token
+
+	var info apiInfo
+	check := func() error {
+		c, err := a.newClient(target{name: name, profile: saved})
+		if err != nil {
+			return err
+		}
+		return c.get("/api/v1/info", &info)
+	}
+	err = check()
+	// An installation on Pail's own certificate authority isn't trusted by
+	// anything yet. Take its root from the handshake, keep it with the
+	// profile, and hold the installation to it from now on.
+	if untrusted(err) {
+		rootPEM, fingerprint, rootErr := fetchRoot(base)
+		if rootErr != nil {
+			return &exitError{code: ExitUnreachable, msg: fmt.Sprintf("%s uses a certificate this machine doesn't trust, and %v.", base, rootErr)}
+		}
+		if saved.CA, err = a.trust(name, rootPEM); err != nil {
+			return err
+		}
+		if !a.flags.quiet && !a.flags.json {
+			fmt.Fprintf(a.env.Stderr, "%s has its own certificate authority. Saved its root to %s.\nSHA-256 %s\n", u.Host, saved.CA, fingerprint)
+		}
+		err = check()
+	}
+	if err != nil {
+		return err
+	}
+	if info.BaseDomain == "" {
+		return &exitError{code: ExitUnreachable, msg: fmt.Sprintf("%s answered, but not as Pail's API. Check the URL.", base)}
+	}
 	cfg.Profiles[name] = saved
 	if cfg.Default == "" && len(cfg.Profiles) == 1 {
 		cfg.Default = name
@@ -560,6 +587,12 @@ func (a *app) hosts(args []string) error {
 
 	switch action {
 	case "add":
+		// On Let's Encrypt the server gets the hostname a certificate before
+		// it answers, and that waits for DNS.
+		var info apiInfo
+		if c.get("/api/v1/info", &info) == nil && info.TLS == "acme" && !a.flags.quiet && !a.flags.json {
+			fmt.Fprintf(a.env.Stderr, "Getting %s a certificate. This waits for DNS and can take a minute or two.\n", args[1])
+		}
 		var raw json.RawMessage
 		if err := c.post(path, map[string]string{"host": args[1]}, &raw); err != nil {
 			return err

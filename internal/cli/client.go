@@ -18,6 +18,7 @@ import (
 type apiInfo struct {
 	Version    string `json:"version"`
 	BaseDomain string `json:"base_domain"`
+	TLS        string `json:"tls"`
 	Limits     struct {
 		MaxUploadSize int64 `json:"max_upload_size"`
 	} `json:"limits"`
@@ -65,7 +66,9 @@ type client struct {
 
 func (a *app) newClient(t target) (*client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = 60 * time.Second
+	// Long enough for the server to get a hostname its certificate, which
+	// waits for DNS.
+	transport.ResponseHeaderTimeout = 5 * time.Minute
 	if t.CA != "" {
 		path := a.expandHome(t.CA)
 		pem, err := os.ReadFile(path)
@@ -97,8 +100,11 @@ func (c *client) do(method, path string, body io.Reader, size int64, contentType
 		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.http.Do(req)
+	if untrusted(err) {
+		return nil, &exitError{code: ExitUnreachable, cause: err, msg: fmt.Sprintf("%s uses a certificate this machine doesn't trust. Run pail login %s to trust that installation's own authority, or set PAIL_CA to its root certificate.", c.target.URL, c.target.URL)}
+	}
 	if err != nil {
-		return nil, &exitError{code: ExitUnreachable, msg: fmt.Sprintf("Can't reach %s: %v. Check that Pail is running there.", c.target.URL, unwrapURLError(err))}
+		return nil, &exitError{code: ExitUnreachable, cause: err, msg: fmt.Sprintf("Can't reach %s: %v. Check that Pail is running there.", c.target.URL, unwrapURLError(err))}
 	}
 	if resp.StatusCode < 400 {
 		return resp, nil

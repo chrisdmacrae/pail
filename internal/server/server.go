@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 type Server struct {
 	cfg     config.Config
 	pails   *pails.Service
+	certs   Certs
 	log     *slog.Logger
 	version string
 	ui      fs.FS
@@ -26,12 +28,77 @@ type Server struct {
 	install http.Handler
 }
 
-// New builds the listener's handler. ui is the built web UI's files, or nil
-// to run without one.
-func New(cfg config.Config, svc *pails.Service, ui fs.FS, logger *slog.Logger, version string) *Server {
-	s := &Server{cfg: cfg, pails: svc, ui: ui, probe: newProber(), log: logger, version: version}
+// Certs is what the server needs from whatever issues its certificates.
+type Certs interface {
+	// Mode is "internal" or "acme".
+	Mode() string
+	// RootPEM is the root devices must trust, or nil for a public authority.
+	RootPEM() []byte
+	// AddHost gets a custom hostname its certificate, or says why it can't.
+	AddHost(ctx context.Context, host string) error
+	RemoveHost(ctx context.Context, host string)
+}
+
+type Options struct {
+	Config config.Config
+	Pails  *pails.Service
+	// UI is the built web UI's files, or nil to run without one.
+	UI fs.FS
+	// Certs issues certificates, or is nil when Pail serves plain HTTP only.
+	Certs   Certs
+	Logger  *slog.Logger
+	Version string
+}
+
+// New builds the handler for Pail's listener: the HTTPS one, or the only
+// one when TLS is off.
+func New(o Options) *Server {
+	s := &Server{cfg: o.Config, pails: o.Pails, certs: o.Certs, ui: o.UI, probe: newProber(), log: o.Logger, version: o.Version}
 	s.install = s.installation()
 	return s
+}
+
+// TLSMode is "off", "internal" or "acme".
+func (s *Server) TLSMode() string {
+	if s.certs == nil {
+		return "off"
+	}
+	return s.certs.Mode()
+}
+
+// Plain is what the plain-HTTP listener serves when HTTPS is on: the DNS
+// self-check, the root certificate for devices that don't trust it yet, and
+// a redirect to HTTPS for everything else.
+func (s *Server) Plain() http.Handler {
+	suffix := ""
+	if _, port, err := net.SplitHostPort(s.cfg.ListenTLS); err == nil && port != "443" {
+		suffix = ":" + port
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, probePath) && s.probe.answer(w, r) {
+			return
+		}
+		host := hostname(r.Host)
+		if r.URL.Path == "/ca.crt" && s.isInstallation(host) && s.serveRoot(w, r) {
+			return
+		}
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+		http.Redirect(w, r, "https://"+host+suffix+r.URL.RequestURI(), http.StatusPermanentRedirect)
+	})
+}
+
+// serveRoot sends the root certificate of Pail's own authority, if that is
+// where its certificates come from.
+func (s *Server) serveRoot(w http.ResponseWriter, r *http.Request) bool {
+	if s.certs == nil || s.certs.RootPEM() == nil {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(s.certs.RootPEM())
+	return true
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

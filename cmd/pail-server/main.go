@@ -4,14 +4,17 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/chrisdmacrae/pail/internal/certs"
 	"github.com/chrisdmacrae/pail/internal/config"
 	"github.com/chrisdmacrae/pail/internal/pails"
 	"github.com/chrisdmacrae/pail/internal/server"
@@ -64,15 +67,50 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	handler := server.New(cfg, svc, webui.FS(), logger, version)
-	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
+	opts := server.Options{Config: cfg, Pails: svc, UI: webui.FS(), Logger: logger, Version: version}
+
+	// Certificates: Pail's own authority, or Let's Encrypt when a DNS
+	// provider is set. In Let's Encrypt mode a first start waits here for
+	// the base domain's wildcard.
+	var manager certs.Manager
+	if !cfg.TLSOff {
+		// A wildcard needs something to sit under: browsers won't accept one
+		// for a single-label domain such as *.localhost.
+		if !strings.Contains(cfg.BaseDomain, ".") {
+			logger.Warn("browsers reject a wildcard certificate for a single-label base domain; use one like pail.lan, or set PAIL_TLS=off", "base_domain", cfg.BaseDomain)
+		}
+		var hosts []string
+		for _, p := range svc.List() {
+			hosts = append(hosts, p.Hosts...)
+		}
+		manager, err = certs.New(ctx, certs.Options{Store: store, BaseDomain: cfg.BaseDomain, ACME: cfg.ACME, Hosts: hosts, Logger: logger})
+		if err != nil {
+			return err
+		}
+		opts.Certs = manager
+		go manager.Run(ctx)
 	}
-	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	logger.Info("pail is up", "listen", cfg.Listen, "base_domain", cfg.BaseDomain, "pails", len(svc.List()), "version", version)
+	handler := server.New(opts)
+
+	// With HTTPS on, the plain listener only redirects, answers the DNS
+	// self-check and hands out the root certificate.
+	plain := &http.Server{Addr: cfg.Listen, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	servers := []*http.Server{plain}
+	errc := make(chan error, 2)
+	if manager != nil {
+		plain.Handler = handler.Plain()
+		secure := &http.Server{
+			Addr:              cfg.ListenTLS,
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			TLSConfig:         &tls.Config{GetCertificate: manager.GetCertificate, MinVersion: tls.VersionTLS12},
+		}
+		servers = append(servers, secure)
+		go func() { errc <- secure.ListenAndServeTLS("", "") }()
+	}
+	go func() { errc <- plain.ListenAndServe() }()
+	logger.Info("pail is up", "http", cfg.Listen, "https", map[bool]string{true: cfg.ListenTLS, false: "off"}[manager != nil],
+		"tls", handler.TLSMode(), "base_domain", cfg.BaseDomain, "pails", len(svc.List()), "version", version)
 
 	// The DNS self-check: every pail's name has to find its way back here.
 	go func() {
@@ -91,8 +129,10 @@ func run(logger *slog.Logger) error {
 	logger.Info("stopping: letting running deploys finish")
 	shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdown); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return err
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdown); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 	}
 	svc.Wait()
 	return nil

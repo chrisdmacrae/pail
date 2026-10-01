@@ -16,6 +16,11 @@ DEV_DATA           ?= data
 # Let's Encrypt. Set both to try hostnames out.
 PAIL_ACME_DNS_PROVIDER ?=
 PAIL_ACME_DNS_TOKEN    ?=
+# Development serves plain HTTP: browsers treat localhost as secure anyway,
+# and no wildcard certificate can cover *.localhost. To try HTTPS, use a base
+# domain with a dot in it: make dev-server PAIL_TLS=on PAIL_BASE_DOMAIN=pail.test
+PAIL_TLS               ?= off
+PAIL_LISTEN_TLS        ?= 127.0.0.1:8443
 
 VERSITYGW := $(shell go env GOPATH)/bin/versitygw
 GOFILES   := $(shell git ls-files '*.go')
@@ -95,6 +100,7 @@ dev-server: ui ## Build the web UI, then run pail-server on :8080 against dev-st
 	PAIL_TOKEN=$(PAIL_TOKEN) PAIL_BASE_DOMAIN=$(PAIL_BASE_DOMAIN) PAIL_LISTEN=$(PAIL_LISTEN) \
 	PAIL_S3_ENDPOINT=$(PAIL_S3_ENDPOINT) PAIL_S3_ACCESS_KEY=$(PAIL_S3_ACCESS_KEY) PAIL_S3_SECRET_KEY=$(PAIL_S3_SECRET_KEY) \
 	PAIL_ACME_DNS_PROVIDER=$(PAIL_ACME_DNS_PROVIDER) PAIL_ACME_DNS_TOKEN=$(PAIL_ACME_DNS_TOKEN) \
+	PAIL_TLS=$(PAIL_TLS) PAIL_LISTEN_TLS=$(PAIL_LISTEN_TLS) \
 		go run ./cmd/pail-server
 
 dev-ui: ## Run the web UI with hot reload on :5173, using dev-server's API

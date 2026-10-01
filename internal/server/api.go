@@ -96,6 +96,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		// Custom hostnames need Let's Encrypt mode: the internal CA can only
 		// sign for the base domain.
 		"custom_hostnames": s.cfg.ACME.Enabled(),
+		// "off", "internal" (Pail's own authority, whose root devices trust
+		// once) or "acme" (Let's Encrypt).
+		"tls": s.TLSMode(),
 		"limits": map[string]any{
 			"max_upload_size":     s.cfg.MaxUploadSize,
 			"max_deploys":         s.cfg.MaxDeploys,
@@ -122,9 +125,16 @@ func (s *Server) handleGetPail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRemovePail(w http.ResponseWriter, r *http.Request) {
+	// Its hostnames go with it, and so do their certificates.
+	p, _ := s.pails.Get(r.PathValue("name"))
 	if err := s.pails.Remove(r.Context(), r.PathValue("name")); err != nil {
 		s.writePailError(w, r, err)
 		return
+	}
+	if s.certs != nil {
+		for _, host := range p.Hosts {
+			s.certs.RemoveHost(r.Context(), host)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -171,7 +181,7 @@ type apiHost struct {
 }
 
 func (s *Server) checkHost(r *http.Request, host string, isDefault bool) apiHost {
-	return apiHost{Check: s.probe.check(r.Context(), probeBase(r, host), host), Default: isDefault, URL: origin(r, host)}
+	return apiHost{Check: s.probe.check(r.Context(), s.probeBase(r, host), host), Default: isDefault, URL: origin(r, host)}
 }
 
 // handleListHosts lists the pail's addresses, its own first, checking each
@@ -206,10 +216,24 @@ func (s *Server) handleAddHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.SetPathValue("host", pails.CleanHost(body.Host))
-	host, err := s.pails.AddHost(r.Context(), r.PathValue("name"), body.Host)
+	name := r.PathValue("name")
+	host, err := s.pails.AddHost(r.Context(), name, body.Host)
 	if err != nil {
 		s.writePailError(w, r, err)
 		return
+	}
+	// The hostname needs its own certificate, and getting one is also the
+	// test of whether the DNS token can speak for its zone. Without one it
+	// isn't kept.
+	if s.certs != nil {
+		if err := s.certs.AddHost(r.Context(), host); err != nil {
+			s.log.Error("certificate for custom hostname", "host", host, "err", err)
+			if rmErr := s.pails.RemoveHost(r.Context(), name, host); rmErr != nil {
+				s.log.Error("undo custom hostname", "host", host, "err", rmErr)
+			}
+			writeError(w, http.StatusUnprocessableEntity, "no_certificate", "Pail couldn't get a certificate for "+host+", so it wasn't added. It has to be in a DNS zone the token in PAIL_ACME_DNS_TOKEN can edit. The server log has the details.")
+			return
+		}
 	}
 	writeJSON(w, http.StatusCreated, s.checkHost(r, host, false))
 }
@@ -219,6 +243,9 @@ func (s *Server) handleRemoveHost(w http.ResponseWriter, r *http.Request) {
 		s.writePailError(w, r, err)
 		return
 	}
+	if s.certs != nil {
+		s.certs.RemoveHost(r.Context(), pails.CleanHost(r.PathValue("host")))
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -226,7 +253,7 @@ func (s *Server) handleRemoveHost(w http.ResponseWriter, r *http.Request) {
 // it reach this Pail, by the address the caller used?
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	host := "check-" + randomID()[:8] + "." + s.cfg.BaseDomain
-	c := s.probe.check(r.Context(), probeBase(r, host), host)
+	c := s.probe.check(r.Context(), s.probeBase(r, host), host)
 	c.Host = "*." + s.cfg.BaseDomain
 	if !c.PointsHere {
 		c.Detail = "Names under " + s.cfg.BaseDomain + " don't reach this Pail yet, so pails won't open. Point *." + s.cfg.BaseDomain + " at this server on your DNS."

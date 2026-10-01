@@ -104,6 +104,22 @@ export function PailList({ host, info }: { host: string; info: Info | null }) {
           </Button>
         </div>
       )}
+      {info?.tls === 'internal' && (
+        <p className="pl-small">
+          Other devices need to trust this Pail once before pails open without a warning.{' '}
+          <a
+            className="pl-url"
+            style={{ font: 'inherit' }}
+            href="/trust"
+            onClick={(e) => {
+              e.preventDefault();
+              navigate('/trust');
+            }}
+          >
+            See how
+          </a>
+        </p>
+      )}
     </main>
   );
 }

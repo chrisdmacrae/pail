@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chrisdmacrae/pail/internal/certs"
 	"github.com/chrisdmacrae/pail/internal/config"
 	"github.com/chrisdmacrae/pail/internal/pails"
 	"github.com/chrisdmacrae/pail/internal/server"
@@ -37,7 +39,7 @@ func installationWithDNS(t *testing.T, dnsPointsHere bool) *httptest.Server {
 	if err := svc.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	srv := server.New(cfg, svc, nil, logger, "test")
+	srv := server.New(server.Options{Config: cfg, Pails: svc, Logger: logger, Version: "test"})
 	ts := httptest.NewServer(srv)
 	// Stands in for DNS that sends every hostname to this server.
 	if dnsPointsHere {
@@ -462,4 +464,63 @@ func TestHosts(t *testing.T) {
 	s.ok("up", "./dist", "--name", "blog")
 	want(t, s.ok("hosts", "add", "blog", "blog.pail-test.invalid"), "It isn't pointing here yet")
 	want(t, s.ok("hosts", "blog"), "Not pointing here yet")
+}
+
+func TestLoginTrustsAnInstallationsOwnAuthority(t *testing.T) {
+	// An installation on Pail's own certificate authority. Its base domain
+	// is the test server's address, so its certificate covers it.
+	store := storage.NewMemory()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := config.Config{Token: token, BaseDomain: "localhost", MaxUploadSize: 1 << 20, MaxDeploys: 10}
+	svc := pails.New(pails.Options{Store: store, BaseDomain: cfg.BaseDomain, MaxDeploys: cfg.MaxDeploys, Logger: logger})
+	manager, err := certs.New(context.Background(), certs.Options{Store: store, BaseDomain: cfg.BaseDomain, Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewUnstartedServer(server.New(server.Options{Config: cfg, Pails: svc, Certs: manager, Logger: logger, Version: "test"}))
+	ts.TLS = &tls.Config{GetCertificate: manager.GetCertificate}
+	ts.StartTLS()
+	t.Cleanup(func() { ts.Close(); svc.Wait() })
+	url := "https://localhost" + ts.URL[strings.LastIndex(ts.URL, ":"):]
+
+	s := newShell(t)
+	s.env["PAIL_TOKEN"] = token
+
+	// Nothing on this machine trusts it yet.
+	s.env["PAIL_URL"] = url
+	want(t, s.fails(ExitUnreachable, "ls"), "uses a certificate this machine doesn't trust", "pail login")
+	delete(s.env, "PAIL_URL")
+
+	// Login takes the root from the handshake and keeps it with the profile.
+	_, _, stderr := s.run("login", url, "--profile", "home")
+	want(t, stderr, "has its own certificate authority. Saved its root to ~/.pail/home-ca.pem", "SHA-256 ")
+	saved, err := os.ReadFile(filepath.Join(s.home, ".pail", "home-ca.pem"))
+	if err != nil || string(saved) != string(manager.RootPEM()) {
+		t.Fatalf("saved root: %v", err)
+	}
+	config, _ := os.ReadFile(filepath.Join(s.home, ".pail", "config"))
+	want(t, string(config), `ca = "~/.pail/home-ca.pem"`)
+	delete(s.env, "PAIL_TOKEN")
+
+	// From then on every command verifies against it.
+	s.write("dist/index.html", "v1")
+	if got := s.ok("up", "./dist", "--name", "blog", "-q"); !strings.HasPrefix(got, "https://blog.localhost:") {
+		t.Errorf("up over https printed %q", got)
+	}
+	want(t, s.ok("ls"), "blog", "Live", "https://blog.localhost")
+	if got := s.ok("ca"); got != string(manager.RootPEM()) {
+		t.Errorf("pail ca printed %q", got)
+	}
+
+	// CI has no profile: it trusts the root it is handed.
+	s.env["PAIL_URL"], s.env["PAIL_TOKEN"] = url, token
+	s.env["PAIL_CA"] = filepath.Join(s.home, ".pail", "home-ca.pem")
+	want(t, s.ok("ls"), "blog")
+}
+
+func TestCaWithoutAnAuthorityOfItsOwn(t *testing.T) {
+	ts := installation(t)
+	s := newShell(t)
+	s.env["PAIL_URL"], s.env["PAIL_TOKEN"] = ts.URL, token
+	want(t, s.fails(ExitNotFound, "ca"), "has no root certificate to hand out: it serves plain HTTP.")
 }

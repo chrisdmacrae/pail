@@ -22,8 +22,14 @@ type Config struct {
 	// MaxFunctionMemory is the most memory one function copy may request,
 	// in bytes (PAIL_MAX_FUNCTION_MEMORY).
 	MaxFunctionMemory int64
-	// Listen is the address Pail's listener binds (PAIL_LISTEN).
+	// Listen is the address the plain-HTTP listener binds (PAIL_LISTEN).
 	Listen string
+	// ListenTLS is the address the HTTPS listener binds (PAIL_LISTEN_TLS).
+	ListenTLS string
+	// TLSOff turns HTTPS off (PAIL_TLS=off): Pail then serves everything
+	// over plain HTTP, for local development or behind a proxy that
+	// terminates TLS itself.
+	TLSOff bool
 
 	S3   S3
 	ACME ACME
@@ -35,6 +41,13 @@ type ACME struct {
 	DNSProvider string // PAIL_ACME_DNS_PROVIDER
 	DNSToken    string // PAIL_ACME_DNS_TOKEN
 	Email       string // PAIL_ACME_EMAIL, optional
+	// Directory is the ACME directory to use instead of Let's Encrypt's
+	// production one (PAIL_ACME_DIRECTORY), such as its staging one.
+	Directory string
+	// Resolvers are DNS servers to check the challenge record with
+	// (PAIL_ACME_RESOLVERS), for when the home resolver answers for the
+	// domain itself and would never see the public record.
+	Resolvers []string
 }
 
 // Enabled reports whether Let's Encrypt mode is on.
@@ -62,6 +75,7 @@ func Load(getenv func(string) string) (Config, error) {
 		Token:      strings.TrimSpace(getenv("PAIL_TOKEN")),
 		BaseDomain: strings.ToLower(strings.Trim(get("PAIL_BASE_DOMAIN", "pail.lan"), ".")),
 		Listen:     get("PAIL_LISTEN", ":80"),
+		ListenTLS:  get("PAIL_LISTEN_TLS", ":443"),
 		S3: S3{
 			Endpoint:  get("PAIL_S3_ENDPOINT", ""),
 			AccessKey: get("PAIL_S3_ACCESS_KEY", ""),
@@ -89,6 +103,17 @@ func Load(getenv func(string) string) (Config, error) {
 		DNSProvider: get("PAIL_ACME_DNS_PROVIDER", ""),
 		DNSToken:    get("PAIL_ACME_DNS_TOKEN", ""),
 		Email:       get("PAIL_ACME_EMAIL", ""),
+		Directory:   get("PAIL_ACME_DIRECTORY", ""),
+	}
+	if r := get("PAIL_ACME_RESOLVERS", ""); r != "" {
+		c.ACME.Resolvers = strings.Split(strings.ReplaceAll(r, " ", ""), ",")
+	}
+	switch strings.ToLower(get("PAIL_TLS", "on")) {
+	case "on":
+	case "off":
+		c.TLSOff = true
+	default:
+		return c, errors.New(`PAIL_TLS: use "off" to serve plain HTTP only, or leave it unset`)
 	}
 	if (c.ACME.DNSProvider == "") != (c.ACME.DNSToken == "") {
 		return c, errors.New("PAIL_ACME_DNS_PROVIDER and PAIL_ACME_DNS_TOKEN go together. Set both, or neither")

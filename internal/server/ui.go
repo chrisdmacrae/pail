@@ -17,6 +17,9 @@ const uiPolicy = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 
 // serveUI answers everything on the installation's host that isn't the API:
 // the web UI's files, and its page for any path the UI routes itself.
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/ca.crt" && s.serveRoot(w, r) {
+		return
+	}
 	if s.ui == nil {
 		if r.URL.Path != "/" {
 			s.notFound(w, r, "Nothing at "+r.URL.Path+".")

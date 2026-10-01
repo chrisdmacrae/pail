@@ -32,6 +32,9 @@ export interface Info {
   base_domain: string;
   // custom_hostnames says pails can take hostnames beyond the base domain.
   custom_hostnames: boolean;
+  // tls is where certificates come from: Pail's own authority ("internal",
+  // whose root each device trusts once), Let's Encrypt ("acme"), or none.
+  tls: 'off' | 'internal' | 'acme';
   limits: { max_upload_size: number; max_deploys: number };
 }
 

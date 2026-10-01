@@ -125,13 +125,19 @@ func (p *prober) answer(w http.ResponseWriter, r *http.Request) bool {
 // resolves to. It is for tests, where no real DNS points at the server.
 func (s *Server) DialProbesAt(addr string) { s.probe.dialAt = addr }
 
-// probeBase is where a check of host should connect: plain HTTP, on the port
-// this request reached Pail by.
-func probeBase(r *http.Request, host string) string {
-	if r.TLS == nil && !strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-		if _, port, err := net.SplitHostPort(r.Host); err == nil && port != "" && port != "80" {
-			host = net.JoinHostPort(host, port)
-		}
+// probeBase is where a check of host should connect. The check is always
+// plain HTTP: on Pail's own plain listener's port when HTTPS is on, else on
+// the port this request reached Pail by.
+func (s *Server) probeBase(r *http.Request, host string) string {
+	hostport := r.Host
+	switch {
+	case s.certs != nil:
+		hostport = s.cfg.Listen
+	case strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"):
+		hostport = ""
+	}
+	if _, port, err := net.SplitHostPort(hostport); err == nil && port != "" && port != "80" {
+		host = net.JoinHostPort(host, port)
 	}
 	return "http://" + host
 }
