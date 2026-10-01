@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { type GitHost, type Info, listGitHosts, listPails } from '../api';
+import { type GitConnection, type GitHost, getConnection, type Info, listGitHosts, listPails } from '../api';
 import { Button, Command, Field, SourcePicker } from '../ds';
 import { type Upload, validName } from '../pack';
 import { navigate, pailPath } from '../router';
@@ -8,15 +8,41 @@ import { FromGit } from './FromGit';
 
 export function NewPail({ host, info }: { host: string; info: Info | null }) {
   // Coming back from a git host's sign-in, the address says which host it
-  // was and anything that went wrong there.
+  // was, and the connection the sign-in made or what went wrong there.
   const [arrived] = useState(() => new URLSearchParams(window.location.search));
   const [source, setSource] = useState<string | null>(arrived.get('source'));
   const [git, setGit] = useState<GitHost[]>([]);
+  // The connections made here, by host. Each is for the one pail this page
+  // makes: the next New pail connects again.
+  const [connections, setConnections] = useState<Record<string, GitConnection | null>>({});
+  const [arriving, setArriving] = useState(() => arrived.has('connection'));
 
-  const loadGit = useCallback(() => listGitHosts().then(setGit, () => {}), []);
+  const setConnection = useCallback(
+    (kind: string, conn: GitConnection | null) => setConnections((prev) => ({ ...prev, [kind]: conn })),
+    [],
+  );
+
   useEffect(() => {
-    loadGit();
-  }, [loadGit]);
+    listGitHosts().then(setGit, () => {});
+  }, []);
+
+  useEffect(() => {
+    const kind = arrived.get('source');
+    const id = arrived.get('connection');
+    if (!kind || !id) return;
+    let live = true;
+    getConnection(kind, id)
+      .then(
+        (conn) => live && setConnection(kind, conn),
+        () => {},
+      )
+      .finally(() => live && setArriving(false));
+    // The connection is this page's now, and has no place in the address.
+    window.history.replaceState(window.history.state, '', window.location.pathname);
+    return () => {
+      live = false;
+    };
+  }, [arrived, setConnection]);
 
   const gitHost = git.find((g) => g.kind === source);
 
@@ -36,13 +62,14 @@ export function NewPail({ host, info }: { host: string; info: Info | null }) {
 
       {source === 'cli' && <FromCli />}
       {source === 'upload' && <FromUpload host={host} info={info} />}
-      {gitHost && (
+      {gitHost && !(arriving && gitHost.kind === arrived.get('source')) && (
         <FromGit
           key={gitHost.kind}
           git={gitHost}
           host={host}
           problem={gitHost.kind === arrived.get('source') ? (arrived.get('error') ?? undefined) : undefined}
-          onConnected={loadGit}
+          connection={connections[gitHost.kind] ?? null}
+          onConnection={(conn) => setConnection(gitHost.kind, conn)}
         />
       )}
     </main>

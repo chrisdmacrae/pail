@@ -191,13 +191,15 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 | `POST /api/v1/pails/{name}/hosts` | Body `{"host": "recipes.home.example"}`. Adds a custom hostname and checks it. `409` unless Let's Encrypt mode is on or `PAIL_TLS` is `off`, or if another pail has it. |
 | `DELETE /api/v1/pails/{name}/hosts/{host}` | Removes a custom hostname. |
 | `GET /api/v1/check` | The DNS self-check for the base domain: do names under it reach this Pail? |
-| `GET /api/v1/git` | The five git hosts, and which are connected. |
-| `PUT /api/v1/git/{kind}` | Body `{"token": "...", "server": "..."}`. Checks the token with the host, then keeps it. `server` is for GitLab, Gitea and Forgejo. |
-| `DELETE /api/v1/git/{kind}` | Forgets a host's token. Its pails stay, but can't pull. |
-| `POST /api/v1/git/{kind}/oauth` | Begins signing in to a host that has an OAuth app set up. Answers with the address to send the browser to; the host sends it back to `/oauth/callback/{kind}`. |
-| `GET /api/v1/git/{kind}/repos` | The repos the token can see. |
-| `GET /api/v1/git/{kind}/detect?repo=&branch=` | What Pail makes of a repo, and whether it can deploy it. |
-| `POST /api/v1/pails/{name}/repo` | Body `{"host", "repo", "branch"}`. Makes a new pail from a repo, deploys the branch, and adds a webhook so pushes deploy. |
+| `GET /api/v1/git` | The five git hosts, and which offer signing in. |
+| `PUT /api/v1/git/{kind}` | Body `{"token": "...", "server": "..."}`. Checks the token with the host, then holds it for the next pail. Answers with the connection's `id`, never the token. `server` is for GitLab, Gitea and Forgejo. |
+| `POST /api/v1/git/{kind}/oauth` | Begins signing in to a host that has an OAuth app set up. Answers with the address to send the browser to; the host sends it back to `/oauth/callback/{kind}`, which lands on New pail with the connection's id. With body `{"pail": "<name>"}` the sign-in is to reconnect that pail, and lands on the pail's page instead. |
+| `GET /api/v1/git/{kind}/connections/{id}` | A connection that is waiting for its pail: whose it is, and how it was made. |
+| `DELETE /api/v1/git/{kind}/connections/{id}` | Forgets a connection that is waiting for its pail. |
+| `GET /api/v1/git/{kind}/repos?connection=` | The repos the connection can see. |
+| `GET /api/v1/git/{kind}/detect?connection=&repo=&branch=` | What Pail makes of a repo, and whether it can deploy it. |
+| `POST /api/v1/pails/{name}/repo` | Body `{"host", "connection", "repo", "branch"}`. Makes a new pail from a repo, deploys the branch, and adds a webhook so pushes deploy. The connection becomes the pail's own and can't be used again. |
+| `PUT /api/v1/pails/{name}/connection` | Body `{"connection": "<id>"}`. Reconnects a pail from a git host: gives it a new connection, made like any other, in place of one that has run out or been revoked. Answers with whose it is. `409` if the pail isn't from a git host, or the connection is to another kind of host or can't see the pail's repo. |
 | `POST /api/v1/hooks/{name}` | Where a git host delivers pushes. Takes no token: the delivery is signed with the hook's secret. |
 | `DELETE /api/v1/pails/{name}` | Removes the pail and every deploy. |
 
@@ -212,7 +214,9 @@ On a pail's site, `/` and `/dir/` serve `index.html`, `/dir` redirects to `/dir/
 
 ## Git hosts
 
-A pail can come from a repo on GitHub, GitLab, Bitbucket, Gitea or Forgejo. Pail holds one access token per host, checks it with the host before keeping it, and stores it in the object store under `git/`.
+A pail can come from a repo on GitHub, GitLab, Bitbucket, Gitea or Forgejo. Each pail has a connection of its own: an access token or a sign-in, made on New pail for that pail and used for nothing else. Pail checks it with the host, holds it in memory for up to an hour while the pail is made, then stores it in the object store under `git/pails/`. Removing the pail removes it.
+
+A pail whose token has expired or been revoked can't pull. **Reconnect**, on the pail's page, gives it a new connection in place of the old one, by token or by signing in; the pail, its deploys and its webhook stay as they are.
 
 - **What Pail deploys.** A repo's files as they are: an `index.html` at the top, or a `pail.json` that says where the files live. A repo whose `package.json` has a build script is built first, where Pail can run microVMs (see Builds and microVMs), and declined where it can't.
 - **More than one pail in a repo.** A pail can be one folder of a repo: give New pail the folder, like `apps/web`, or send `"dir": "apps/web"` when making the pail. That folder is then the pail's top: its `index.html`, `pail.json` and `package.json` are the ones Pail reads, and nothing outside it is deployed. Make one pail per folder, each with its own name.
@@ -420,7 +424,8 @@ meta/<name>/state.json                    the pail and its live pointer
 meta/<name>/deploys/<id>.json             the deploy record
 meta/<name>/deploys/<id>.log              its log
 meta/<name>/deploys/<id>.manifest.json    what it serves
-git/<host>.json                           a git host's server and access token
+git/pails/<name>.json                     the pail's connection to its git host: server and access token
+git/<host>.json                           a connection from when all of a host's pails shared one; pails made then still use it
 tls/internal/root.pem                     Pail's own root certificate and its key
 tls/acme/<directory>/account.json         the Let's Encrypt account
 tls/acme/<directory>/certs/<name>.pem     each certificate and its key

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -743,7 +744,9 @@ func TestCustomHostnamesGetCertificates(t *testing.T) {
 }
 
 // forge is a small Forgejo: one account, repos held as files in memory, and
-// a record of the webhooks it was asked to add.
+// a record of the webhooks it was asked to add. It takes three tokens:
+// forge-token and new-token see every repo, and locked-token only those
+// under locked/.
 type forge struct {
 	t     *testing.T
 	repos map[string]map[string]string // repo → path → contents
@@ -751,10 +754,13 @@ type forge struct {
 	// secrets are the webhooks' secrets, by the pail each one calls.
 	secrets map[string]string
 	gone    []string // hooks Pail removed
+	// revoked is a token it took once and no longer does.
+	revoked string
 }
 
 func (f *forge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Authorization") != "token forge-token" {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "token ")
+	if !slices.Contains([]string{"forge-token", "new-token", "locked-token"}, token) || token == f.revoked {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -778,7 +784,7 @@ func (f *forge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo, files := parts[0]+"/"+parts[1], f.repos[parts[0]+"/"+parts[1]]
-	if files == nil {
+	if files == nil || (token == "locked-token" && !strings.HasPrefix(repo, "locked/")) {
 		http.NotFound(w, r)
 		return
 	}
@@ -842,35 +848,71 @@ func TestPailsFromAGitHost(t *testing.T) {
 	put := func(target, body string) *httptest.ResponseRecorder { return f.api("PUT", target, []byte(body)) }
 	post := func(target, body string) *httptest.ResponseRecorder { return f.api("POST", target, []byte(body)) }
 
-	// Five hosts, none connected; the three you can run yourself say so.
+	// Five hosts; the three you can run yourself say so. None is connected
+	// or not: a connection is a pail's, not Pail's.
 	list := f.api("GET", "/api/v1/git", nil).Body.String()
 	for _, want := range []string{`"kind":"github"`, `"kind":"forgejo"`, `"label":"Bitbucket"`, `"default_server":"https://gitlab.com"`, `"oauth":false`} {
 		if !strings.Contains(list, want) {
 			t.Errorf("git hosts lack %s: %s", want, list)
 		}
 	}
-	if strings.Contains(list, `"connected":true`) {
-		t.Errorf("something is connected before anything was: %s", list)
+	if strings.Contains(list, `"connected"`) || strings.Contains(list, `"account"`) {
+		t.Errorf("the hosts say who is connected: %s", list)
 	}
 
 	wantBody(t, f.api("GET", "/api/v1/git/forgejo/repos", nil), http.StatusConflict, "Forgejo isn’t connected")
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/repos?connection=made-up", nil), http.StatusConflict, "Forgejo isn’t connected")
 	wantBody(t, put("/api/v1/git/forgejo", `{"token": "forge-token"}`), http.StatusBadRequest, "needs its server’s address")
 	wantBody(t, put("/api/v1/git/forgejo", `{"server": "`+ts.URL+`", "token": "nope"}`), http.StatusUnprocessableEntity, "didn’t accept that token")
 	wantBody(t, put("/api/v1/git/sourcehut", `{"token": "x"}`), http.StatusNotFound, "doesn’t know a git host")
-	connected := put("/api/v1/git/forgejo", `{"server": "`+ts.URL+`", "token": "forge-token"}`)
-	wantBody(t, connected, 200, `"account":"chris"`)
-	if strings.Contains(connected.Body.String(), "forge-token") {
-		t.Error("the API handed the token back")
+	// Connecting holds the token for the next pail, under an id.
+	connect := func() string {
+		t.Helper()
+		connected := put("/api/v1/git/forgejo", `{"server": "`+ts.URL+`", "token": "forge-token"}`)
+		wantBody(t, connected, 200, `"account":"chris"`)
+		wantBody(t, connected, 200, `"via":"token"`)
+		if strings.Contains(connected.Body.String(), "forge-token") {
+			t.Error("the API handed the token back")
+		}
+		var out struct{ ID string }
+		json.Unmarshal(connected.Body.Bytes(), &out)
+		if out.ID == "" {
+			t.Fatalf("connecting gave no id: %s", connected.Body)
+		}
+		return out.ID
 	}
+	// from is the body that makes a pail from a repo, with a connection of its own.
+	from := func(repo, more string) string {
+		t.Helper()
+		return `{"host": "forgejo", "connection": "` + connect() + `", "repo": "` + repo + `", "branch": "main"` + more + `}`
+	}
+	conn := connect()
+	if keys, _ := store.List(context.Background(), "git/"); len(keys) != 0 {
+		t.Errorf("a connection with no pail yet was stored: %v", keys)
+	}
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/connections/"+conn, nil), 200, `"account":"chris"`)
+	wantBody(t, f.api("GET", "/api/v1/git/github/connections/"+conn, nil), http.StatusConflict, "GitHub isn’t connected")
+	wantBody(t, f.api("GET", "/api/v1/git/github/repos?connection="+conn, nil), http.StatusConflict, "GitHub isn’t connected")
 
-	wantBody(t, f.api("GET", "/api/v1/git/forgejo/repos", nil), 200, `"full":"homelab/recipes"`)
-	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?repo=homelab/recipes&branch=main", nil), 200, `"deployable":true`)
-	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?repo=homelab/garden-journal&branch=main", nil), 200, "Vite app · needs a build")
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/repos?connection="+conn, nil), 200, `"full":"homelab/recipes"`)
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?connection="+conn+"&repo=homelab/recipes&branch=main", nil), 200, `"deployable":true`)
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?connection="+conn+"&repo=homelab/garden-journal&branch=main", nil), 200, "Vite app · needs a build")
 
 	// A repo becomes a pail: deployed as it stands, with a webhook for pushes.
-	made := post("/api/v1/pails/recipes/repo", `{"host": "forgejo", "repo": "homelab/recipes", "branch": "main"}`)
+	made := post("/api/v1/pails/recipes/repo", `{"host": "forgejo", "connection": "`+conn+`", "repo": "homelab/recipes", "branch": "main"}`)
 	wantBody(t, made, http.StatusAccepted, `"hook":true`)
 	f.svc.Wait()
+	// The connection is the pail's now: it is stored with it, and can't make
+	// or look for another.
+	if keys, _ := store.List(context.Background(), "git/"); len(keys) != 1 || keys[0] != "git/pails/recipes.json" {
+		t.Errorf("connections stored: %v", keys)
+	}
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/repos?connection="+conn, nil), http.StatusConflict, "Forgejo isn’t connected")
+	wantBody(t, post("/api/v1/pails/again/repo", `{"host": "forgejo", "connection": "`+conn+`", "repo": "homelab/recipes", "branch": "main"}`), http.StatusConflict, "Forgejo isn’t connected")
+	if _, err := f.svc.Get("again"); err == nil {
+		t.Error("a used connection made a second pail")
+	}
+	conn = connect()
 	wantBody(t, f.site("recipes.pail.lan", "/"), 200, "recipes v1")
 	wantBody(t, f.site("recipes.pail.lan", "/about"), 200, "about")
 	p := f.api("GET", "/api/v1/pails/recipes", nil).Body.String()
@@ -912,23 +954,23 @@ func TestPailsFromAGitHost(t *testing.T) {
 	wantBody(t, f.site("recipes.pail.lan", "/"), 200, "recipes v3")
 
 	// What Pail won't take.
-	wantBody(t, post("/api/v1/pails/garden/repo", `{"host": "forgejo", "repo": "homelab/garden-journal", "branch": "main"}`), http.StatusConflict, "needs a build")
-	wantBody(t, post("/api/v1/pails/recipes/repo", `{"host": "forgejo", "repo": "homelab/recipes", "branch": "main"}`), http.StatusConflict, "already a pail")
+	wantBody(t, post("/api/v1/pails/garden/repo", from("homelab/garden-journal", "")), http.StatusConflict, "needs a build")
+	wantBody(t, post("/api/v1/pails/recipes/repo", from("homelab/recipes", "")), http.StatusConflict, "already a pail")
 	// A repo that isn't there has nothing in it to serve, and is declined the same way.
-	wantBody(t, post("/api/v1/pails/x/repo", `{"host": "forgejo", "repo": "homelab/nope", "branch": "main"}`), http.StatusConflict, "No index.html at the top")
+	wantBody(t, post("/api/v1/pails/x/repo", from("homelab/nope", "")), http.StatusConflict, "No index.html at the top")
 	wantBody(t, post("/api/v1/pails/x/repo", `{"host": "github", "repo": "a/b", "branch": "main"}`), http.StatusConflict, "GitHub isn’t connected")
 	if _, err := f.svc.Get("garden"); err == nil {
 		t.Error("a repo Pail can't deploy left a pail behind")
 	}
 
 	// A repo with more than one pail: each pail is one folder of it.
-	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?repo=homelab/mono&branch=main", nil), 200, "No index.html at the top")
-	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?repo=homelab/mono&branch=main&dir=apps/web", nil), 200, "index.html in apps/web")
-	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?repo=homelab/mono&branch=main&dir=../etc", nil), http.StatusBadRequest, "inside the repo")
-	wantBody(t, post("/api/v1/pails/mono/repo", `{"host": "forgejo", "repo": "homelab/mono", "branch": "main"}`), http.StatusConflict, "No index.html at the top")
-	wantBody(t, post("/api/v1/pails/mono/repo", `{"host": "forgejo", "repo": "homelab/mono", "branch": "main", "dir": "apps/../.."}`), http.StatusBadRequest, "inside the repo")
-	wantBody(t, post("/api/v1/pails/mono-web/repo", `{"host": "forgejo", "repo": "homelab/mono", "branch": "main", "dir": "./apps/web/"}`), http.StatusAccepted, `"label":"first deploy from homelab/mono@main:apps/web"`)
-	wantBody(t, post("/api/v1/pails/mono-docs/repo", `{"host": "forgejo", "repo": "homelab/mono", "branch": "main", "dir": "apps/docs"}`), http.StatusAccepted, `"hook":true`)
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?connection="+conn+"&repo=homelab/mono&branch=main", nil), 200, "No index.html at the top")
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?connection="+conn+"&repo=homelab/mono&branch=main&dir=apps/web", nil), 200, "index.html in apps/web")
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?connection="+conn+"&repo=homelab/mono&branch=main&dir=../etc", nil), http.StatusBadRequest, "inside the repo")
+	wantBody(t, post("/api/v1/pails/mono/repo", from("homelab/mono", "")), http.StatusConflict, "No index.html at the top")
+	wantBody(t, post("/api/v1/pails/mono/repo", from("homelab/mono", `, "dir": "apps/../.."`)), http.StatusBadRequest, "inside the repo")
+	wantBody(t, post("/api/v1/pails/mono-web/repo", from("homelab/mono", `, "dir": "./apps/web/"`)), http.StatusAccepted, `"label":"first deploy from homelab/mono@main:apps/web"`)
+	wantBody(t, post("/api/v1/pails/mono-docs/repo", from("homelab/mono", `, "dir": "apps/docs"`)), http.StatusAccepted, `"hook":true`)
 	f.svc.Wait()
 	wantBody(t, f.site("mono-web.pail.lan", "/"), 200, "the web app")
 	wantBody(t, f.site("mono-web.pail.lan", "/about"), 200, "about the web app")
@@ -979,33 +1021,95 @@ func TestPailsFromAGitHost(t *testing.T) {
 	f.svc.Wait()
 
 	// A token that can't add webhooks still makes the pail, and says so.
-	locked := post("/api/v1/pails/notes/repo", `{"host": "forgejo", "repo": "locked/notes", "branch": "main"}`)
+	locked := post("/api/v1/pails/notes/repo", from("locked/notes", ""))
 	wantBody(t, locked, http.StatusAccepted, `"hook":false`)
 	wantBody(t, locked, http.StatusAccepted, "pushes won’t deploy by themselves")
 	f.svc.Wait()
 	wantBody(t, f.site("notes.pail.lan", "/"), 200, "notes")
 
-	// Connections and the repo a pail came from survive a restart.
+	// A pail's connection and the repo it came from survive a restart. A
+	// connection still waiting for its pail doesn't.
 	conns, err := githost.LoadConnections(context.Background(), store, githost.DefaultClient())
 	if err != nil {
 		t.Fatal(err)
 	}
 	f = newFixtureWith(t, store, conns)
-	wantBody(t, f.api("GET", "/api/v1/git", nil), 200, `"connected":true`)
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/connections/"+conn, nil), http.StatusConflict, "Forgejo isn’t connected")
 	wantBody(t, f.api("GET", "/api/v1/pails/recipes", nil), 200, `"repo":"homelab/recipes"`)
+	host.repos["homelab/recipes"]["index.html"] = "recipes v4"
+	wantBody(t, post("/api/v1/pails/recipes/redeploy", ""), http.StatusAccepted, `"label":"redeploy of main"`)
+	f.svc.Wait()
+	wantBody(t, f.site("recipes.pail.lan", "/"), 200, "recipes v4")
 
-	// Removing the pail takes its webhook off the repo.
+	// A pail whose token the host stops taking can't pull, until it is given
+	// a new connection. Nothing else about the pail changes.
+	connectWith := func(token string) string {
+		t.Helper()
+		var out struct{ ID string }
+		json.Unmarshal(put("/api/v1/git/forgejo", `{"server": "`+ts.URL+`", "token": "`+token+`"}`).Body.Bytes(), &out)
+		if out.ID == "" {
+			t.Fatalf("connecting with %s gave no id", token)
+		}
+		return out.ID
+	}
+	reconnect := func(pail, id string) *httptest.ResponseRecorder {
+		return put("/api/v1/pails/"+pail+"/connection", `{"connection": "`+id+`"}`)
+	}
+	host.revoked = "forge-token"
+	wantBody(t, post("/api/v1/pails/recipes/redeploy", ""), http.StatusUnprocessableEntity, "didn’t accept that token")
+	wantBody(t, reconnect("nope", "x"), http.StatusNotFound, "No pail called nope")
+	wantBody(t, reconnect("recipes", ""), http.StatusBadRequest, "Say which connection")
+	wantBody(t, reconnect("recipes", "made-up"), http.StatusConflict, "no connection to Forgejo waiting")
+	// A connection that can't see the pail's repo isn't taken, and the pail
+	// keeps the one it had.
+	before, _ := store.Read(context.Background(), "git/pails/recipes.json")
+	wantBody(t, reconnect("recipes", connectWith("locked-token")), http.StatusConflict, "can’t see homelab/recipes")
+	if after, _ := store.Read(context.Background(), "git/pails/recipes.json"); !bytes.Equal(before, after) {
+		t.Errorf("a connection that can't see the repo replaced the pail's: %s", after)
+	}
+	conn = connectWith("new-token")
+	given := reconnect("recipes", conn)
+	wantBody(t, given, 200, `"account":"chris"`)
+	if body := given.Body.String(); strings.Contains(body, "new-token") || strings.Contains(body, conn) {
+		t.Errorf("reconnecting handed back the token or the id: %s", body)
+	}
+	// The connection is the pail's now, and no other's.
+	wantBody(t, reconnect("notes", conn), http.StatusConflict, "no connection to Forgejo waiting")
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/repos?connection="+conn, nil), http.StatusConflict, "Forgejo isn’t connected")
+	if stored, _ := store.Read(context.Background(), "git/pails/recipes.json"); !strings.Contains(string(stored), "new-token") {
+		t.Errorf("the pail's stored connection after reconnecting: %s", stored)
+	}
+	host.repos["homelab/recipes"]["index.html"] = "recipes v5"
+	wantBody(t, post("/api/v1/pails/recipes/redeploy", ""), http.StatusAccepted, `"label":"redeploy of main"`)
+	f.svc.Wait()
+	wantBody(t, f.site("recipes.pail.lan", "/"), 200, "recipes v5")
+	// The pails that weren't reconnected still can't pull.
+	wantBody(t, post("/api/v1/pails/notes/redeploy", ""), http.StatusUnprocessableEntity, "didn’t accept that token")
+	host.revoked = ""
+	// Only a pail from a git host has a connection to replace.
+	f.deploy("plain", tarGz(t, map[string]string{"index.html": "plain"}))
+	f.svc.Wait()
+	wantBody(t, reconnect("plain", connect()), http.StatusConflict, "doesn’t deploy from a git host")
+
+	// Removing the pail takes its webhook off the repo, and its connection
+	// with it. The other pails keep theirs.
 	f.api("DELETE", "/api/v1/pails/recipes", nil)
 	if len(host.gone) != 1 || host.gone[0] != "homelab/recipes#41" {
 		t.Errorf("webhooks removed: %v", host.gone)
 	}
-
-	// Disconnecting keeps pails, but they can't pull any more.
-	if rec := f.api("DELETE", "/api/v1/git/forgejo", nil); rec.Code != http.StatusNoContent {
-		t.Fatalf("disconnect: %d %s", rec.Code, rec.Body)
+	keys, _ := store.List(context.Background(), "git/")
+	if want := []string{"git/pails/mono-docs.json", "git/pails/mono-web.json", "git/pails/notes.json"}; !slices.Equal(keys, want) {
+		t.Errorf("connections stored: %v, want %v", keys, want)
 	}
-	wantBody(t, f.site("notes.pail.lan", "/"), 200, "notes")
-	wantBody(t, f.api("POST", "/api/v1/pails/notes/redeploy", nil), http.StatusConflict, "Forgejo isn’t connected")
+	wantBody(t, f.api("POST", "/api/v1/pails/notes/redeploy", nil), http.StatusAccepted, `"label":"redeploy of main"`)
+	f.svc.Wait()
+
+	// A connection can be dropped before it makes a pail.
+	conn = connect()
+	if rec := f.api("DELETE", "/api/v1/git/forgejo/connections/"+conn, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("drop a connection: %d %s", rec.Code, rec.Body)
+	}
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/repos?connection="+conn, nil), http.StatusConflict, "Forgejo isn’t connected")
 }
 
 func TestSigningInToAGitHost(t *testing.T) {
@@ -1026,6 +1130,8 @@ func TestSigningInToAGitHost(t *testing.T) {
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]string{"login": "chris"})
+		case "/api/v1/repos/homelab/recipes/archive/main.tar.gz":
+			w.Write(tarGz(t, map[string]string{"recipes/index.html": "recipes"}))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1038,7 +1144,7 @@ func TestSigningInToAGitHost(t *testing.T) {
 	callback := func(query string) *httptest.ResponseRecorder {
 		return f.do("GET", "pail.lan", "/oauth/callback/forgejo?"+query, nil)
 	}
-	landed := func(rec *httptest.ResponseRecorder) string {
+	arrived := func(rec *httptest.ResponseRecorder) url.Values {
 		t.Helper()
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("callback: %d %s", rec.Code, rec.Body)
@@ -1047,13 +1153,21 @@ func TestSigningInToAGitHost(t *testing.T) {
 		if to.Path != "/new" || to.Query().Get("source") != "forgejo" {
 			t.Fatalf("callback sent the browser to %s", to)
 		}
-		return to.Query().Get("error")
+		return to.Query()
+	}
+	landed := func(rec *httptest.ResponseRecorder) string {
+		t.Helper()
+		q := arrived(rec)
+		if q.Get("error") != "" && q.Get("connection") != "" {
+			t.Errorf("a sign-in that went wrong made a connection: %v", q)
+		}
+		return q.Get("error")
 	}
 
 	// Only hosts with an app set up offer signing in.
 	list := f.api("GET", "/api/v1/git", nil).Body.String()
-	if !strings.Contains(list, `"kind":"forgejo","label":"Forgejo","self_hostable":true,"default_server":"","connected":false,"oauth":true`) ||
-		!strings.Contains(list, `"kind":"github","label":"GitHub","self_hostable":false,"default_server":"","connected":false,"oauth":false`) {
+	if !strings.Contains(list, `"kind":"forgejo","label":"Forgejo","self_hostable":true,"default_server":"","oauth":true`) ||
+		!strings.Contains(list, `"kind":"github","label":"GitHub","self_hostable":false,"default_server":"","oauth":false`) {
 		t.Errorf("git hosts: %s", list)
 	}
 	wantBody(t, f.api("POST", "/api/v1/git/github/oauth", nil), http.StatusConflict, "PAIL_OAUTH_GITHUB_CLIENT_ID")
@@ -1086,20 +1200,70 @@ func TestSigningInToAGitHost(t *testing.T) {
 	if problem := landed(callback("code=wrong&state=" + start())); !strings.Contains(problem, "couldn’t finish signing in") {
 		t.Errorf("bad code: %q", problem)
 	}
-	wantBody(t, f.api("GET", "/api/v1/git", nil), 200, `"connected":false,"oauth":true`)
 
-	// The real thing: a state Pail issued comes back with a code.
+	// The real thing: a state Pail issued comes back with a code, and the
+	// browser lands with the connection the sign-in made, for the next pail.
 	state := start()
-	if problem := landed(callback("code=the-code&state=" + state)); problem != "" {
-		t.Fatalf("sign-in: %q", problem)
+	q := arrived(callback("code=the-code&state=" + state))
+	if q.Get("error") != "" || q.Get("connection") == "" || strings.Contains(q.Encode(), "signed-in-token") {
+		t.Fatalf("sign-in: %v", q)
 	}
-	connected := f.api("GET", "/api/v1/git", nil).Body.String()
+	connected := f.api("GET", "/api/v1/git/forgejo/connections/"+q.Get("connection"), nil).Body.String()
 	if !strings.Contains(connected, `"account":"chris"`) || !strings.Contains(connected, `"via":"oauth"`) || strings.Contains(connected, "signed-in-token") {
 		t.Errorf("after signing in: %s", connected)
+	}
+	if keys, _ := store.List(context.Background(), "git/"); len(keys) != 0 {
+		t.Errorf("a sign-in with no pail yet was stored: %v", keys)
 	}
 	// A state is good once.
 	if problem := landed(callback("code=the-code&state=" + state)); !strings.Contains(problem, "didn’t start here") {
 		t.Errorf("the same state again: %q", problem)
+	}
+
+	// A sign-in to reconnect a pail comes back to that pail's page, whether
+	// it worked or not, and what it made becomes the pail's connection.
+	startFor := func(pail string) *httptest.ResponseRecorder {
+		return f.api("POST", "/api/v1/git/forgejo/oauth", []byte(`{"pail": "`+pail+`"}`))
+	}
+	f.deploy("recipes", tarGz(t, map[string]string{"index.html": "recipes"}))
+	f.svc.Wait()
+	wantBody(t, startFor("nope"), http.StatusNotFound, "No pail called nope")
+	wantBody(t, startFor("recipes"), http.StatusConflict, "doesn’t deploy from a git host")
+	if err := f.svc.SetGit(context.Background(), "recipes", &pails.GitSource{Host: "gitea", Repo: "homelab/recipes", Branch: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	wantBody(t, startFor("recipes"), http.StatusConflict, "deploys from Gitea, not Forgejo")
+	if err := f.svc.SetGit(context.Background(), "recipes", &pails.GitSource{Host: "forgejo", Repo: "homelab/recipes", Branch: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	backAtPail := func(rec *httptest.ResponseRecorder) url.Values {
+		t.Helper()
+		to, _ := url.Parse(rec.Header().Get("Location"))
+		if rec.Code != http.StatusSeeOther || to.Path != "/pails/recipes" || to.Query().Has("source") {
+			t.Fatalf("callback: %d, to %s", rec.Code, to)
+		}
+		return to.Query()
+	}
+	stateFor := func() string {
+		t.Helper()
+		var out struct{ URL string }
+		json.Unmarshal(startFor("recipes").Body.Bytes(), &out)
+		to, _ := url.Parse(out.URL)
+		if to.Query().Get("state") == "" {
+			t.Fatalf("sign-in address for a pail: %s", out.URL)
+		}
+		return to.Query().Get("state")
+	}
+	if q := backAtPail(callback("code=wrong&state=" + stateFor())); !strings.Contains(q.Get("error"), "couldn’t finish signing in") || q.Has("connection") {
+		t.Errorf("bad code, reconnecting: %v", q)
+	}
+	q = backAtPail(callback("code=the-code&state=" + stateFor()))
+	if q.Get("error") != "" || q.Get("connection") == "" {
+		t.Fatalf("sign-in to reconnect: %v", q)
+	}
+	wantBody(t, f.api("PUT", "/api/v1/pails/recipes/connection", []byte(`{"connection": "`+q.Get("connection")+`"}`)), 200, `"via":"oauth"`)
+	if stored, _ := store.Read(context.Background(), "git/pails/recipes.json"); !strings.Contains(string(stored), "signed-in-token") {
+		t.Errorf("the pail's stored connection after signing in: %s", stored)
 	}
 }
 

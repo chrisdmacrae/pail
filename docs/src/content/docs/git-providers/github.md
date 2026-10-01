@@ -19,7 +19,7 @@ next:
 
 > **A classic token works too.** Give it the `repo` scope. It reaches every repo you can, so a fine-grained token is the tighter choice.
 
-> **Fine-grained tokens expire.** When one does, make another and connect GitHub again from New pail. Or set up signing in, which Pail renews by itself.
+> **Fine-grained tokens expire.** A pail keeps the token it was made with, and can’t pull once that token has expired. When it does, make another and press **Reconnect** on the pail’s page; see [Reconnect a pail](/git-providers/#reconnect-a-pail). Or set up signing in, which Pail renews by itself.
 
 Then, in Pail, open **New pail**, pick **GitHub**, paste the token and press **Connect**.
 
@@ -50,6 +50,8 @@ PAIL_OAUTH_GITHUB_CLIENT_SECRET=your-client-secret
 ```
 
 When you sign in, Pail asks GitHub for the `repo` scope: reading your repos and adding webhooks to them.
+
+> **GitHub keeps ten sign-ins per person for an app.** Each pail signs in for itself, and an eleventh sign-in ends the oldest, whose pail then can’t pull until it is reconnected. With more than ten pails from GitHub, connect some of them with tokens.
 
 More from GitHub: [GitHub: creating an OAuth app](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app).
 

@@ -1,9 +1,12 @@
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ApiError,
   connectGit,
   createFromRepo,
   type Detection,
   detectRepo,
+  dropConnection,
+  type GitConnection,
   type GitHost,
   listRepos,
   type Repo,
@@ -29,17 +32,61 @@ const cleanDir = (dir: string) =>
     .replace(/^(\.?\/)+/, '')
     .replace(/\/+$/, '');
 
-// FromGit is New pail from a git host: connect it with a token if it isn't
-// yet, then pick a repo.
-export function FromGit(props: { git: GitHost; host: string; problem?: string; onConnected: () => void }) {
-  return props.git.connected ? (
-    <PickRepo git={props.git} host={props.host} />
+// A connection waits a while for its pail, then Pail forgets it.
+const lost = (err: unknown) => err instanceof ApiError && err.code === 'not_connected';
+
+// FromGit is New pail from a git host: connect to it, by signing in or with
+// a token, then pick a repo. The connection is for this pail alone.
+export function FromGit(props: {
+  git: GitHost;
+  host: string;
+  problem?: string;
+  connection: GitConnection | null;
+  onConnection: (conn: GitConnection | null) => void;
+}) {
+  const [ranOut, setRanOut] = useState(false);
+  return props.connection ? (
+    <PickRepo
+      git={props.git}
+      conn={props.connection}
+      host={props.host}
+      onLost={() => {
+        setRanOut(true);
+        props.onConnection(null);
+      }}
+      onChange={() => {
+        setRanOut(false);
+        props.onConnection(null);
+      }}
+    />
   ) : (
-    <Connect git={props.git} problem={props.problem} onConnected={props.onConnected} />
+    <Connect
+      git={props.git}
+      problem={ranOut ? `Pail no longer has that connection to ${props.git.label}. Connect again.` : props.problem}
+      onConnected={props.onConnection}
+    />
   );
 }
 
-function Connect({ git, problem, onConnected }: { git: GitHost; problem?: string; onConnected: () => void }) {
+// Connect makes a connection to a git host, by signing in or with a token.
+// It is for the pail about to be made or, with pail, for that pail in place
+// of the connection it has.
+export function Connect({
+  git,
+  pail,
+  title,
+  intro,
+  problem,
+  onConnected,
+}: {
+  git: GitHost;
+  pail?: string;
+  title?: string;
+  intro?: string;
+  problem?: string;
+  // What is thrown here shows under the token, like a token the host refused.
+  onConnected: (conn: GitConnection) => void | Promise<void>;
+}) {
   const [server, setServer] = useState(git.default_server);
   const [token, setToken] = useState('');
   const [error, setError] = useState('');
@@ -52,8 +99,7 @@ function Connect({ git, problem, onConnected }: { git: GitHost; problem?: string
     setError('');
     setBusy(true);
     try {
-      await connectGit(git.kind, token, git.self_hostable ? server : undefined);
-      onConnected();
+      await onConnected(await connectGit(git.kind, token, git.self_hostable ? server : undefined));
     } catch (err) {
       setError(message(err));
       setBusy(false);
@@ -64,8 +110,8 @@ function Connect({ git, problem, onConnected }: { git: GitHost; problem?: string
     setSignInError('');
     setBusy(true);
     try {
-      // Off to the git host; it sends the browser back to New pail.
-      window.location.assign(await startSignIn(git.kind));
+      // Off to the git host; it sends the browser back to where this is.
+      window.location.assign(await startSignIn(git.kind, pail));
     } catch (err) {
       setSignInError(message(err));
       setBusy(false);
@@ -76,7 +122,12 @@ function Connect({ git, problem, onConnected }: { git: GitHost; problem?: string
 
   return (
     <section className="pl-stack" style={{ gap: 16, maxWidth: 560 }}>
-      <h2 className="pl-h2">Connect {git.label}</h2>
+      <h2 className="pl-h2">{title ?? `Connect ${git.label}`}</h2>
+      {intro && (
+        <p className="pl-muted" style={{ margin: 0 }}>
+          {intro}
+        </p>
+      )}
       {signInError && (
         <div className="pl-note pl-note-failed" role="alert">
           {signInError}
@@ -110,7 +161,7 @@ function Connect({ git, problem, onConnected }: { git: GitHost; problem?: string
           placeholder="paste it here"
           value={token}
           error={error || undefined}
-          hint="Needs read access to your repos and permission to add a webhook, so pushes deploy."
+          hint="Needs read access to the repo and permission to add a webhook, so pushes deploy. Pail keeps it for this pail only."
           onChange={(e) => {
             setToken(e.target.value);
             setError('');
@@ -134,7 +185,21 @@ function Connect({ git, problem, onConnected }: { git: GitHost; problem?: string
   );
 }
 
-function PickRepo({ git, host }: { git: GitHost; host: string }) {
+function PickRepo({
+  git,
+  conn,
+  host,
+  onLost,
+  onChange,
+}: {
+  git: GitHost;
+  conn: GitConnection;
+  host: string;
+  // The connection ran out before its pail was made.
+  onLost: () => void;
+  // The person wants to connect another way.
+  onChange: () => void;
+}) {
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [found, setFound] = useState<Record<string, Detection>>({});
   const [picked, setPicked] = useState<Repo | null>(null);
@@ -150,17 +215,19 @@ function PickRepo({ git, host }: { git: GitHost; host: string }) {
   const [page, setPage] = useState(0);
   // Repos already looked inside, or being looked at, so none is asked twice.
   const asked = useRef(new Set<string>());
+  const whenLost = useRef(onLost);
+  whenLost.current = onLost;
 
   useEffect(() => {
     let live = true;
-    listRepos(git.kind).then(
+    listRepos(conn).then(
       (list) => live && setRepos(list),
-      (err) => live && setError(message(err)),
+      (err) => live && (lost(err) ? whenLost.current() : setError(message(err))),
     );
     return () => {
       live = false;
     };
-  }, [git.kind]);
+  }, [conn]);
 
   const pages = Math.max(1, Math.ceil((repos?.length ?? 0) / PER_PAGE));
   const shown = useMemo(() => (repos ?? []).slice(page * PER_PAGE, (page + 1) * PER_PAGE), [repos, page]);
@@ -173,7 +240,7 @@ function PickRepo({ git, host }: { git: GitHost; host: string }) {
     const look = async () => {
       for (let repo = queue.shift(); repo; repo = queue.shift()) {
         const full = repo.full;
-        const result = await detectRepo(git.kind, full, repo.branch).catch(
+        const result = await detectRepo(conn, full, repo.branch).catch(
           (): Detection => ({ deployable: false, summary: 'Pail couldn’t look inside this repo' }),
         );
         if (live) setFound((prev) => ({ ...prev, [full]: result }));
@@ -185,7 +252,7 @@ function PickRepo({ git, host }: { git: GitHost; host: string }) {
     return () => {
       live = false;
     };
-  }, [git.kind, shown]);
+  }, [conn, shown]);
 
   const folder = cleanDir(dir);
   const folderKey = picked && folder ? `${picked.full}:${folder}` : '';
@@ -195,7 +262,7 @@ function PickRepo({ git, host }: { git: GitHost; host: string }) {
     if (!picked || !folder) return;
     let live = true;
     const timer = setTimeout(async () => {
-      const result = await detectRepo(git.kind, picked.full, picked.branch, folder).catch(
+      const result = await detectRepo(conn, picked.full, picked.branch, folder).catch(
         (): Detection => ({ deployable: false, summary: 'Pail couldn’t look inside this folder' }),
       );
       if (live) setInFolder({ key: `${picked.full}:${folder}`, found: result });
@@ -204,7 +271,7 @@ function PickRepo({ git, host }: { git: GitHost; host: string }) {
       live = false;
       clearTimeout(timer);
     };
-  }, [git.kind, picked, folder]);
+  }, [conn, picked, folder]);
 
   // What Pail found where this pail would come from: undefined while it looks.
   const detected = !picked
@@ -233,13 +300,19 @@ function PickRepo({ git, host }: { git: GitHost; host: string }) {
     setError('');
     setBusy(true);
     try {
-      const made = await createFromRepo(name, git.kind, picked.full, picked.branch, folder);
+      const made = await createFromRepo(name, conn, picked.full, picked.branch, folder);
       // If the webhook couldn't be added, the pail's page says so.
       navigate(pailPath(name), made.hook_note ? { notice: made.hook_note } : undefined);
     } catch (err) {
+      if (lost(err)) return onLost();
       setError(message(err));
       setBusy(false);
     }
+  };
+
+  const change = () => {
+    dropConnection(conn).catch(() => {});
+    onChange();
   };
 
   const nameError = name && !validName(name) ? 'Use lowercase letters, numbers and dashes, like my-site.' : undefined;
@@ -250,9 +323,12 @@ function PickRepo({ git, host }: { git: GitHost; host: string }) {
         style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}
       >
         <h2 className="pl-h2">Pick a repo on {git.label}</h2>
-        <span className="pl-small">
-          {git.via === 'oauth' ? 'Signed in' : 'Connected with a token'}
-          {git.account ? ` as ${git.account}` : ''}
+        <span className="pl-small" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {conn.via === 'oauth' ? 'Signed in' : 'Connected with a token'}
+          {conn.account ? ` as ${conn.account}` : ''}, for this pail only
+          <Button size="sm" variant="quiet" disabled={busy} onClick={change}>
+            Change
+          </Button>
         </span>
       </div>
 

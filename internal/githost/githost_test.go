@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chrisdmacrae/pail/internal/storage"
 )
@@ -394,36 +395,99 @@ func TestConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := conns.Client(ctx, Forgejo); err != ErrNotConnected {
+	if _, err := conns.Client(ctx, "recipes", Forgejo); err != ErrNotConnected {
 		t.Errorf("before connecting: %v", err)
 	}
-	if _, err := conns.Connect(ctx, Forgejo, "", "fj-x"); err == nil || !strings.Contains(err.Error(), "server") {
+	if _, _, err := conns.Connect(ctx, Forgejo, "", "fj-x"); err == nil || !strings.Contains(err.Error(), "server") {
 		t.Errorf("Forgejo with no server: %v", err)
 	}
-	if _, err := conns.Connect(ctx, Forgejo, ts.URL+"/", "wrong"); err != ErrUnauthorized {
+	if _, _, err := conns.Connect(ctx, Forgejo, ts.URL+"/", "wrong"); err != ErrUnauthorized {
 		t.Errorf("a token the host rejects: %v", err)
 	}
-	if _, ok := conns.Get(Forgejo); ok {
-		t.Error("a rejected token was kept")
-	}
-	conn, err := conns.Connect(ctx, Forgejo, ts.URL+"/", " fj-x\n")
-	if err != nil || conn.Account != "chris" || conn.Server != ts.URL {
-		t.Fatalf("Connect: %+v, %v", conn, err)
+	id, conn, err := conns.Connect(ctx, Forgejo, ts.URL+"/", " fj-x\n")
+	if err != nil || id == "" || conn.Account != "chris" || conn.Server != ts.URL {
+		t.Fatalf("Connect: %q, %+v, %v", id, conn, err)
 	}
 
-	// Connections are kept: a restart still has them.
+	// The connection waits for its pail: no pail has it, and nothing is stored.
+	if got, ok := conns.Waiting(Forgejo, id); !ok || got != conn {
+		t.Errorf("the waiting connection: %+v, %v", got, ok)
+	}
+	if _, ok := conns.Waiting(GitHub, id); ok {
+		t.Error("a Forgejo connection answered as a GitHub one")
+	}
+	if _, err := conns.WaitingClient(ctx, Forgejo, id); err != nil {
+		t.Errorf("a client for the waiting connection: %v", err)
+	}
+	if _, err := conns.WaitingClient(ctx, Forgejo, "made-up"); err != ErrNotConnected {
+		t.Errorf("a client for an id nobody was given: %v", err)
+	}
+	if _, err := conns.Client(ctx, "recipes", Forgejo); err != ErrNotConnected {
+		t.Errorf("a pail before it is given the connection: %v", err)
+	}
+	if keys, _ := store.List(ctx, "git/"); len(keys) != 0 {
+		t.Errorf("a waiting connection was stored: %v", keys)
+	}
+
+	// Given to a pail, it is that pail's alone, and waits for no other.
+	if err := conns.Give(ctx, id, "recipes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conns.Client(ctx, "recipes", Forgejo); err != nil {
+		t.Errorf("the pail it was given to: %v", err)
+	}
+	if _, err := conns.Client(ctx, "garden", Forgejo); err != ErrNotConnected {
+		t.Errorf("another pail: %v", err)
+	}
+	if _, ok := conns.Waiting(Forgejo, id); ok {
+		t.Error("a connection given to a pail still waits for one")
+	}
+	if err := conns.Give(ctx, id, "garden"); err != ErrNotConnected {
+		t.Errorf("giving it a second time: %v", err)
+	}
+
+	// A connection nobody makes a pail with is forgotten.
+	dropped, _, _ := conns.Connect(ctx, Forgejo, ts.URL, "fj-x")
+	conns.Drop(dropped)
+	late, _, _ := conns.Connect(ctx, Forgejo, ts.URL, "fj-x")
+	conns.waiting[late] = waiting{conn: conn, since: time.Now().Add(-2 * waitWindow)}
+	for _, gone := range []string{dropped, late} {
+		if _, ok := conns.Waiting(Forgejo, gone); ok {
+			t.Errorf("connection %s still waits", gone)
+		}
+	}
+
+	// A pail's connection is kept: a restart still has it.
 	again, err := LoadConnections(ctx, store, ts.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := again.Get(Forgejo); !ok || got != conn {
+	if got, ok := again.get(slot{pail: "recipes"}); !ok || got != conn {
 		t.Errorf("after a restart: %+v", got)
 	}
-	if err := again.Disconnect(ctx, Forgejo); err != nil {
+	if err := again.Forget(ctx, "recipes"); err != nil {
 		t.Fatal(err)
 	}
 	if keys, _ := store.List(ctx, "git/"); len(keys) != 0 {
-		t.Errorf("disconnecting left %v", keys)
+		t.Errorf("forgetting left %v", keys)
+	}
+
+	// A pail made when every pail of a host shared one connection has none
+	// of its own, and still pulls with that one.
+	b, _ := json.Marshal(conn)
+	store.Put(ctx, "git/forgejo.json", bytes.NewReader(b), int64(len(b)), "application/json")
+	old, err := LoadConnections(ctx, store, ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Client(ctx, "from-before", Forgejo); err != nil {
+		t.Errorf("a pail from before: %v", err)
+	}
+	if _, err := old.Client(ctx, "from-before", GitHub); err != ErrNotConnected {
+		t.Errorf("a pail from before, on another host: %v", err)
+	}
+	if _, ok := old.Waiting(Forgejo, ""); ok {
+		t.Error("the shared connection is offered to new pails")
 	}
 }
 
@@ -495,19 +559,16 @@ func TestOAuth(t *testing.T) {
 			conns, _ := LoadConnections(ctx, store, ts.Client())
 			conns.BaseURLs = map[Kind]string{Bitbucket: ts.URL}
 
-			if _, err := conns.ConnectOAuth(ctx, kind, "the-code", redirect); err != ErrNoOAuth {
+			if _, _, err := conns.ConnectOAuth(ctx, kind, "the-code", redirect); err != ErrNoOAuth {
 				t.Fatalf("with no app set up: %v", err)
 			}
 			conns.Apps = map[Kind]App{kind: {ClientID: "app-id", ClientSecret: "app-secret", Server: ts.URL}}
 
-			if _, err := conns.ConnectOAuth(ctx, kind, "a-stale-code", redirect); err == nil || !strings.Contains(err.Error(), "incorrect or expired") {
-				t.Errorf("a bad code: %v", err)
-			}
-			if _, ok := conns.Get(kind); ok {
-				t.Fatal("a failed sign-in left a connection")
+			if id, _, err := conns.ConnectOAuth(ctx, kind, "a-stale-code", redirect); err == nil || id != "" || !strings.Contains(err.Error(), "incorrect or expired") {
+				t.Errorf("a bad code: %q, %v", id, err)
 			}
 
-			conn, err := conns.ConnectOAuth(ctx, kind, "the-code", redirect)
+			id, conn, err := conns.ConnectOAuth(ctx, kind, "the-code", redirect)
 			if err != nil || !conn.OAuth || conn.Token != "access-1" || conn.Refresh != "refresh-1" || conn.Account != "chris" || conn.Expires.IsZero() {
 				t.Fatalf("ConnectOAuth: %+v, %v", conn, err)
 			}
@@ -516,25 +577,35 @@ func TestOAuth(t *testing.T) {
 			}
 
 			// The token lasts 30 seconds here, so it is already due: the next
-			// use renews it, and the renewal is kept.
-			client, err := conns.Client(ctx, kind)
+			// use renews it, while it waits for its pail as much as after.
+			waiting, err := conns.WaitingClient(ctx, kind, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if who, err := waiting.Account(ctx); err != nil || who != "chris" || host.issued != 2 {
+				t.Errorf("renewing a waiting sign-in: %q, %v, %d tokens issued", who, err, host.issued)
+			}
+			if err := conns.Give(ctx, id, "recipes"); err != nil {
+				t.Fatal(err)
+			}
+			client, err := conns.Client(ctx, "recipes", kind)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if who, err := client.Account(ctx); err != nil || who != "chris" {
 				t.Errorf("after renewing: %q, %v", who, err)
 			}
-			if host.issued != 2 {
-				t.Errorf("tokens issued: %d, want the first and one renewal", host.issued)
+			if host.issued != 3 {
+				t.Errorf("tokens issued: %d, want the first and a renewal each time", host.issued)
 			}
 			again, _ := LoadConnections(ctx, store, ts.Client())
-			if got, _ := again.Get(kind); got.Token != "access-2" || got.Refresh != "refresh-2" {
+			if got, _ := again.get(slot{pail: "recipes"}); got.Token != "access-3" || got.Refresh != "refresh-3" {
 				t.Errorf("the renewed token wasn't kept: %+v", got)
 			}
 
-			// A sign-in that can't be renewed says to sign in again.
+			// A sign-in that can't be renewed says so.
 			host.issued = 9
-			if _, err := conns.Client(ctx, kind); !errors.Is(err, ErrUnauthorized) || !strings.Contains(err.Error(), "Sign in again") {
+			if _, err := conns.Client(ctx, "recipes", kind); !errors.Is(err, ErrUnauthorized) || !strings.Contains(err.Error(), "has run out") {
 				t.Errorf("a refresh token the host no longer takes: %v", err)
 			}
 		})

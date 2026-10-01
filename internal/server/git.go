@@ -25,14 +25,29 @@ type apiGitHost struct {
 	// SelfHostable says connecting asks for the server's address.
 	SelfHostable  bool   `json:"self_hostable"`
 	DefaultServer string `json:"default_server"`
-	Connected     bool   `json:"connected"`
-	Server        string `json:"server,omitempty"`
-	Account       string `json:"account,omitempty"`
 	// OAuth says "Sign in with ..." is available: the server has an OAuth
 	// app set up for this host.
 	OAuth bool `json:"oauth"`
-	// Via is how the host was connected: "token" or "oauth".
-	Via string `json:"via,omitempty"`
+}
+
+// apiGitConnection is a connection to a git host: one waiting for its pail
+// under an id, or one a pail was just given, which has no id any more. It
+// never carries the token: the id stands for it.
+type apiGitConnection struct {
+	ID      string       `json:"id,omitempty"`
+	Kind    githost.Kind `json:"kind"`
+	Server  string       `json:"server,omitempty"`
+	Account string       `json:"account,omitempty"`
+	// Via is how it was made: "token" or "oauth".
+	Via string `json:"via"`
+}
+
+func gitConnection(id string, conn githost.Connection) apiGitConnection {
+	c := apiGitConnection{ID: id, Kind: conn.Kind, Server: conn.Server, Account: conn.Account, Via: "token"}
+	if conn.OAuth {
+		c.Via = "oauth"
+	}
+	return c
 }
 
 func (s *Server) gitHost(kind githost.Kind) apiGitHost {
@@ -42,12 +57,6 @@ func (s *Server) gitHost(kind githost.Kind) apiGitHost {
 	}
 	if _, err := s.git.App(kind); err == nil {
 		h.OAuth = true
-	}
-	if conn, ok := s.git.Get(kind); ok {
-		h.Connected, h.Server, h.Account, h.Via = true, conn.Server, conn.Account, "token"
-		if conn.OAuth {
-			h.Via = "oauth"
-		}
 	}
 	return h
 }
@@ -71,8 +80,9 @@ func (s *Server) handleListGit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts})
 }
 
-// handleConnectGit connects a git host: {"token": "...", "server": "..."}.
-// The token is checked with the host before it is kept.
+// handleConnectGit connects a git host for the pail about to be made:
+// {"token": "...", "server": "..."}. The token is checked with the host, then
+// held under the id this answers with until a pail is made with it.
 func (s *Server) handleConnectGit(w http.ResponseWriter, r *http.Request) {
 	kind, ok := s.gitKind(w, r)
 	if !ok {
@@ -86,11 +96,38 @@ func (s *Server) handleConnectGit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "Paste an access token to connect "+kind.Label()+".")
 		return
 	}
-	if _, err := s.git.Connect(r.Context(), kind, body.Server, body.Token); err != nil {
+	id, conn, err := s.git.Connect(r.Context(), kind, body.Server, body.Token)
+	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.gitHost(kind))
+	writeJSON(w, http.StatusOK, gitConnection(id, conn))
+}
+
+// handleGetConnection describes a connection that is waiting for its pail.
+func (s *Server) handleGetConnection(w http.ResponseWriter, r *http.Request) {
+	kind, ok := s.gitKind(w, r)
+	if !ok {
+		return
+	}
+	conn, ok := s.git.Waiting(kind, r.PathValue("id"))
+	if !ok {
+		s.writeGitError(w, r, kind, githost.ErrNotConnected)
+		return
+	}
+	writeJSON(w, http.StatusOK, gitConnection(r.PathValue("id"), conn))
+}
+
+// handleDropConnection forgets a connection that is waiting for its pail.
+func (s *Server) handleDropConnection(w http.ResponseWriter, r *http.Request) {
+	kind, ok := s.gitKind(w, r)
+	if !ok {
+		return
+	}
+	if _, ok := s.git.Waiting(kind, r.PathValue("id")); ok {
+		s.git.Drop(r.PathValue("id"))
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // A sign-in waits this long for the person to come back from the git host.
@@ -101,16 +138,37 @@ type signIn struct {
 	kind        githost.Kind
 	redirectURI string
 	started     time.Time
+	// pail is the pail the sign-in is to reconnect, or "" when it is for a
+	// pail about to be made.
+	pail string
 }
 
 // handleStartOAuth begins signing in to a git host. It answers with the
 // host's address to send the browser to. The state it puts in that address
 // is how the callback, which carries no Pail token, is known to be the end
-// of a sign-in someone with the token began.
+// of a sign-in someone with the token began. With {"pail": "recipes"} the
+// sign-in is to reconnect that pail, and comes back to its page rather than
+// to New pail.
 func (s *Server) handleStartOAuth(w http.ResponseWriter, r *http.Request) {
 	kind, ok := s.gitKind(w, r)
 	if !ok {
 		return
+	}
+	var body struct {
+		Pail string `json:"pail"`
+	}
+	// No body at all is a sign-in for a new pail.
+	json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body)
+	if body.Pail != "" {
+		r.SetPathValue("name", body.Pail)
+		git, ok := s.pailGit(w, r)
+		if !ok {
+			return
+		}
+		if git.Host != string(kind) {
+			writeError(w, http.StatusConflict, "other_git_host", body.Pail+" deploys from "+githost.Kind(git.Host).Label()+", not "+kind.Label()+". Sign in there to reconnect it.")
+			return
+		}
 	}
 	app, err := s.git.App(kind)
 	if err != nil {
@@ -118,7 +176,7 @@ func (s *Server) handleStartOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := randomID()
-	in := signIn{kind: kind, redirectURI: origin(r, hostname(r.Host)) + "/oauth/callback/" + string(kind), started: time.Now()}
+	in := signIn{kind: kind, redirectURI: origin(r, hostname(r.Host)) + "/oauth/callback/" + string(kind), started: time.Now(), pail: body.Pail}
 	s.signInsMu.Lock()
 	for old, v := range s.signIns {
 		if time.Since(v.started) > signInWindow {
@@ -131,23 +189,25 @@ func (s *Server) handleStartOAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOAuthCallback is where a git host sends the browser back after a
-// sign-in. Whatever happens, the person lands on New pail, with the host
-// selected and anything that went wrong said there.
+// sign-in. Whatever happens, the person lands where the sign-in began, with
+// either the connection it made or what went wrong: on the page of the pail
+// it is to reconnect, or else on New pail with the host selected.
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	kind := githost.Kind(r.PathValue("kind"))
-	back := func(problem string) {
-		q := url.Values{"source": {string(kind)}}
-		if problem != "" {
-			q.Set("error", problem)
-		}
-		http.Redirect(w, r, "/new?"+q.Encode(), http.StatusSeeOther)
-	}
-
 	state := r.URL.Query().Get("state")
 	s.signInsMu.Lock()
 	in, ok := s.signIns[state]
 	delete(s.signIns, state) // a state is good once
 	s.signInsMu.Unlock()
+
+	arrive := func(with, value string) {
+		to, q := "/new", url.Values{"source": {string(kind)}, with: {value}}
+		if in.pail != "" {
+			to, q = "/pails/"+url.PathEscape(in.pail), url.Values{with: {value}}
+		}
+		http.Redirect(w, r, to+"?"+q.Encode(), http.StatusSeeOther)
+	}
+	back := func(problem string) { arrive("error", problem) }
 	switch {
 	case !ok || in.kind != kind || time.Since(in.started) > signInWindow:
 		back("That sign-in didn’t start here, or took too long. Try again.")
@@ -156,24 +216,13 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		back(kind.Label() + " didn’t sign you in: " + cmp.Or(r.URL.Query().Get("error_description"), r.URL.Query().Get("error")) + ".")
 		return
 	}
-	if _, err := s.git.ConnectOAuth(r.Context(), kind, r.URL.Query().Get("code"), in.redirectURI); err != nil {
+	id, _, err := s.git.ConnectOAuth(r.Context(), kind, r.URL.Query().Get("code"), in.redirectURI)
+	if err != nil {
 		s.log.Error("oauth sign-in", "host", kind, "err", err)
 		back("Pail couldn’t finish signing in to " + kind.Label() + ": " + err.Error() + ".")
 		return
 	}
-	back("")
-}
-
-func (s *Server) handleDisconnectGit(w http.ResponseWriter, r *http.Request) {
-	kind, ok := s.gitKind(w, r)
-	if !ok {
-		return
-	}
-	if err := s.git.Disconnect(r.Context(), kind); err != nil {
-		s.writeGitError(w, r, kind, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	arrive("connection", id)
 }
 
 func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +230,7 @@ func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	client, err := s.git.Client(r.Context(), kind)
+	client, err := s.git.WaitingClient(r.Context(), kind, r.URL.Query().Get("connection"))
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
@@ -208,8 +257,9 @@ func repoDir(w http.ResponseWriter, dir string) (string, bool) {
 	return clean, true
 }
 
-// handleDetectRepo says what Pail makes of a repo: ?repo=owner/name&branch=main.
-// With &dir=apps/web it looks in that folder rather than at the top.
+// handleDetectRepo says what Pail makes of a repo, as the connection in
+// ?connection= sees it: ?repo=owner/name&branch=main. With &dir=apps/web it
+// looks in that folder rather than at the top.
 func (s *Server) handleDetectRepo(w http.ResponseWriter, r *http.Request) {
 	kind, ok := s.gitKind(w, r)
 	if !ok {
@@ -224,7 +274,7 @@ func (s *Server) handleDetectRepo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	client, err := s.git.Client(r.Context(), kind)
+	client, err := s.git.WaitingClient(r.Context(), kind, r.URL.Query().Get("connection"))
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
@@ -244,12 +294,14 @@ func (s *Server) canBuild() bool {
 }
 
 // deployFromGit fetches a pail's branch from its git host and starts a
-// deploy of it, the same way an upload would.
-func (s *Server) deployFromGit(ctx context.Context, r *http.Request, name string, git pails.GitSource, label string) (pails.Deploy, error) {
-	kind := githost.Kind(git.Host)
-	client, err := s.git.Client(ctx, kind)
-	if err != nil {
-		return pails.Deploy{}, err
+// deploy of it, the same way an upload would. It pulls with client, or with
+// the pail's own connection when client is nil.
+func (s *Server) deployFromGit(ctx context.Context, r *http.Request, client githost.Client, name string, git pails.GitSource, label string) (pails.Deploy, error) {
+	if client == nil {
+		var err error
+		if client, err = s.git.Client(ctx, name, githost.Kind(git.Host)); err != nil {
+			return pails.Deploy{}, err
+		}
 	}
 	tmp, err := os.CreateTemp("", "pail-git-*")
 	if err != nil {
@@ -267,10 +319,12 @@ func (s *Server) deployFromGit(ctx context.Context, r *http.Request, name string
 }
 
 // handleCreateFromRepo makes a new pail from a repo:
-// {"host": "forgejo", "repo": "homelab/recipes", "branch": "main"}. It
-// deploys the branch as it stands, then asks the host to say when the branch
-// is pushed to, so every push is a deploy. With "dir": "apps/web" the pail is
-// that folder of the repo, which lets one repo hold several pails.
+// {"host": "forgejo", "connection": "...", "repo": "homelab/recipes",
+// "branch": "main"}. It deploys the branch as it stands, then asks the host
+// to say when the branch is pushed to, so every push is a deploy. With
+// "dir": "apps/web" the pail is that folder of the repo, which lets one repo
+// hold several pails. The connection becomes the pail's own: the next pail
+// is made with another.
 func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !pails.ValidName(name) {
@@ -278,13 +332,14 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Host   githost.Kind `json:"host"`
-		Repo   string       `json:"repo"`
-		Branch string       `json:"branch"`
-		Dir    string       `json:"dir"`
+		Host       githost.Kind `json:"host"`
+		Connection string       `json:"connection"`
+		Repo       string       `json:"repo"`
+		Branch     string       `json:"branch"`
+		Dir        string       `json:"dir"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || !body.Host.Valid() || body.Repo == "" || body.Branch == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", `Say which repo to deploy: {"host": "github", "repo": "owner/name", "branch": "main"}.`)
+		writeError(w, http.StatusBadRequest, "bad_request", `Say which repo to deploy: {"host": "github", "connection": "...", "repo": "owner/name", "branch": "main"}.`)
 		return
 	}
 	kind := body.Host
@@ -296,7 +351,7 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "name_taken", name+" is already a pail. Pick another name.")
 		return
 	}
-	client, err := s.git.Client(r.Context(), kind)
+	client, err := s.git.WaitingClient(r.Context(), kind, body.Connection)
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
@@ -316,14 +371,19 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 	if dir != "" {
 		from += ":" + dir
 	}
-	d, err := s.deployFromGit(r.Context(), r, name, git, "first deploy from "+from)
+	d, err := s.deployFromGit(r.Context(), r, client, name, git, "first deploy from "+from)
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
 	}
+	// The pail exists now, and the connection is its own from here on.
+	if err := s.git.Give(r.Context(), body.Connection, name); err != nil {
+		s.writeGitError(w, r, kind, err)
+		return
+	}
 
-	// The pail exists now. A webhook that can't be added doesn't undo it:
-	// the pail works, and Redeploy pulls the branch by hand.
+	// A webhook that can't be added doesn't undo the pail: it works, and
+	// Redeploy pulls the branch by hand.
 	hookURL := origin(r, s.cfg.BaseDomain) + "/api/v1/hooks/" + name
 	hookNote := ""
 	if git.HookID, err = client.AddHook(r.Context(), git.Repo, hookURL, git.HookSecret, s.TLSMode() != "internal"); err != nil {
@@ -340,6 +400,69 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 		Hook     bool   `json:"hook"`
 		HookNote string `json:"hook_note,omitempty"`
 	}{s.deployJSON(r, name, d, ""), hookNote == "", hookNote})
+}
+
+// pailGit reads the repo the pail in the path deploys from, answering itself
+// for a pail that isn't there or doesn't come from a git host.
+func (s *Server) pailGit(w http.ResponseWriter, r *http.Request) (*pails.GitSource, bool) {
+	name := r.PathValue("name")
+	git, err := s.pails.Git(name)
+	switch {
+	case err != nil:
+		s.writePailError(w, r, err)
+		return nil, false
+	case git == nil:
+		writeError(w, http.StatusConflict, "not_from_git", name+" doesn’t deploy from a git host, so it has no connection to one.")
+		return nil, false
+	}
+	return git, true
+}
+
+// handleReconnect gives a pail from a git host a new connection, for when
+// the one it was made with has run out or been revoked:
+// {"connection": "..."}. The connection is made the way New pail makes one,
+// to the same kind of host, and has to reach the pail's repo. It takes the
+// place of the pail's old one, and can't be used again.
+func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	git, ok := s.pailGit(w, r)
+	if !ok {
+		return
+	}
+	kind := githost.Kind(git.Host)
+	var body struct {
+		Connection string `json:"connection"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || body.Connection == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", `Say which connection to give the pail: {"connection": "<id>"}.`)
+		return
+	}
+	conn, ok := s.git.Waiting(kind, body.Connection)
+	if !ok {
+		writeError(w, http.StatusConflict, "not_connected", "Pail has no connection to "+kind.Label()+" waiting under that id. Connect again, by signing in or with an access token.")
+		return
+	}
+	client, err := s.git.WaitingClient(r.Context(), kind, body.Connection)
+	if err != nil {
+		s.writeGitError(w, r, kind, err)
+		return
+	}
+	// A deploy pulls the branch as an archive, so that is what the new
+	// connection has to manage. One past the size limit was still seen.
+	err = client.Archive(r.Context(), git.Repo, git.Branch, io.Discard, s.cfg.MaxUploadSize)
+	switch {
+	case errors.Is(err, githost.ErrNotFound):
+		writeError(w, http.StatusConflict, "cant_see_repo", "That connection can’t see "+git.Repo+" on "+kind.Label()+", so "+name+" couldn’t pull with it. Connect as someone who can, or with a token that reaches the repo.")
+		return
+	case err != nil && !errors.Is(err, githost.ErrTooLarge):
+		s.writeGitError(w, r, kind, err)
+		return
+	}
+	if err := s.git.Give(r.Context(), body.Connection, name); err != nil {
+		s.writeGitError(w, r, kind, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, gitConnection("", conn))
 }
 
 // handleHook receives a git host's webhook for a pail. It carries no Pail
@@ -368,11 +491,11 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	}
 	// A pail that is one folder of its repo sits out a push that changed
 	// nothing of its own.
-	if git.Dir != "" && !push.Touches(git.Dir, s.watched(r.Context(), git)) {
+	if git.Dir != "" && !push.Touches(git.Dir, s.watched(r.Context(), name, git)) {
 		writeJSON(w, http.StatusOK, map[string]any{"deployed": false, "skipped": "The push changed nothing in " + git.Dir + "."})
 		return
 	}
-	d, err := s.deployFromGit(r.Context(), r, name, *git, "push to "+git.Branch)
+	d, err := s.deployFromGit(r.Context(), r, nil, name, *git, "push to "+git.Branch)
 	if err != nil {
 		s.log.Error("deploy from webhook", "pail", name, "err", err)
 		s.writeGitError(w, r, githost.Kind(git.Host), err)
@@ -384,9 +507,9 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 // watched reads the folders and files outside its own that a pail's pail.json
 // asks to be redeployed for, as paths from the top of the repo. If they can't
 // be read, everything is watched: the pail deploys.
-func (s *Server) watched(ctx context.Context, git *pails.GitSource) []string {
+func (s *Server) watched(ctx context.Context, name string, git *pails.GitSource) []string {
 	everything := []string{""}
-	client, err := s.git.Client(ctx, githost.Kind(git.Host))
+	client, err := s.git.Client(ctx, name, githost.Kind(git.Host))
 	if err != nil {
 		return everything
 	}
@@ -403,11 +526,11 @@ func (s *Server) watched(ctx context.Context, git *pails.GitSource) []string {
 
 // removeHook takes Pail's webhook off a repo when its pail goes. It's a
 // courtesy: a hook left behind only gets a 404.
-func (s *Server) removeHook(ctx context.Context, git *pails.GitSource) {
+func (s *Server) removeHook(ctx context.Context, name string, git *pails.GitSource) {
 	if git == nil || git.HookID == "" {
 		return
 	}
-	client, err := s.git.Client(ctx, githost.Kind(git.Host))
+	client, err := s.git.Client(ctx, name, githost.Kind(git.Host))
 	if err != nil {
 		return
 	}
@@ -420,7 +543,7 @@ func (s *Server) writeGitError(w http.ResponseWriter, r *http.Request, kind gith
 	label := kind.Label()
 	switch {
 	case errors.Is(err, githost.ErrNotConnected):
-		writeError(w, http.StatusConflict, "not_connected", label+" isn’t connected. Connect it from New pail with an access token.")
+		writeError(w, http.StatusConflict, "not_connected", label+" isn’t connected. Connect it from New pail, by signing in or with an access token.")
 	case errors.Is(err, githost.ErrNoOAuth):
 		prefix := "PAIL_OAUTH_" + strings.ToUpper(string(kind))
 		writeError(w, http.StatusConflict, "no_oauth", "This Pail has no OAuth app for "+label+". Set "+prefix+"_CLIENT_ID and "+prefix+"_CLIENT_SECRET on the server, or connect with a token.")

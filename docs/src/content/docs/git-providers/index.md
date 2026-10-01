@@ -12,9 +12,9 @@ next:
 
 ## How it works
 
-Connect a git host once, and New pail lists your repos on it. Pick one and it becomes a pail.
+Connect to a git host on New pail, and it lists your repos there. Pick one and it becomes a pail.
 
-- **One connection per host.** Pail has no users, so there is one GitHub connection, one GitLab connection, and so on, shared by everything Pail does with that host.
+- **One connection per pail.** You connect each time you make a pail, and that connection is the pail’s alone. One pail can use a token that reaches a single repo, and the next a different token, a different account, or a sign-in.
 - **Pail deploys the branch as it stands.** It fetches the repo’s default branch and serves the files in it.
 - **Every push is a deploy.** Pail adds a webhook to the repo. When the branch is pushed to, the host tells Pail and Pail fetches it again.
 - **A bad push doesn’t take the site down.** Like any deploy, one that fails leaves the previous one serving.
@@ -25,7 +25,7 @@ Connect a git host once, and New pail lists your repos on it. Pick one and it be
 | --- | --- | --- |
 | What you do | Make a token at the host and paste it into Pail. | Press **Sign in with …** and approve Pail at the host. |
 | Set-up on the server | None. | An OAuth app, registered with the host once, and two variables. |
-| When it runs out | You make a new token and paste it again. | Pail renews it by itself. |
+| When it runs out | The pail can’t pull until you reconnect it with a new token. | Pail renews it by itself. |
 
 A token is the quickest way to start. Signing in is worth setting up if you’d rather not handle tokens, or your host’s tokens expire often.
 
@@ -35,7 +35,7 @@ A token is the quickest way to start. Signing in is worth setting up if you’d 
 
 2. **Open New pail and pick the host.** For GitLab, Gitea and Forgejo, Pail also asks for the server’s address. GitLab’s is filled in as `https://gitlab.com`; change it if you run your own.
 
-3. **Paste the token and press Connect.** Pail checks it with the host before keeping it. A token the host rejects is not saved.
+3. **Paste the token and press Connect.** Pail checks it with the host. A token the host rejects is not kept. One it accepts is held for up to an hour, until you make the pail, and from then on is kept with that pail and used for nothing else.
 
 4. **Pick a repo.** Under each repo, Pail says what it found inside. Pick one it can deploy, check the name, and press **Put it in the pail**. If the site is in a folder of the repo, say which in **Folder**; see More than one pail in a repo, below.
 
@@ -66,7 +66,7 @@ Signing in needs an OAuth app: a registration with the git host that says Pail m
 
 3. **Restart Pail.** New pail now shows **Sign in with …** for that host, above the token form.
 
-4. **Sign in.** Pail sends your browser to the host, you approve, and the host sends you back to New pail with your repos listed.
+4. **Sign in.** Pail sends your browser to the host, you approve, and the host sends you back to New pail with your repos listed. Like a token, a sign-in is for the pail you make with it: the next pail signs in again.
 
 > **Pail doesn’t have to be on the internet for this.** Signing in happens in your browser: it is your browser the host sends back to Pail, so a Pail that only your network can reach works. Webhooks are different; see below.
 
@@ -145,6 +145,20 @@ Pail only skips a push when the host lists every file it changed. It deploys to 
 
 Only GitHub says when a push was forced. On the others, press **Redeploy** after rewriting a branch.
 
+## Reconnect a pail
+
+A pail keeps the connection it was made with. When that token expires or is revoked, or the host ends its sign-in, the pail can’t pull: pushes stop deploying, and **Redeploy** says the host didn’t accept the token. The site keeps serving its last deploy.
+
+To give the pail a new connection:
+
+1. **Open the pail’s page and press Reconnect to …** It is under the repo and branch. If Redeploy has just been refused, the form is already open.
+
+2. **Connect as you would on New pail.** Paste a new token and press **Connect**, or press **Sign in with …**. Signing in brings you back to the pail’s page.
+
+3. **Press Redeploy** to pull the branch with the new connection.
+
+The new connection takes the place of the old one, and has to be able to see the pail’s repo. Nothing else changes: the pail keeps its name, its deploys, its hostnames and its webhook, so pushes deploy again without anything being added at the host.
+
 ## When it doesn’t work
 
 **“… didn’t accept that token.”** The token is mistyped, has expired, or can’t read your repos. Make a new one with the permissions in the host’s guide.
@@ -157,8 +171,10 @@ Only GitHub says when a push was forced. On the others, press **Redeploy** after
 
 **The host shows an error about the redirect or callback address.** The callback address registered with the host doesn’t match the one Pail sent. It has to be the address you open Pail at, followed by `/oauth/callback/` and the host’s name, exactly.
 
-**“The sign-in to … has run out. Sign in again from New pail.”** Pail renews a sign-in by itself, but the host can end one, for instance if you revoke the app. Sign in again.
+**A pail that used to deploy says “… didn’t accept that token.”** The pail’s token has expired or been revoked, or the host ended its sign-in, for instance because you revoked the app. Reconnect the pail; see Reconnect a pail, above.
+
+**“That connection can’t see …”** When reconnecting, the new token or sign-in doesn’t reach the pail’s repo. Use a token that was given that repo, or sign in as someone who can see it.
 
 **Pushes don’t deploy.** The host can’t reach Pail, or blocked the delivery. Look at the webhook’s recent deliveries in the repo’s settings at the host: it shows what happened to each one. For a pail that is a folder of its repo, a delivery answered with “The push changed nothing in …” was skipped on purpose; see Which pushes deploy which pail, above.
 
-**“… isn’t connected.”** The host was disconnected after the pail was made. Connect it again from New pail; the pail picks up where it left off.
+**“… isn’t connected.”** On New pail, the connection waited more than an hour for its pail, or Pail restarted in between. Connect again.

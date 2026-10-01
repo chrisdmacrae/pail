@@ -20,7 +20,7 @@ next:
 
 > **You need to be a Maintainer.** GitLab only lets Maintainers and Owners of a project add webhooks to it.
 
-> **GitLab’s tokens always expire.** A year at most. When one does, make another and connect GitLab again from New pail, or set up signing in.
+> **GitLab’s tokens always expire.** A year at most. A pail keeps the token it was made with, and can’t pull once that token has expired. When it does, make another and press **Reconnect** on the pail’s page; see [Reconnect a pail](/git-providers/#reconnect-a-pail). Or set up signing in, which Pail renews by itself.
 
 Then, in Pail, open **New pail**, pick **GitLab**, check the **Server** address, paste the token and press **Connect**.
 

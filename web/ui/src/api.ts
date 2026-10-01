@@ -71,21 +71,27 @@ export interface Info {
   limits: { max_upload_size: number; max_deploys: number; max_container_memory: number };
 }
 
-// GitHost is a git host a pail can come from, and whether Pail holds a token
-// for it.
+// GitHost is a git host a pail can come from.
 export interface GitHost {
   kind: string;
   label: string;
   // self_hostable hosts need their server's address to connect.
   self_hostable: boolean;
   default_server: string;
-  connected: boolean;
-  account?: string;
   // oauth says the server has an OAuth app for this host, so people can
   // sign in instead of pasting a token.
   oauth: boolean;
-  // via is how the host was connected.
-  via?: 'token' | 'oauth';
+}
+
+// GitConnection is a connection to a git host, made for one pail and no
+// other: the one about to be made, or one being reconnected. Pail holds its
+// token; the id stands for it here.
+export interface GitConnection {
+  id: string;
+  kind: string;
+  account?: string;
+  // via is how the connection was made.
+  via: 'token' | 'oauth';
 }
 
 export interface Repo {
@@ -216,21 +222,40 @@ export const removeHost = async (name: string, host: string) =>
   void (await call('DELETE', `${pailPath(name)}/hosts/${encodeURIComponent(host)}`));
 export const listGitHosts = async () => (await json<{ hosts: GitHost[] }>('GET', '/git')).hosts;
 export const connectGit = (kind: string, token: string, server?: string) =>
-  json<GitHost>('PUT', `/git/${kind}`, { token, server });
+  json<GitConnection>('PUT', `/git/${kind}`, { token, server });
+// getConnection is the connection a sign-in came back with.
+export const getConnection = (kind: string, id: string) =>
+  json<GitConnection>('GET', `/git/${kind}/connections/${encodeURIComponent(id)}`);
+export const dropConnection = async (conn: GitConnection) =>
+  void (await call('DELETE', `/git/${conn.kind}/connections/${encodeURIComponent(conn.id)}`));
 // startSignIn begins signing in to a git host and returns the host's address
-// to send the browser to. It comes back to New pail.
-export const startSignIn = async (kind: string) => (await json<{ url: string }>('POST', `/git/${kind}/oauth`)).url;
-export const listRepos = async (kind: string) => (await json<{ repos: Repo[] }>('GET', `/git/${kind}/repos`)).repos;
+// to send the browser to. It comes back to New pail or, when the sign-in is
+// to reconnect a pail, to that pail's page.
+export const startSignIn = async (kind: string, pail?: string) =>
+  (await json<{ url: string }>('POST', `/git/${kind}/oauth`, pail ? { pail } : undefined)).url;
+export const listRepos = async (conn: GitConnection) =>
+  (await json<{ repos: Repo[] }>('GET', `/git/${conn.kind}/repos?connection=${encodeURIComponent(conn.id)}`)).repos;
 // detectRepo looks at the top of a repo, or with dir, at that folder of it.
-export const detectRepo = (kind: string, repo: string, branch: string, dir = '') =>
+export const detectRepo = (conn: GitConnection, repo: string, branch: string, dir = '') =>
   json<Detection>(
     'GET',
-    `/git/${kind}/detect?repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}${dir ? `&dir=${encodeURIComponent(dir)}` : ''}`,
+    `/git/${conn.kind}/detect?connection=${encodeURIComponent(conn.id)}&repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}${dir ? `&dir=${encodeURIComponent(dir)}` : ''}`,
   );
-// createFromRepo makes a pail from a repo. hook_note says so when Pail
-// couldn't add the webhook that makes pushes deploy.
-export const createFromRepo = (name: string, host: string, repo: string, branch: string, dir = '') =>
-  json<Deploy & { hook: boolean; hook_note?: string }>('POST', `${pailPath(name)}/repo`, { host, repo, branch, dir });
+// createFromRepo makes a pail from a repo, and makes the connection that
+// pail's own. hook_note says so when Pail couldn't add the webhook that makes
+// pushes deploy.
+export const createFromRepo = (name: string, conn: GitConnection, repo: string, branch: string, dir = '') =>
+  json<Deploy & { hook: boolean; hook_note?: string }>('POST', `${pailPath(name)}/repo`, {
+    host: conn.kind,
+    connection: conn.id,
+    repo,
+    branch,
+    dir,
+  });
+// reconnectPail gives a pail from a git host a new connection, in place of
+// the one it pulls with. It answers with whose the new one is.
+export const reconnectPail = (name: string, connection: string) =>
+  json<Omit<GitConnection, 'id'>>('PUT', `${pailPath(name)}/connection`, { connection });
 // checkBaseDomain asks Pail whether names under its base domain reach it.
 export const checkBaseDomain = () => json<{ points_here: boolean; detail?: string }>('GET', '/check');
 export const removePail = async (name: string) => void (await call('DELETE', pailPath(name)));

@@ -1,11 +1,17 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import {
+  ApiError,
   type Deploy,
+  dropConnection,
+  type GitConnection,
+  type GitHost,
   getPail,
   type Info,
   type LogLine,
   listDeploys,
+  listGitHosts,
   type Pail,
+  reconnectPail,
   redeploy,
   removePail,
   serveDeploy,
@@ -20,6 +26,7 @@ import { navigate, routeState } from '../router';
 import { ago, clock } from '../time';
 import { UploadZone } from '../UploadZone';
 import { Addresses } from './Addresses';
+import { Connect } from './FromGit';
 
 const SOURCES: Record<string, string> = {
   cli: 'pail-cli',
@@ -43,6 +50,15 @@ function terminalCommand(pail: Pail): string {
   if (pail.containers?.length) return `pail up --name ${pail.name}`;
   return `pail up ./dist --name ${pail.name}`;
 }
+
+// A pail's git host turned its connection away, or it has none: its token
+// ran out or was revoked, or the host ended its sign-in.
+const needsConnection = (err: unknown) =>
+  err instanceof ApiError && (err.code === 'token_rejected' || err.code === 'not_connected');
+
+// reconnected says whose a pail's new connection is.
+const reconnected = (pail: string, conn: Omit<GitConnection, 'id'>) =>
+  `${pail} has a new connection to ${SOURCES[conn.kind] ?? conn.kind}${conn.account ? `, as ${conn.account}` : ''}. Redeploy pulls its branch with it.`;
 
 const BackButton = () => (
   <button type="button" className="pl-back" onClick={() => navigate('/')}>
@@ -71,6 +87,46 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
   const [notice, setNotice] = useState(() => routeState<{ notice?: string }>()?.notice ?? '');
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // Coming back from a git host's sign-in to reconnect this pail, the address
+  // carries the connection the sign-in made, or what went wrong there.
+  const [arrived] = useState(() => new URLSearchParams(window.location.search));
+  const [reconnecting, setReconnecting] = useState(() => arrived.has('error'));
+  const [problem, setProblem] = useState(() => arrived.get('error') ?? '');
+  // Good news about this pail, such as its new connection.
+  const [said, setSaid] = useState('');
+  // The git host this pail deploys from, if it comes from one.
+  const [gitHost, setGitHost] = useState<GitHost | null>(null);
+  const source = data?.pail.repo ? data.pail.source : '';
+  // A connection can be given once, so it is given once.
+  const given = useRef(false);
+
+  useEffect(() => {
+    if (!source) return;
+    let live = true;
+    listGitHosts().then(
+      (hosts) => live && setGitHost(hosts.find((h) => h.kind === source) ?? null),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [source]);
+
+  useEffect(() => {
+    const id = arrived.get('connection');
+    if (!id && !arrived.has('error')) return;
+    // What the sign-in came back with has no place in the address.
+    window.history.replaceState(window.history.state, '', window.location.pathname);
+    if (!id || given.current) return;
+    given.current = true;
+    reconnectPail(name, id).then(
+      (conn) => setSaid(reconnected(name, conn)),
+      (err) => {
+        setProblem(message(err));
+        setReconnecting(true);
+      },
+    );
+  }, [arrived, name]);
 
   if (!data) {
     return (
@@ -97,11 +153,14 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
   // act runs one change against the API, then shows where things stand.
   const act = async (change: () => Promise<unknown>) => {
     setNotice('');
+    setSaid('');
     setBusy(true);
     try {
       await change();
     } catch (err) {
       setNotice(message(err));
+      // The pail can't pull: a new connection is what it needs.
+      if (pail.repo && needsConnection(err)) setReconnecting(true);
     }
     setBusy(false);
     refresh();
@@ -167,6 +226,29 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
         <div className="pl-note pl-note-failed" role="alert">
           {notice}
         </div>
+      )}
+      {said && (
+        <div className="pl-note" role="status">
+          {said}
+        </div>
+      )}
+      {reconnecting && gitHost && (
+        <Reconnect
+          key={problem}
+          pail={pail}
+          git={gitHost}
+          problem={problem || undefined}
+          onDone={(conn) => {
+            setReconnecting(false);
+            setProblem('');
+            setNotice('');
+            setSaid(reconnected(pail.name, conn));
+          }}
+          onCancel={() => {
+            setReconnecting(false);
+            setProblem('');
+          }}
+        />
       )}
       {pail.status === 'failed' && (
         <div className="pl-note pl-note-failed">
@@ -267,6 +349,20 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
             ))}
           </dl>
 
+          {pail.repo && gitHost && (
+            <section className="pl-stack" style={{ gap: 8 }}>
+              <p className="pl-small" style={{ margin: 0 }}>
+                {pail.name} pulls {pail.repo} with a connection of its own. If its token has run out or been revoked,
+                give it a new one.
+              </p>
+              <div className="pl-actions">
+                <Button size="sm" disabled={reconnecting} onClick={() => setReconnecting(true)}>
+                  Reconnect to {gitHost.label}
+                </Button>
+              </div>
+            </section>
+          )}
+
           <section className="pl-stack" style={{ gap: 8 }}>
             <h2 className="pl-h2" style={{ fontSize: 16, lineHeight: '22px' }}>
               Same thing, from a terminal
@@ -299,6 +395,48 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
         )}
       </section>
     </main>
+  );
+}
+
+// Reconnect gives a pail from a git host a new connection, made the way New
+// pail makes one, in place of the one it pulls with.
+function Reconnect(props: {
+  pail: Pail;
+  git: GitHost;
+  problem?: string;
+  onDone: (conn: Omit<GitConnection, 'id'>) => void;
+  onCancel: () => void;
+}) {
+  const { pail, git } = props;
+  const top = useRef<HTMLElement>(null);
+
+  // It opens above the button that asks for it, which may be off screen.
+  useEffect(() => top.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), []);
+
+  const give = async (conn: GitConnection) => {
+    try {
+      props.onDone(await reconnectPail(pail.name, conn.id));
+    } catch (err) {
+      // It can't be this pail's, and was made for no other.
+      dropConnection(conn).catch(() => {});
+      throw err;
+    }
+  };
+
+  return (
+    <section ref={top} className="pl-stack" style={{ gap: 16 }}>
+      <Connect
+        git={git}
+        pail={pail.name}
+        title={`Reconnect ${pail.name} to ${git.label}`}
+        intro={`The new connection takes the place of the one ${pail.name} pulls with, so it has to be able to see ${pail.repo}. Nothing else about the pail changes.`}
+        problem={props.problem}
+        onConnected={give}
+      />
+      <div className="pl-actions">
+        <Button onClick={props.onCancel}>Cancel</Button>
+      </div>
+    </section>
   );
 }
 

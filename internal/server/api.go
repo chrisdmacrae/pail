@@ -41,11 +41,13 @@ func (s *Server) installation() http.Handler {
 	api.HandleFunc("GET /api/v1/check", s.handleCheck)
 	api.HandleFunc("GET /api/v1/git", s.handleListGit)
 	api.HandleFunc("PUT /api/v1/git/{kind}", s.handleConnectGit)
-	api.HandleFunc("DELETE /api/v1/git/{kind}", s.handleDisconnectGit)
+	api.HandleFunc("GET /api/v1/git/{kind}/connections/{id}", s.handleGetConnection)
+	api.HandleFunc("DELETE /api/v1/git/{kind}/connections/{id}", s.handleDropConnection)
 	api.HandleFunc("POST /api/v1/git/{kind}/oauth", s.handleStartOAuth)
 	api.HandleFunc("GET /api/v1/git/{kind}/repos", s.handleListRepos)
 	api.HandleFunc("GET /api/v1/git/{kind}/detect", s.handleDetectRepo)
 	api.HandleFunc("POST /api/v1/pails/{name}/repo", s.handleCreateFromRepo)
+	api.HandleFunc("PUT /api/v1/pails/{name}/connection", s.handleReconnect)
 	api.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "No such API path: "+r.URL.Path+".")
 	})
@@ -160,7 +162,11 @@ func (s *Server) handleRemovePail(w http.ResponseWriter, r *http.Request) {
 		s.writePailError(w, r, err)
 		return
 	}
-	s.removeHook(r.Context(), git)
+	s.removeHook(r.Context(), r.PathValue("name"), git)
+	// The pail's connection to its git host goes with it.
+	if err := s.git.Forget(r.Context(), r.PathValue("name")); err != nil {
+		s.log.Warn("forget git connection", "pail", r.PathValue("name"), "err", err)
+	}
 	if s.certs != nil {
 		for _, host := range p.Hosts {
 			s.certs.RemoveHost(r.Context(), host)
@@ -298,7 +304,7 @@ func (s *Server) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 	// A pail from a git host pulls its branch again; any other deploys its
 	// latest good files again.
 	if git, _ := s.pails.Git(name); git != nil {
-		d, err := s.deployFromGit(r.Context(), r, name, *git, "redeploy of "+git.Branch)
+		d, err := s.deployFromGit(r.Context(), r, nil, name, *git, "redeploy of "+git.Branch)
 		if err != nil {
 			s.writeGitError(w, r, githost.Kind(git.Host), err)
 			return
