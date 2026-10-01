@@ -65,6 +65,7 @@ export function PailList({ host, info }: { host: string; info: Info | null }) {
                 href={p.url}
                 status={p.status}
                 source={p.source}
+                revision={p.revision}
                 updated={ago(p.updated_at)}
                 onOpen={() => navigate(pailPath(p.name))}
                 onRedeploy={() => again(p.name)}
@@ -95,7 +96,9 @@ export function PailList({ host, info }: { host: string; info: Info | null }) {
           }}
         >
           <h2 className="pl-title">Nothing in the pail yet.</h2>
-          <p className="pl-muted">Run this from the folder you build, or press New pail to drop a folder.</p>
+          <p className="pl-muted">
+            Run this from the folder you build, or press New pail to pick a repo or drop a folder.
+          </p>
           <div style={{ alignSelf: 'stretch' }}>
             <Command>pail up ./dist</Command>
           </div>

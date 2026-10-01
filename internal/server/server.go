@@ -14,13 +14,16 @@ import (
 	"strings"
 
 	"github.com/chrisdmacrae/pail/internal/config"
+	"github.com/chrisdmacrae/pail/internal/githost"
 	"github.com/chrisdmacrae/pail/internal/pails"
+	"github.com/chrisdmacrae/pail/internal/storage"
 )
 
 type Server struct {
 	cfg     config.Config
 	pails   *pails.Service
 	certs   Certs
+	git     *githost.Connections
 	log     *slog.Logger
 	version string
 	ui      fs.FS
@@ -45,7 +48,10 @@ type Options struct {
 	// UI is the built web UI's files, or nil to run without one.
 	UI fs.FS
 	// Certs issues certificates, or is nil when Pail serves plain HTTP only.
-	Certs   Certs
+	Certs Certs
+	// Git holds the git hosts Pail is connected to. Nil means none, kept
+	// nowhere: connections made then last until the process stops.
+	Git     *githost.Connections
 	Logger  *slog.Logger
 	Version string
 }
@@ -53,7 +59,10 @@ type Options struct {
 // New builds the handler for Pail's listener: the HTTPS one, or the only
 // one when TLS is off.
 func New(o Options) *Server {
-	s := &Server{cfg: o.Config, pails: o.Pails, certs: o.Certs, ui: o.UI, probe: newProber(), log: o.Logger, version: o.Version}
+	s := &Server{cfg: o.Config, pails: o.Pails, certs: o.Certs, git: o.Git, ui: o.UI, probe: newProber(), log: o.Logger, version: o.Version}
+	if s.git == nil {
+		s.git, _ = githost.LoadConnections(context.Background(), storage.NewMemory(), githost.DefaultClient())
+	}
 	s.install = s.installation()
 	return s
 }

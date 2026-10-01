@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/chrisdmacrae/pail/internal/config"
+	"github.com/chrisdmacrae/pail/internal/githost"
 	"github.com/chrisdmacrae/pail/internal/pails"
 )
 
@@ -37,11 +38,19 @@ func (s *Server) installation() http.Handler {
 	api.HandleFunc("POST /api/v1/pails/{name}/hosts", s.handleAddHost)
 	api.HandleFunc("DELETE /api/v1/pails/{name}/hosts/{host}", s.handleRemoveHost)
 	api.HandleFunc("GET /api/v1/check", s.handleCheck)
+	api.HandleFunc("GET /api/v1/git", s.handleListGit)
+	api.HandleFunc("PUT /api/v1/git/{kind}", s.handleConnectGit)
+	api.HandleFunc("DELETE /api/v1/git/{kind}", s.handleDisconnectGit)
+	api.HandleFunc("GET /api/v1/git/{kind}/repos", s.handleListRepos)
+	api.HandleFunc("GET /api/v1/git/{kind}/detect", s.handleDetectRepo)
+	api.HandleFunc("POST /api/v1/pails/{name}/repo", s.handleCreateFromRepo)
 	api.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "No such API path: "+r.URL.Path+".")
 	})
 
 	mux := http.NewServeMux()
+	// A git host's webhook can't carry Pail's token; it is signed instead.
+	mux.HandleFunc("POST /api/v1/hooks/{name}", s.handleHook)
 	mux.Handle("/api/", s.requireToken(api))
 	mux.HandleFunc("/", s.serveUI)
 	return mux
@@ -127,10 +136,12 @@ func (s *Server) handleGetPail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRemovePail(w http.ResponseWriter, r *http.Request) {
 	// Its hostnames go with it, and so do their certificates.
 	p, _ := s.pails.Get(r.PathValue("name"))
+	git, _ := s.pails.Git(r.PathValue("name"))
 	if err := s.pails.Remove(r.Context(), r.PathValue("name")); err != nil {
 		s.writePailError(w, r, err)
 		return
 	}
+	s.removeHook(r.Context(), git)
 	if s.certs != nil {
 		for _, host := range p.Hosts {
 			s.certs.RemoveHost(r.Context(), host)
@@ -265,6 +276,17 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 // an upload, it answers at once and the deploy's log says how it went.
 func (s *Server) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	// A pail from a git host pulls its branch again; any other deploys its
+	// latest good files again.
+	if git, _ := s.pails.Git(name); git != nil {
+		d, err := s.deployFromGit(r.Context(), r, name, *git, "redeploy of "+git.Branch)
+		if err != nil {
+			s.writeGitError(w, r, githost.Kind(git.Host), err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, s.deployJSON(r, name, d, ""))
+		return
+	}
 	d, err := s.pails.Redeploy(name, origin(r, name+"."+s.cfg.BaseDomain))
 	if err != nil {
 		s.writePailError(w, r, err)

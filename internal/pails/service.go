@@ -178,6 +178,9 @@ func (s *Service) view(e *entry) Pail {
 	if e.rec.ServedAt.After(p.UpdatedAt) {
 		p.UpdatedAt = e.rec.ServedAt
 	}
+	if g := e.rec.Git; g != nil {
+		p.Source, p.Repo, p.Revision = g.Host, g.Repo, g.Branch
+	}
 	if e.rec.Off {
 		p.Status = StatusOff
 	}
@@ -212,6 +215,37 @@ func (s *Service) updateRecord(ctx context.Context, e *entry, man *Manifest, cha
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// SetGit records the repo a pail deploys from, or with nil, that it no
+// longer deploys from one.
+func (s *Service) SetGit(ctx context.Context, name string, git *GitSource) error {
+	s.mu.RLock()
+	e := s.pails[name]
+	s.mu.RUnlock()
+	if e == nil {
+		return ErrNoPail
+	}
+	err := s.updateRecord(ctx, e, nil, func(r *record) { r.Git = git })
+	if errors.Is(err, errRemoved) {
+		return ErrNoPail
+	}
+	return err
+}
+
+// Git returns the repo a pail deploys from, hook secret included, or nil.
+func (s *Service) Git(name string) (*GitSource, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e := s.pails[name]
+	if e == nil {
+		return nil, ErrNoPail
+	}
+	if e.rec.Git == nil {
+		return nil, nil
+	}
+	git := *e.rec.Git
+	return &git, nil
 }
 
 // SetOff stops a pail or starts it again. A stopped pail keeps its deploys

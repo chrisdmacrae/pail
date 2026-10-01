@@ -16,6 +16,7 @@ import (
 
 	"github.com/chrisdmacrae/pail/internal/certs"
 	"github.com/chrisdmacrae/pail/internal/config"
+	"github.com/chrisdmacrae/pail/internal/githost"
 	"github.com/chrisdmacrae/pail/internal/pails"
 	"github.com/chrisdmacrae/pail/internal/server"
 	"github.com/chrisdmacrae/pail/internal/storage"
@@ -67,7 +68,11 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	opts := server.Options{Config: cfg, Pails: svc, UI: webui.FS(), Logger: logger, Version: version}
+	git, err := githost.LoadConnections(ctx, store, githost.DefaultClient())
+	if err != nil {
+		return err
+	}
+	opts := server.Options{Config: cfg, Pails: svc, UI: webui.FS(), Git: git, Logger: logger, Version: version}
 
 	// Certificates: Pail's own authority, or Let's Encrypt when a DNS
 	// provider is set. In Let's Encrypt mode a first start waits here for

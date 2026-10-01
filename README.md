@@ -18,7 +18,7 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | 4 | Web UI from the design system | done |
 | 5 | Custom hostnames and the DNS self-check | done |
 | — | TLS: Pail's own certificate authority, and Let's Encrypt by DNS-01 | done |
-| 6 | Git hosts: token first, then OAuth | next |
+| 6 | Git hosts: token first, then OAuth | connecting by token is done; OAuth isn't built |
 | 7 | Firecracker microVMs: the build VM, containers, and the KVM check | |
 | 8 | pail.json functions: base images, snapshots, sleep when idle, and routing | |
 
@@ -30,6 +30,7 @@ cmd/pail             pail-cli, installed as the pail command
 internal/config      environment variables
 internal/storage     the object store: S3 (versitygw) and an in-memory one for tests
 internal/certs       TLS certificates: Pail's own authority, or Let's Encrypt
+internal/githost     git hosts: GitHub, GitLab, Bitbucket, Gitea and Forgejo
 internal/pails       pails, deploys, the live pointer, the deploy pipeline
 internal/server      the listener: Host routing, the REST API, static serving
 internal/cli         the pail command: profiles, packing, the API client
@@ -82,9 +83,9 @@ The base domain serves the UI: your pails, a pail's page, and New pail. It is a 
 - **Your pails:** the list, with Redeploy and Remove on each row.
 - **Trust this Pail:** when the installation has its own authority, how each kind of device comes to trust it.
 - **A pail:** its deploys and their logs (live while building), Upload a deploy (a `.zip` or a folder), Serve this one, Redeploy, Stop or Start, and Remove.
-- **New pail:** the pail-cli commands, or Upload: drop a folder or a `.zip`. A folder is packed into a `.tar.gz` in the browser.
+- **New pail:** the pail-cli commands; Upload, where you drop a folder or a `.zip` (a folder is packed into a `.tar.gz` in the browser); or a git host, where you connect with a token and pick a repo.
 
-Not in the UI yet: the git host tiles (step 6), the functions panel (step 8), and real install instructions for pail-cli.
+Not in the UI yet: signing in to a git host with OAuth, the functions panel (step 8), and real install instructions for pail-cli.
 
 It's built from `web/design-system/` as published: the components come from its `bundle.js`, and nothing in that folder is edited. Day or Night follows the device.
 
@@ -157,6 +158,13 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 | `POST /api/v1/pails/{name}/hosts` | Body `{"host": "recipes.home.example"}`. Adds a custom hostname and checks it. `409` unless Let's Encrypt mode is on, or if another pail has it. |
 | `DELETE /api/v1/pails/{name}/hosts/{host}` | Removes a custom hostname. |
 | `GET /api/v1/check` | The DNS self-check for the base domain: do names under it reach this Pail? |
+| `GET /api/v1/git` | The five git hosts, and which are connected. |
+| `PUT /api/v1/git/{kind}` | Body `{"token": "...", "server": "..."}`. Checks the token with the host, then keeps it. `server` is for GitLab, Gitea and Forgejo. |
+| `DELETE /api/v1/git/{kind}` | Forgets a host's token. Its pails stay, but can't pull. |
+| `GET /api/v1/git/{kind}/repos` | The repos the token can see. |
+| `GET /api/v1/git/{kind}/detect?repo=&branch=` | What Pail makes of a repo, and whether it can deploy it. |
+| `POST /api/v1/pails/{name}/repo` | Body `{"host", "repo", "branch"}`. Makes a new pail from a repo, deploys the branch, and adds a webhook so pushes deploy. |
+| `POST /api/v1/hooks/{name}` | Where a git host delivers pushes. Takes no token: the delivery is signed with the hook's secret. |
 | `DELETE /api/v1/pails/{name}` | Removes the pail and every deploy. |
 
 ## How a request is routed
@@ -167,6 +175,15 @@ Every call sends `Authorization: Bearer <PAIL_TOKEN>`. The API answers on the ba
 - A pail that is Off answers every request with a plain 503 saying so.
 
 On a pail's site, `/` and `/dir/` serve `index.html`, `/dir` redirects to `/dir/`, `/about` serves `about.html` if there is one, and a miss serves the deploy's `404.html` or, with a `fallback` in `pail.json`, that file.
+
+## Git hosts
+
+A pail can come from a repo on GitHub, GitLab, Bitbucket, Gitea or Forgejo. Pail holds one access token per host, checks it with the host before keeping it, and stores it in the object store under `git/`.
+
+- **What Pail deploys.** A repo's files as they are: an `index.html` at the top, or a `pail.json` that says where the files live. A repo whose `package.json` has a build script is recognised and declined, because Pail can't run builds until step 7.
+- **Pushes deploy.** When a pail is made from a repo, Pail adds a webhook to it. Each push to the pail's branch is fetched and deployed like any other deploy. The host has to be able to reach Pail for this; a host on the internet can't reach a Pail that is only on your network.
+- **If the webhook can't be added,** the pail is still made and says so. Redeploy pulls the branch by hand: `pail redeploy <pail>`.
+- **Tokens.** For Bitbucket, an access token, or `username:app-password`. For the others, a personal access token that can read repos and add webhooks.
 
 ## Hostnames and the DNS check
 
@@ -202,6 +219,7 @@ meta/<name>/state.json                    the pail and its live pointer
 meta/<name>/deploys/<id>.json             the deploy record
 meta/<name>/deploys/<id>.log              its log
 meta/<name>/deploys/<id>.manifest.json    what it serves
+git/<host>.json                           a git host's server and access token
 tls/internal/root.pem                     Pail's own root certificate and its key
 tls/acme/<directory>/account.json         the Let's Encrypt account
 tls/acme/<directory>/certs/<name>.pem     each certificate and its key

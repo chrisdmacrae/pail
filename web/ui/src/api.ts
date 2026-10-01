@@ -21,7 +21,11 @@ export interface Pail {
   // hosts are its custom hostnames, beyond its own name.
   hosts: string[];
   status: PailStatus;
+  // source is "cli", "upload", or the git host the pail deploys from.
   source: string;
+  // repo and revision are the repository and branch of a pail from a git host.
+  repo?: string;
+  revision?: string;
   serving: string;
   updated_at: string;
   deploy: Deploy | null;
@@ -36,6 +40,31 @@ export interface Info {
   // whose root each device trusts once), Let's Encrypt ("acme"), or none.
   tls: 'off' | 'internal' | 'acme';
   limits: { max_upload_size: number; max_deploys: number };
+}
+
+// GitHost is a git host a pail can come from, and whether Pail holds a token
+// for it.
+export interface GitHost {
+  kind: string;
+  label: string;
+  // self_hostable hosts need their server's address to connect.
+  self_hostable: boolean;
+  default_server: string;
+  connected: boolean;
+  account?: string;
+}
+
+export interface Repo {
+  // full is the repo with its owner: "homelab/recipes".
+  full: string;
+  // branch is its default branch.
+  branch: string;
+}
+
+// Detection is what Pail makes of a repo before deploying it.
+export interface Detection {
+  deployable: boolean;
+  summary: string;
 }
 
 // Host is one address a pail answers at, and whether its DNS reaches Pail.
@@ -149,6 +178,16 @@ export const listHosts = async (name: string) =>
 export const addHost = (name: string, host: string) => json<Host>('POST', `${pailPath(name)}/hosts`, { host });
 export const removeHost = async (name: string, host: string) =>
   void (await call('DELETE', `${pailPath(name)}/hosts/${encodeURIComponent(host)}`));
+export const listGitHosts = async () => (await json<{ hosts: GitHost[] }>('GET', '/git')).hosts;
+export const connectGit = (kind: string, token: string, server?: string) =>
+  json<GitHost>('PUT', `/git/${kind}`, { token, server });
+export const listRepos = async (kind: string) => (await json<{ repos: Repo[] }>('GET', `/git/${kind}/repos`)).repos;
+export const detectRepo = (kind: string, repo: string, branch: string) =>
+  json<Detection>('GET', `/git/${kind}/detect?repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}`);
+// createFromRepo makes a pail from a repo. hook_note says so when Pail
+// couldn't add the webhook that makes pushes deploy.
+export const createFromRepo = (name: string, host: string, repo: string, branch: string) =>
+  json<Deploy & { hook: boolean; hook_note?: string }>('POST', `${pailPath(name)}/repo`, { host, repo, branch });
 // checkBaseDomain asks Pail whether names under its base domain reach it.
 export const checkBaseDomain = () => json<{ points_here: boolean; detail?: string }>('GET', '/check');
 export const removePail = async (name: string) => void (await call('DELETE', pailPath(name)));

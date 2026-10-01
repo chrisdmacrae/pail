@@ -1,18 +1,21 @@
-import { useEffect, useState } from 'react';
-import { type Info, listPails } from '../api';
-import { Button, Command, Field, type Source, SourcePicker } from '../ds';
+import { useCallback, useEffect, useState } from 'react';
+import { type GitHost, type Info, listGitHosts, listPails } from '../api';
+import { Button, Command, Field, SourcePicker } from '../ds';
 import { type Upload, validName } from '../pack';
 import { navigate, pailPath } from '../router';
 import { UploadZone } from '../UploadZone';
-
-// The ways in that work today. The git hosts join when Pail can connect them.
-const SOURCES: Source[] = [
-  { id: 'cli', label: 'pail-cli', icon: 'terminal', hint: 'From your terminal or CI' },
-  { id: 'upload', label: 'Upload', icon: 'upload', hint: 'A folder or a .zip' },
-];
+import { FromGit } from './FromGit';
 
 export function NewPail({ host, info }: { host: string; info: Info | null }) {
   const [source, setSource] = useState<string | null>(null);
+  const [git, setGit] = useState<GitHost[]>([]);
+
+  const loadGit = useCallback(() => listGitHosts().then(setGit, () => {}), []);
+  useEffect(() => {
+    loadGit();
+  }, [loadGit]);
+
+  const gitHost = git.find((g) => g.kind === source);
 
   return (
     <main className="pl-main pl-main-narrow">
@@ -25,11 +28,12 @@ export function NewPail({ host, info }: { host: string; info: Info | null }) {
 
       <section className="pl-stack">
         <h2 className="pl-h2">Where is your site?</h2>
-        <SourcePicker sources={SOURCES} value={source} onChange={setSource} />
+        <SourcePicker value={source} onChange={setSource} />
       </section>
 
       {source === 'cli' && <FromCli />}
       {source === 'upload' && <FromUpload host={host} info={info} />}
+      {gitHost && <FromGit key={gitHost.kind} git={gitHost} host={host} onConnected={loadGit} />}
     </main>
   );
 }

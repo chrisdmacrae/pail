@@ -20,7 +20,15 @@ import { ago, clock } from '../time';
 import { UploadZone } from '../UploadZone';
 import { Addresses } from './Addresses';
 
-const SOURCES: Record<string, string> = { cli: 'pail-cli', upload: 'Upload' };
+const SOURCES: Record<string, string> = {
+  cli: 'pail-cli',
+  upload: 'Upload',
+  github: 'GitHub',
+  gitlab: 'GitLab',
+  bitbucket: 'Bitbucket',
+  gitea: 'Gitea',
+  forgejo: 'Forgejo',
+};
 
 const BackButton = () => (
   <button type="button" className="pl-back" onClick={() => navigate('/')}>
@@ -39,7 +47,9 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
   );
   const [selected, setSelected] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(() => !!routeState<{ confirm?: boolean }>()?.confirm);
-  const [notice, setNotice] = useState('');
+  // Something the last screen had to say about this pail, such as a webhook
+  // that couldn't be added.
+  const [notice, setNotice] = useState(() => routeState<{ notice?: string }>()?.notice ?? '');
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
 
@@ -192,6 +202,18 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
           <dl className="pl-facts">
             <dt>Source</dt>
             <dd>{SOURCES[pail.source] ?? pail.source}</dd>
+            {pail.repo && (
+              <>
+                <dt>Repo</dt>
+                <dd className="pl-mono" style={{ fontSize: 13, overflowWrap: 'anywhere' }}>
+                  {pail.repo}
+                </dd>
+                <dt>Branch</dt>
+                <dd className="pl-mono" style={{ fontSize: 13 }}>
+                  {pail.revision}
+                </dd>
+              </>
+            )}
             <dt>Serving</dt>
             <dd className="pl-mono" style={{ fontSize: 13 }}>
               {pail.serving || '—'}
@@ -202,7 +224,7 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
             <h2 className="pl-h2" style={{ fontSize: 16, lineHeight: '22px' }}>
               Same thing, from a terminal
             </h2>
-            <Command>{`pail up ./dist --name ${pail.name}`}</Command>
+            <Command>{pail.repo ? `pail redeploy ${pail.name}` : `pail up ./dist --name ${pail.name}`}</Command>
           </section>
         </aside>
       </div>
