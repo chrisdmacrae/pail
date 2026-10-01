@@ -194,3 +194,15 @@ test('a site with nothing rendered on demand is built as files, with no pail.jso
   await assert.rejects(access(`${only}dist/pail.json`));
   await assert.rejects(access(`${only}dist/server`));
 });
+
+test('a site with no 404 page of its own still hands whole folders to files', async () => {
+  // Astro supplies a 404 page, rendered on demand, when the site has none.
+  const plain = fileURLToPath(new URL('./fixtures/no-404/', import.meta.url));
+  await build({ root: plain, logLevel: 'error' });
+  const pail = JSON.parse(await readFile(`${plain}dist/pail.json`, 'utf8'));
+  assert.deepEqual(pail.routes, [
+    { path: '/', to: 'static' },
+    { path: '/guide/*', to: 'static' },
+    { path: '/*', to: 'function:ssr' },
+  ]);
+});

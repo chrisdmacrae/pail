@@ -111,7 +111,8 @@ export default function pail(options = {}) {
               fn,
               // A page of the site's own for paths that match nothing has to
               // come from the function, so no folder is handed to files whole.
-              wholeFolders: !onDemand.some((route) => route.pattern === '/404'),
+              // The 404 page Astro supplies when the site has none isn't worth that.
+              wholeFolders: !onDemand.some((route) => route.pattern === '/404' && route.origin !== 'internal'),
               always: [[...segments(config.base), ...segments(config.build.assets)].join('/')],
             },
           ),
