@@ -36,7 +36,7 @@ PAIL_VERSION=$version bash -c "\$(curl -fsSL $base/pail-container.sh)"
 
 Run it again to move an earlier one to this version. The image is \`ghcr.io/$repo:$version\`.
 
-On another kind of Linux machine, \`pail-server_linux_amd64.tar.gz\` and \`pail-server_linux_arm64.tar.gz\` below hold the server by itself. The [README](https://github.com/$repo#readme) says what it needs around it.
+On another kind of Linux machine, \`pail-server_linux_amd64.tar.gz\` and \`pail-server_linux_arm64.tar.gz\` below hold the server by itself. [Running Pail](https://pail.chrisdmacrae.com/running/) says what it needs around it.
 
 ### The command line, with Homebrew
 
