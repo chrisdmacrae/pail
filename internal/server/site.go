@@ -20,17 +20,19 @@ func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, name string) 
 	live, err := s.pails.Live(r.Context(), name)
 	switch {
 	case errors.Is(err, pails.ErrNoPail):
-		s.notFound(w, r, "No pail called "+name+".")
+		s.problem(w, r, page{status: http.StatusNotFound, what: "No pail called " + name + ".",
+			fix: "Make it by deploying a folder with", command: "pail up --name " + name})
 		return
 	case errors.Is(err, pails.ErrOff):
-		s.plainPage(w, r, http.StatusServiceUnavailable, name+" is off. Start it with pail start "+name+".")
+		s.problem(w, r, page{status: http.StatusServiceUnavailable, what: name + " is off.",
+			fix: "Start it with", command: "pail start " + name, pill: "Off", tone: toneQuiet})
 		return
 	case errors.Is(err, pails.ErrNothingLive):
-		s.notFound(w, r, name+" has nothing live yet.")
+		s.problem(w, r, s.nothingLive(name))
 		return
 	case err != nil:
 		s.log.Error("site", "pail", name, "err", err)
-		http.Error(w, "Pail couldn't read this pail's files.", http.StatusInternalServerError)
+		s.problem(w, r, page{status: http.StatusInternalServerError, what: "Pail couldn't read this pail's files.", fix: "The server log says why."})
 		return
 	}
 	// Routes decide what answers: a container, a function, or the deploy's
@@ -50,7 +52,7 @@ func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, name string) 
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "This path only serves files.", http.StatusMethodNotAllowed)
+		s.problem(w, r, page{status: http.StatusMethodNotAllowed, what: "This path only serves files."})
 		return
 	}
 	files := live.Manifest.Files
@@ -93,7 +95,7 @@ func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, name string) 
 	body, err := s.pails.Open(r.Context(), live, file)
 	if err != nil {
 		s.log.Error("site", "pail", name, "deploy", live.Deploy, "file", file, "err", err)
-		http.Error(w, "Pail couldn't read this file.", http.StatusInternalServerError)
+		s.problem(w, r, page{status: http.StatusInternalServerError, what: "Pail couldn't read this file.", fix: "The server log says why."})
 		return
 	}
 	defer body.Close()
@@ -114,6 +116,22 @@ func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, name string) 
 	}
 	h.Set("ETag", `"`+info.ETag+`"`)
 	http.ServeContent(w, r, "", time.Time{}, body)
+}
+
+// nothingLive is the page for a pail that has never had a deploy finish,
+// which depends on how its first one is doing.
+func (s *Server) nothingLive(name string) page {
+	p, _ := s.pails.Get(name)
+	switch p.Status {
+	case pails.StatusBuilding:
+		return page{status: http.StatusNotFound, what: name + " is building its first deploy.",
+			fix: "Try again in a moment.", pill: "Building", tone: toneBuilding, retry: 3}
+	case pails.StatusFailed:
+		return page{status: http.StatusNotFound, what: name + " has nothing live: its deploy failed.",
+			fix: "See why with", command: "pail logs " + name, pill: "Failed", tone: toneFailed}
+	}
+	return page{status: http.StatusNotFound, what: name + " has nothing live yet.",
+		fix: "Deploy a folder to it with", command: "pail up --name " + name}
 }
 
 func has(files map[string]pails.File, name string) bool {

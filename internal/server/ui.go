@@ -31,7 +31,7 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "Pail's UI only serves files.", http.StatusMethodNotAllowed)
+		s.problem(w, r, page{status: http.StatusMethodNotAllowed, what: "Pail's UI only serves files."})
 		return
 	}
 

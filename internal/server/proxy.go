@@ -44,7 +44,8 @@ func (s *Server) newProxy() *httputil.ReverseProxy {
 				return // the visitor left
 			}
 			s.log.Warn("container didn't answer", "pail", to.pail, "container", to.container, "err", err)
-			s.plainPage(w, r, http.StatusBadGateway, to.container+" in "+to.pail+" didn't answer. See what it printed with pail logs "+to.pail+" --output.")
+			s.problem(w, r, page{status: http.StatusBadGateway, what: to.container + " in " + to.pail + " didn't answer.",
+				fix: "See what it printed with", command: "pail logs " + to.pail + " --output"})
 		},
 	}
 }
@@ -55,7 +56,8 @@ func (s *Server) serveContainer(w http.ResponseWriter, r *http.Request, live pai
 	addr, up := live.Backend(container)
 	if !up {
 		w.Header().Set("Retry-After", "2")
-		s.plainPage(w, r, http.StatusServiceUnavailable, container+" in "+live.Pail+" is starting. Try again in a moment.")
+		s.problem(w, r, page{status: http.StatusServiceUnavailable, what: container + " in " + live.Pail + " is starting.",
+			fix: "Try again in a moment.", pill: "Starting", tone: toneBuilding, retry: 2})
 		return
 	}
 	to := backend{pail: live.Pail, container: container, addr: addr}

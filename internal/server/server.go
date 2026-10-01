@@ -6,7 +6,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -144,6 +143,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, probePath) && s.probe.answer(w, r) {
 		return
 	}
+	// So are the fonts of Pail's own pages, which any host may have to show.
+	if name, ok := strings.CutPrefix(r.URL.Path, fontPath); ok && s.serveFont(w, r, name) {
+		return
+	}
 	if s.isInstallation(host) {
 		s.install.ServeHTTP(w, r)
 		return
@@ -156,12 +159,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveSite(w, r, name)
 		return
 	}
-	s.notFound(w, r, "Nothing is hosted at "+host+".")
+	nothing := page{status: http.StatusNotFound, what: "Nothing is hosted at " + host + "."}
+	if s.customHostnames() {
+		nothing.fix, nothing.command = "If it should be one of your pails, add it with", "pail hosts add <pail> "+host
+	}
+	s.problem(w, r, nothing)
 }
 
-// notFound is the plain page for a host or path nobody claims.
+// notFound is the page for a path nobody claims.
 func (s *Server) notFound(w http.ResponseWriter, r *http.Request, what string) {
-	s.plainPage(w, r, http.StatusNotFound, what)
+	s.problem(w, r, page{status: http.StatusNotFound, what: what})
 }
 
 // isInstallation reports whether host addresses Pail itself rather than a
@@ -178,17 +185,6 @@ func hostname(hostport string) string {
 	}
 	host = strings.Trim(host, "[]")
 	return strings.ToLower(strings.TrimSuffix(host, "."))
-}
-
-// plainPage is what Pail says when it has no site to serve. It names the
-// installation, so it's never mistaken for someone else's site.
-func (s *Server) plainPage(w http.ResponseWriter, r *http.Request, status int, what string) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	if r.Method != http.MethodHead {
-		fmt.Fprintf(w, "%s\n\nThis is Pail on %s.\n", what, s.cfg.BaseDomain)
-	}
 }
 
 // origin is how the caller reaches host: the scheme and port they used for

@@ -26,13 +26,13 @@ func (s *Server) serveFunction(w http.ResponseWriter, r *http.Request, live pail
 	body, length := io.Reader(r.Body), r.ContentLength
 	switch {
 	case length > s.cfg.MaxUploadSize && s.cfg.MaxUploadSize > 0:
-		s.plainPage(w, r, http.StatusRequestEntityTooLarge, "That's more than "+name+" can be sent.")
+		s.problem(w, r, page{status: http.StatusRequestEntityTooLarge, what: "That's more than " + name + " can be sent."})
 		return
 	case length < 0:
 		// CGI tells the program how much is coming, so it all has to be here.
 		held, err := io.ReadAll(io.LimitReader(r.Body, maxUnsizedBody+1))
 		if err != nil || len(held) > maxUnsizedBody {
-			s.plainPage(w, r, http.StatusRequestEntityTooLarge, "That's more than "+name+" can be sent without saying how long it is.")
+			s.problem(w, r, page{status: http.StatusRequestEntityTooLarge, what: "That's more than " + name + " can be sent without saying how long it is."})
 			return
 		}
 		body, length = bytes.NewReader(held), int64(len(held))
@@ -40,29 +40,33 @@ func (s *Server) serveFunction(w http.ResponseWriter, r *http.Request, live pail
 
 	out, err := s.pails.Invoke(r.Context(), live, name, pails.FunctionRequest{Env: cgiEnv(r, length), Body: body, BodyLen: length})
 	var failure pails.FunctionFailure
+	logs := "pail logs " + live.Pail + " --output"
 	switch {
 	case r.Context().Err() != nil:
 		return // the visitor left
 	case errors.Is(err, pails.ErrFunctionBusy):
 		w.Header().Set("Retry-After", "1")
-		s.plainPage(w, r, http.StatusServiceUnavailable, name+" in "+live.Pail+" is busy. Try again in a moment.")
+		s.problem(w, r, page{status: http.StatusServiceUnavailable, what: name + " in " + live.Pail + " is busy.",
+			fix: "Try again in a moment.", pill: "Busy", tone: toneBuilding})
 		return
 	case errors.Is(err, pails.ErrFunctionDown):
-		s.plainPage(w, r, http.StatusServiceUnavailable, name+" in "+live.Pail+" isn't running. pail logs "+live.Pail+" --output says why.")
+		s.problem(w, r, page{status: http.StatusServiceUnavailable, what: name + " in " + live.Pail + " isn't running.",
+			fix: "See why with", command: logs, pill: "Not running"})
 		return
 	case errors.As(err, &failure):
-		s.plainPage(w, r, http.StatusInternalServerError, failure.Why+" See what it printed with pail logs "+live.Pail+" --output.")
+		s.problem(w, r, page{status: http.StatusInternalServerError, what: failure.Why, fix: "See what it printed with", command: logs})
 		return
 	case err != nil:
 		s.log.Error("function", "pail", live.Pail, "function", name, "err", err)
-		s.plainPage(w, r, http.StatusInternalServerError, name+" in "+live.Pail+" couldn't run.")
+		s.problem(w, r, page{status: http.StatusInternalServerError, what: name + " in " + live.Pail + " couldn't run.", fix: "The server log says why."})
 		return
 	}
 
 	status, header, content, err := parseCGI(out)
 	if err != nil {
 		s.pails.LogFunction(live, name, "%s answered, but not as CGI: %v. Write header lines, then a blank line, then the body.", name, err)
-		s.plainPage(w, r, http.StatusInternalServerError, name+" in "+live.Pail+" answered in a way Pail couldn't read. See pail logs "+live.Pail+" --output.")
+		s.problem(w, r, page{status: http.StatusInternalServerError, what: name + " in " + live.Pail + " answered in a way Pail couldn't read.",
+			fix: "See what was wrong with", command: logs})
 		return
 	}
 	h := w.Header()

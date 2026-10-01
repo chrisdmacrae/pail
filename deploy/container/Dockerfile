@@ -24,6 +24,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd cmd
 COPY internal internal
+# The fonts pail-server's own pages use come straight from the design system.
+COPY web/fonts.go web/fonts.go
+COPY web/design-system/fonts web/design-system/fonts
 COPY --from=ui /src/internal/webui/dist internal/webui/dist
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o /out/pail-server ./cmd/pail-server
