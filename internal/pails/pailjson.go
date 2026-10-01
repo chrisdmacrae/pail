@@ -16,8 +16,11 @@ import (
 
 // pailJSON is pail.json as it is written.
 type pailJSON struct {
-	Name       string                   `json:"name"`
-	Static     string                   `json:"static"`
+	Name   string `json:"name"`
+	Static string `json:"static"`
+	// Watch lists folders and files outside the pail's own, as paths from
+	// the top of its repo, that a push redeploys the pail for.
+	Watch      []string                 `json:"watch"`
 	Functions  map[string]functionJSON  `json:"functions"`
 	Containers map[string]containerJSON `json:"containers"`
 	Routes     []struct {
@@ -138,6 +141,11 @@ func parsePailJSON(b []byte) (deployConfig, error) {
 	root, err := relPath(pj.Static)
 	if err != nil {
 		return c, userErrorf("pail.json: static must be a folder inside the upload, like ./dist.")
+	}
+	for _, w := range pj.Watch {
+		if _, err := relPath(w); err != nil {
+			return c, userErrorf("pail.json: watch lists folders and files by their path from the top of the repo, like packages/ui. Got %q.", w)
+		}
 	}
 	if root != "" {
 		c.root = root + "/"
@@ -408,6 +416,30 @@ func relPath(p string) (string, error) {
 		}
 	}
 	return strings.TrimPrefix(path.Clean("/"+p), "/"), nil
+}
+
+// CleanDir cleans the folder of a repo that a pail deploys from. "" means
+// the top of the repo.
+func CleanDir(dir string) (string, error) {
+	return relPath(strings.TrimSpace(dir))
+}
+
+// Watched reads pail.json's watch list: the folders and files outside the
+// pail's own that a push redeploys it for, as paths from the top of its repo.
+// ok is false for a pail.json that can't be read.
+func Watched(manifest []byte) (watch []string, ok bool) {
+	var pj pailJSON
+	if json.Unmarshal(manifest, &pj) != nil {
+		return nil, false
+	}
+	for _, w := range pj.Watch {
+		clean, err := relPath(w)
+		if err != nil {
+			return nil, false
+		}
+		watch = append(watch, clean)
+	}
+	return watch, true
 }
 
 // Target is what answers a path: a container, a function, or, with both

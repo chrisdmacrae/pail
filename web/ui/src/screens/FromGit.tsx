@@ -19,6 +19,15 @@ const PER_PAGE = 12;
 // How many repos to look inside at once. Looking costs the git host a few
 // requests each, so only the page on screen is looked at.
 const LOOK_AT_ONCE = 4;
+// How long after the last keystroke a folder is looked inside.
+const LOOK_AFTER_MS = 400;
+
+// cleanDir is a folder as typed, without the ./ before it or the / after.
+const cleanDir = (dir: string) =>
+  dir
+    .trim()
+    .replace(/^(\.?\/)+/, '')
+    .replace(/\/+$/, '');
 
 // FromGit is New pail from a git host: connect it with a token if it isn't
 // yet, then pick a repo.
@@ -130,6 +139,12 @@ function PickRepo({ git, host }: { git: GitHost; host: string }) {
   const [found, setFound] = useState<Record<string, Detection>>({});
   const [picked, setPicked] = useState<Repo | null>(null);
   const [name, setName] = useState('');
+  // The folder of the repo the pail is in, as typed. Empty means the top.
+  const [dir, setDir] = useState('');
+  // What Pail found in a folder, keyed by repo and folder.
+  const [inFolder, setInFolder] = useState<{ key: string; found: Detection } | null>(null);
+  // Whether the name is the person's own, and so left alone.
+  const [named, setNamed] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(0);
@@ -172,19 +187,53 @@ function PickRepo({ git, host }: { git: GitHost; host: string }) {
     };
   }, [git.kind, shown]);
 
+  const folder = cleanDir(dir);
+  const folderKey = picked && folder ? `${picked.full}:${folder}` : '';
+
+  // Look inside the folder, once the typing stops.
+  useEffect(() => {
+    if (!picked || !folder) return;
+    let live = true;
+    const timer = setTimeout(async () => {
+      const result = await detectRepo(git.kind, picked.full, picked.branch, folder).catch(
+        (): Detection => ({ deployable: false, summary: 'Pail couldn’t look inside this folder' }),
+      );
+      if (live) setInFolder({ key: `${picked.full}:${folder}`, found: result });
+    }, LOOK_AFTER_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [git.kind, picked, folder]);
+
+  // What Pail found where this pail would come from: undefined while it looks.
+  const detected = !picked
+    ? undefined
+    : folder
+      ? inFolder?.key === folderKey
+        ? inFolder.found
+        : undefined
+      : found[picked.full];
+
+  // A pail is named for its repo, and for its folder when it is one of several.
+  const suggest = (repo: Repo, at: string) =>
+    slug([repo.full.split('/').pop() ?? '', at.split('/').pop() ?? ''].filter(Boolean).join('-'));
+
   const pick = (repo: Repo) => {
     setPicked(repo);
-    setName(slug(repo.full.split('/').pop() ?? ''));
+    setDir('');
+    setNamed(false);
+    setName(suggest(repo, ''));
     setError('');
   };
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
-    if (!picked) return;
+    if (!picked || !detected?.deployable) return;
     setError('');
     setBusy(true);
     try {
-      const made = await createFromRepo(name, git.kind, picked.full, picked.branch);
+      const made = await createFromRepo(name, git.kind, picked.full, picked.branch, folder);
       // If the webhook couldn't be added, the pail's page says so.
       navigate(pailPath(name), made.hook_note ? { notice: made.hook_note } : undefined);
     } catch (err) {
@@ -262,38 +311,63 @@ function PickRepo({ git, host }: { git: GitHost; host: string }) {
         </div>
       )}
 
-      {picked && found[picked.full]?.deployable === false && (
-        <div className="pl-note">
-          <strong>Pail can’t deploy {picked.full} yet.</strong> {found[picked.full].summary}. For now, Pail serves a
-          repo’s files as they are: an index.html at the top, or a pail.json that says where the files live.
-        </div>
-      )}
-
-      {picked && found[picked.full]?.deployable && (
+      {picked && (
         <form className="pl-card" style={{ gap: 16 }} onSubmit={create}>
           <div style={{ maxWidth: 420 }}>
             <Field
-              label="Name"
+              label="Folder"
               mono
-              suffix={`.${host}`}
-              value={name}
-              error={nameError ?? (error || undefined)}
-              hint="Pail redeploys every push to the branch above. Add your own hostname after."
+              placeholder="apps/web"
+              value={dir}
+              hint={
+                folder
+                  ? (detected?.summary ?? 'Looking inside…')
+                  : 'Leave empty for the top of the repo. In a repo with more than one pail, say which folder this one is in.'
+              }
               onChange={(e) => {
-                setName(e.target.value);
+                setDir(e.target.value);
+                if (!named) setName(suggest(picked, cleanDir(e.target.value)));
                 setError('');
               }}
             />
           </div>
-          <div className="pl-actions">
-            <Button variant="primary" type="submit" disabled={busy || !validName(name)}>
-              Put it in the pail
-            </Button>
-          </div>
+
+          {detected?.deployable === false && (
+            <div className="pl-note">
+              <strong>Pail can’t deploy {folder ? `${folder} in ${picked.full}` : picked.full} yet.</strong>{' '}
+              {detected.summary}. For now, Pail serves a repo’s files as they are: an index.html at the top, or a
+              pail.json that says where the files live.
+            </div>
+          )}
+
+          {detected?.deployable && (
+            <>
+              <div style={{ maxWidth: 420 }}>
+                <Field
+                  label="Name"
+                  mono
+                  suffix={`.${host}`}
+                  value={name}
+                  error={nameError ?? (error || undefined)}
+                  hint="Pail redeploys every push to the branch above. Add your own hostname after."
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    setNamed(true);
+                    setError('');
+                  }}
+                />
+              </div>
+              <div className="pl-actions">
+                <Button variant="primary" type="submit" disabled={busy || !validName(name)}>
+                  Put it in the pail
+                </Button>
+              </div>
+            </>
+          )}
         </form>
       )}
 
-      {error && !(picked && found[picked.full]?.deployable) && (
+      {error && !detected?.deployable && (
         <div className="pl-note pl-note-failed" role="alert">
           {error}
         </div>

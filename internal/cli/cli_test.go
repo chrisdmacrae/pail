@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/chrisdmacrae/pail/internal/certs"
 	"github.com/chrisdmacrae/pail/internal/config"
+	"github.com/chrisdmacrae/pail/internal/microvm"
 	"github.com/chrisdmacrae/pail/internal/pails"
 	"github.com/chrisdmacrae/pail/internal/server"
 	"github.com/chrisdmacrae/pail/internal/storage"
@@ -32,10 +34,46 @@ func installation(t *testing.T) *httptest.Server {
 
 func installationWithDNS(t *testing.T, dnsPointsHere bool) *httptest.Server {
 	t.Helper()
+	return installationWith(t, dnsPointsHere, nil)
+}
+
+// builds stands in for the microVMs of an installation that can build: its
+// build writes a page naming the folder it was told to build and the files
+// it was given.
+type builds struct{ microvm.Machines }
+
+func (builds) Available() (bool, string) { return true, "" }
+
+func (builds) BuildSite(_ context.Context, req microvm.BuildRequest) (microvm.BuildResult, error) {
+	dir, err := os.MkdirTemp("", "pail-cli-build-")
+	if err != nil {
+		return microvm.BuildResult{}, err
+	}
+	src, out := filepath.Join(dir, "src"), filepath.Join(dir, "dist")
+	os.MkdirAll(src, 0o755)
+	os.MkdirAll(out, 0o755)
+	if err := req.Fill(src); err != nil {
+		return microvm.BuildResult{}, err
+	}
+	var seen []string
+	filepath.WalkDir(src, func(p string, d os.DirEntry, _ error) error {
+		if !d.IsDir() {
+			rel, _ := filepath.Rel(src, p)
+			seen = append(seen, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	page := fmt.Sprintf("built %q from %s", req.Dir, strings.Join(seen, ","))
+	os.WriteFile(filepath.Join(out, "index.html"), []byte(page), 0o644)
+	return microvm.BuildResult{Dir: out, Output: "dist", Cleanup: func() { os.RemoveAll(dir) }}, nil
+}
+
+func installationWith(t *testing.T, dnsPointsHere bool, builder microvm.Machines) *httptest.Server {
+	t.Helper()
 	cfg := config.Config{Token: token, BaseDomain: "pail.lan", MaxUploadSize: 1 << 20, MaxDeploys: 10}
 	cfg.ACME = config.ACME{DNSProvider: "test", DNSToken: "test"}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := pails.New(pails.Options{Store: storage.NewMemory(), BaseDomain: cfg.BaseDomain, MaxDeploys: cfg.MaxDeploys, Logger: logger})
+	svc := pails.New(pails.Options{Store: storage.NewMemory(), BaseDomain: cfg.BaseDomain, MaxDeploys: cfg.MaxDeploys, Builder: builder, Logger: logger})
 	if err := svc.Load(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -244,14 +282,29 @@ func TestPailName(t *testing.T) {
 		t.Errorf("--name: got %q", got)
 	}
 
-	// Then the git repo's name, wherever inside it pail runs.
+	// Then the git repo's name, for the repo's top or what it builds into.
 	s = newShell(t)
 	repo := filepath.Join(s.cwd, "My Garden_Journal")
 	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
-	s.cwd = filepath.Join(repo, "web")
+	s.cwd = repo
 	s.write("dist/index.html", "x")
 	if got := deployed(s, "./dist"); got != "my-garden-journal" {
 		t.Errorf("git repo name: got %q", got)
+	}
+
+	// A folder further in is a pail of its own, named for the repo and the
+	// folder, so two folders of one repo don't deploy over each other.
+	s.write("apps/web/dist/index.html", "x")
+	s.write("apps/Docs/index.html", "x")
+	if got := deployed(s, "./apps/web/dist"); got != "my-garden-journal-web" {
+		t.Errorf("a folder's build output: got %q", got)
+	}
+	if got := deployed(s, "apps/Docs"); got != "my-garden-journal-docs" {
+		t.Errorf("a folder of the repo: got %q", got)
+	}
+	s.cwd = filepath.Join(repo, "apps", "web")
+	if got := deployed(s, "./dist"); got != "my-garden-journal-web" {
+		t.Errorf("from inside the folder: got %q", got)
 	}
 
 	// Then the current folder, never an output folder like dist.
@@ -260,6 +313,66 @@ func TestPailName(t *testing.T) {
 	s.write("index.html", "x")
 	if got := deployed(s); got != "recipes" {
 		t.Errorf("folder name: got %q", got)
+	}
+}
+
+// A project that builds from its workspace's lockfile is sent with the
+// workspace, to an installation that can build it.
+func TestUpSendsTheWorkspace(t *testing.T) {
+	project := func(s *shell) {
+		os.MkdirAll(filepath.Join(s.cwd, ".git"), 0o755)
+		s.write("pnpm-lock.yaml", "lockfile")
+		s.write("package.json", `{"private": true}`)
+		s.write("packages/ui/button.js", "export {}")
+		s.write("apps/web/package.json", `{"scripts": {"build": "vite build"}}`)
+		s.write("apps/web/src/main.js", "import 'ui'")
+		s.write("apps/web/node_modules/x/index.js", "never sent")
+		// A project with a lockfile of its own is no part of the workspace.
+		s.write("apps/alone/package.json", `{"scripts": {"build": "vite build"}}`)
+		s.write("apps/alone/package-lock.json", "{}")
+		// Nor is a folder of files with nothing to build.
+		s.write("apps/plain/index.html", "as it is")
+	}
+
+	ts := installationWith(t, false, builds{})
+	s := newShell(t)
+	s.env["PAIL_URL"], s.env["PAIL_TOKEN"] = ts.URL, token
+	project(s)
+
+	code, stdout, stderr := s.run("up", "apps/web", "--name", "web")
+	if code != 0 {
+		t.Fatalf("pail up apps/web: exit %d\n%s", code, stderr)
+	}
+	want(t, stderr, "apps/web builds from the pnpm-lock.yaml in "+s.cwd, "from ./apps/web")
+	want(t, stdout, "http://web.pail.lan")
+	got := fetch(t, ts, "web.pail.lan", "/")
+	want(t, got, `built "apps/web" from `, "pnpm-lock.yaml", "packages/ui/button.js", "apps/web/src/main.js")
+	if strings.Contains(got, "node_modules") || strings.Contains(got, ".git/") {
+		t.Errorf("sent what it shouldn't: %s", got)
+	}
+	// From inside the folder too, and --quiet says nothing of it.
+	s.cwd = filepath.Join(s.cwd, "apps", "web")
+	if code, _, stderr := s.run("up", "--name", "web", "--quiet"); code != 0 || stderr != "" {
+		t.Errorf("pail up --quiet from the folder: exit %d, %q", code, stderr)
+	}
+	want(t, fetch(t, ts, "web.pail.lan", "/"), `built "apps/web" from `)
+	s.cwd = filepath.Dir(filepath.Dir(s.cwd))
+
+	s.ok("up", "apps/alone", "--name", "alone")
+	want(t, fetch(t, ts, "alone.pail.lan", "/"), `built "" from package-lock.json,package.json`)
+	s.ok("up", "apps/plain", "--name", "plain")
+	want(t, fetch(t, ts, "plain.pail.lan", "/"), "as it is")
+
+	// An installation that can't build is sent the folder alone, as before:
+	// it says the project needs a build.
+	ts = installation(t)
+	s = newShell(t)
+	s.env["PAIL_URL"], s.env["PAIL_TOKEN"] = ts.URL, token
+	project(s)
+	failed := s.fails(ExitDeployFailed, "up", "apps/web", "--name", "web")
+	want(t, failed, "needs a build")
+	if strings.Contains(failed, "is sent with it") {
+		t.Errorf("sent the workspace to an installation that can't build: %s", failed)
 	}
 }
 

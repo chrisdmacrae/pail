@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -219,7 +220,7 @@ func TestDetect(t *testing.T) {
 		{"nothing to serve", files{"README.md": "hello"}, false, "No index.html at the top"},
 	}
 	for _, c := range cases {
-		got, err := Detect(context.Background(), c.repo, "o/r", "main", false)
+		got, err := Detect(context.Background(), c.repo, "o/r", "main", "", false)
 		if err != nil || got.Deployable != c.deploy || !strings.Contains(got.Summary, c.says) {
 			t.Errorf("%s: %+v, %v; want deployable=%v saying %q", c.name, got, err, c.deploy, c.says)
 		}
@@ -227,22 +228,51 @@ func TestDetect(t *testing.T) {
 
 	// A Pail that can run builds takes the projects that need one.
 	vite := files{"index.html": "x", "package.json": `{"scripts": {"build": "vite build"}, "devDependencies": {"vite": "^5"}}`}
-	if got, err := Detect(context.Background(), vite, "o/r", "main", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "Vite app · Pail builds it") {
+	if got, err := Detect(context.Background(), vite, "o/r", "main", "", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "Vite app · Pail builds it") {
 		t.Errorf("a Vite app where builds run: %+v, %v", got, err)
 	}
 	// A project with containers is built by its Dockerfiles, even one whose
 	// package.json has a build script.
 	app := files{"Dockerfile": "FROM x", "package.json": `{"scripts": {"build": "tsc"}}`, "pail.json": `{"containers": {"api": {"port": 80}}}`}
-	if got, err := Detect(context.Background(), app, "o/r", "main", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "A container · Pail builds its Dockerfile") {
+	if got, err := Detect(context.Background(), app, "o/r", "main", "", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "A container · Pail builds its Dockerfile") {
 		t.Errorf("a container where microVMs run: %+v, %v", got, err)
 	}
 	fns := files{"fn/main.py": "x", "pail.json": `{"functions": {"api": {"src": "./fn"}}}`}
-	if got, err := Detect(context.Background(), fns, "o/r", "main", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "A function · Pail builds it and runs it on request") {
+	if got, err := Detect(context.Background(), fns, "o/r", "main", "", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "A function · Pail builds it and runs it on request") {
 		t.Errorf("a function where microVMs run: %+v, %v", got, err)
 	}
 	image := files{"pail.json": `{"containers": {"web": {"image": "nginx:1.27", "port": 80, "memory": "64MB"}}}`}
-	if got, err := Detect(context.Background(), image, "o/r", "main", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "Pail pulls nginx:1.27 and runs it") {
+	if got, err := Detect(context.Background(), image, "o/r", "main", "", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "Pail pulls nginx:1.27 and runs it") {
 		t.Errorf("a container from a registry: %+v, %v", got, err)
+	}
+}
+
+// A repo with several pails is looked at one folder at a time.
+func TestDetectInAFolder(t *testing.T) {
+	repo := files{
+		"README.md":           "two pails",
+		"apps/web/index.html": "x",
+		"apps/docs/pail.json": `{"static": "./public"}`,
+		"apps/api/pail.json":  `{"functions": {"api": {"src": "./fn"}}}`,
+		"apps/blog/pail.json": `{}`,
+	}
+	cases := []struct {
+		dir    string
+		deploy bool
+		says   string
+	}{
+		{"", false, "No index.html at the top, and no pail.json"},
+		{"apps/web", true, "index.html in apps/web"},
+		{"apps/docs", true, "pail.json serves ./public"},
+		{"apps/api", true, "A function · Pail builds it"},
+		{"apps/blog", true, "pail.json serves apps/blog"},
+		{"apps/nope", false, "No index.html in apps/nope, and no pail.json"},
+	}
+	for _, c := range cases {
+		got, err := Detect(context.Background(), repo, "o/r", "main", c.dir, true)
+		if err != nil || got.Deployable != c.deploy || !strings.Contains(got.Summary, c.says) {
+			t.Errorf("%q: %+v, %v; want deployable=%v saying %q", c.dir, got, err, c.deploy, c.says)
+		}
 	}
 }
 
@@ -283,6 +313,72 @@ func TestReadPush(t *testing.T) {
 		got := ReadPush(c.kind, secret, h, []byte(c.body))
 		if got.Genuine != c.genuine || got.Branch != c.branch {
 			t.Errorf("%s: %+v, want genuine=%v branch=%q", c.name, got, c.genuine, c.branch)
+		}
+	}
+}
+
+// What a push changed is known only when the delivery lists all of it.
+func TestWhatAPushChanged(t *testing.T) {
+	const secret = "s3cret"
+	read := func(body string) Push {
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(body))
+		h := http.Header{}
+		h.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+		return ReadPush(GitHub, secret, h, []byte(body))
+	}
+	commit := `{"added": ["apps/web/new.html"], "modified": ["README.md"], "removed": ["apps/docs/old.md"]}`
+	many := strings.TrimSuffix(strings.Repeat(commit+",", 20), ",")
+
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"one commit", `{"ref": "refs/heads/main", "commits": [` + commit + `]}`, []string{"apps/web/new.html", "README.md", "apps/docs/old.md"}},
+		{"a commit that changed no files", `{"ref": "refs/heads/main", "commits": [{"added": [], "modified": [], "removed": []}]}`, []string{}},
+		{"as many as were pushed", `{"ref": "refs/heads/main", "total_commits": 1, "commits": [` + commit + `]}`, []string{"apps/web/new.html", "README.md", "apps/docs/old.md"}},
+		{"no commits listed", `{"ref": "refs/heads/main"}`, nil},
+		{"a host that lists no files", `{"ref": "refs/heads/main", "commits": [{"id": "abc"}]}`, nil},
+		{"a forced push", `{"ref": "refs/heads/main", "forced": true, "commits": [` + commit + `]}`, nil},
+		{"a new branch", `{"ref": "refs/heads/main", "created": true, "commits": [` + commit + `]}`, nil},
+		{"fewer listed than pushed, on gitea", `{"ref": "refs/heads/main", "total_commits": 31, "commits": [` + commit + `]}`, nil},
+		{"fewer listed than pushed, on gitlab", `{"ref": "refs/heads/main", "total_commits_count": 31, "commits": [` + commit + `]}`, nil},
+		{"a long push", `{"ref": "refs/heads/main", "commits": [` + many + `]}`, nil},
+	}
+	for _, c := range cases {
+		got := read(c.body)
+		if !got.Genuine || got.Branch != "main" || !slices.Equal(got.Changed, c.want) || (got.Changed == nil) != (c.want == nil) {
+			t.Errorf("%s: %+v, want changed=%v", c.name, got, c.want)
+		}
+	}
+
+	// Which pails a push is for.
+	touches := []struct {
+		changed []string
+		dir     string
+		watch   []string
+		want    bool
+	}{
+		{[]string{"apps/web/index.html"}, "apps/web", nil, true},
+		{[]string{"apps/docs/index.html", "README.md"}, "apps/web", nil, false},
+		{[]string{"apps/website/index.html"}, "apps/web", nil, false}, // a folder that only starts the same
+		{[]string{"README.md"}, "", nil, true},                        // a pail that is the whole repo
+		{nil, "apps/web", nil, true},                                  // a push that doesn't say
+		{[]string{}, "apps/web", nil, false},
+		// What pail.json watches, a folder or a file.
+		{[]string{"packages/ui/button.js"}, "apps/web", []string{"packages/ui"}, true},
+		{[]string{"packages/api/x.js"}, "apps/web", []string{"packages/ui", "shared.css"}, false},
+		{[]string{"shared.css"}, "apps/web", []string{"packages/ui", "shared.css"}, true},
+		// A workspace's own files, in the folders above the pail.
+		{[]string{"pnpm-lock.yaml"}, "apps/web", nil, true},
+		{[]string{"apps/package.json"}, "apps/web", nil, true},
+		{[]string{"packages/ui/package.json"}, "apps/web", nil, false},
+		{[]string{".github/package.json"}, "apps/web", nil, false},
+	}
+	for _, c := range touches {
+		if got := (Push{Changed: c.changed}).Touches(c.dir, c.watch); got != c.want {
+			t.Errorf("a push of %v, for %q watching %v: %v, want %v", c.changed, c.dir, c.watch, got, c.want)
 		}
 	}
 }

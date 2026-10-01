@@ -48,6 +48,8 @@ export interface Pail {
   // repo and revision are the repository and branch of a pail from a git host.
   repo?: string;
   revision?: string;
+  // dir is the folder of the repo the pail deploys from, when it isn't the top.
+  dir?: string;
   serving: string;
   updated_at: string;
   deploy: Deploy | null;
@@ -219,12 +221,16 @@ export const connectGit = (kind: string, token: string, server?: string) =>
 // to send the browser to. It comes back to New pail.
 export const startSignIn = async (kind: string) => (await json<{ url: string }>('POST', `/git/${kind}/oauth`)).url;
 export const listRepos = async (kind: string) => (await json<{ repos: Repo[] }>('GET', `/git/${kind}/repos`)).repos;
-export const detectRepo = (kind: string, repo: string, branch: string) =>
-  json<Detection>('GET', `/git/${kind}/detect?repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}`);
+// detectRepo looks at the top of a repo, or with dir, at that folder of it.
+export const detectRepo = (kind: string, repo: string, branch: string, dir = '') =>
+  json<Detection>(
+    'GET',
+    `/git/${kind}/detect?repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}${dir ? `&dir=${encodeURIComponent(dir)}` : ''}`,
+  );
 // createFromRepo makes a pail from a repo. hook_note says so when Pail
 // couldn't add the webhook that makes pushes deploy.
-export const createFromRepo = (name: string, host: string, repo: string, branch: string) =>
-  json<Deploy & { hook: boolean; hook_note?: string }>('POST', `${pailPath(name)}/repo`, { host, repo, branch });
+export const createFromRepo = (name: string, host: string, repo: string, branch: string, dir = '') =>
+  json<Deploy & { hook: boolean; hook_note?: string }>('POST', `${pailPath(name)}/repo`, { host, repo, branch, dir });
 // checkBaseDomain asks Pail whether names under its base domain reach it.
 export const checkBaseDomain = () => json<{ points_here: boolean; detail?: string }>('GET', '/check');
 export const removePail = async (name: string) => void (await call('DELETE', pailPath(name)));

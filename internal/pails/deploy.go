@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,6 +34,10 @@ type Upload struct {
 	Label string
 	// URL is the pail's address as the uploader reaches it, for the log.
 	URL string
+	// Dir is the folder inside the archive that holds the pail, as CleanDir
+	// leaves it: "" for the top, or "apps/web" for one pail of a repo with
+	// several.
+	Dir string
 }
 
 // userError is a deploy failure the person can fix. Its text goes in the log
@@ -90,7 +95,7 @@ func (s *Service) StartDeploy(name string, up Upload) (Deploy, error) {
 		url:  up.URL,
 		done: func() { os.Remove(up.Path) },
 		fill: func(ctx context.Context, e *entry, d *Deploy, lg *Log) (*Manifest, error) {
-			return s.unpack(ctx, e.name, d, up.Path, format, "", lg)
+			return s.unpack(ctx, e.name, d, up.Path, format, up.Dir, "", lg)
 		},
 	})
 	return d, nil
@@ -320,11 +325,27 @@ func (s *Service) build(ctx context.Context, e *entry, d *Deploy, lg *Log, j job
 
 // plan is what the first pass over an archive decides.
 type plan struct {
-	strip    string // folder every file sits in, dropped from names
+	strip string // folder every file sits in, dropped from names
+	// top is the folder that wraps the whole upload, if one does: strip
+	// without dir. A build is given everything under it, so a project in a
+	// workspace has the lockfile and the packages beside it.
+	top string
+	// dir is the folder of the upload the pail is in, or "" for the top. It
+	// is part of strip: files outside it are no part of the deploy.
+	dir      string
 	names    map[string]bool
 	pailJSON []byte
 	// packageJSON is the project's package.json, if it has one at the top.
 	packageJSON []byte
+}
+
+// from says which folder of the upload the pail's files come from, for the
+// log: " from ./apps/web", or nothing for the top.
+func (p plan) from() string {
+	if p.dir == "" {
+		return ""
+	}
+	return " from ./" + p.dir
 }
 
 // needsBuild reports whether a project has to be built before it can be
@@ -337,10 +358,11 @@ func needsBuild(packageJSON []byte) bool {
 }
 
 // unpack copies the archive's files into the deploy's own folder and returns
-// the manifest of what it serves. built, when set, is the folder of a
-// project that a build left the archive's files in: they are not built again.
-func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive string, format archiveFormat, built string, lg *Log) (*Manifest, error) {
-	p, err := s.survey(archive, format)
+// the manifest of what it serves. dir, when set, is the folder of the archive
+// the pail is in. built, when set, is the folder of a project that a build
+// left the archive's files in: they are not built again.
+func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive string, format archiveFormat, dir, built string, lg *Log) (*Manifest, error) {
+	p, err := s.survey(archive, format, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -360,6 +382,8 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 	}
 	static := "./" + strings.TrimSuffix(cfg.root, "/")
 	switch {
+	case p.pailJSON == nil && !p.names["index.html"] && p.dir != "":
+		return nil, userErrorf("No index.html in ./%s. Point Pail at the folder that has it.", p.dir)
 	case p.pailJSON == nil && !p.names["index.html"]:
 		return nil, userErrorf("No index.html at the top of the upload. Point Pail at the folder that has it.")
 	case cfg.fallback != "" && !p.names[cfg.root+cfg.fallback]:
@@ -395,7 +419,7 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 	if built != "" {
 		lg.add("", "built ./%s · %d %s · found %s", built, len(p.names), plural(len(p.names), "file"), found)
 	} else {
-		lg.add("", "unpacking %d %s · found %s", len(p.names), plural(len(p.names), "file"), found)
+		lg.add("", "unpacking %d %s%s · found %s", len(p.names), plural(len(p.names), "file"), p.from(), found)
 	}
 
 	man := &Manifest{Root: cfg.root, Fallback: cfg.fallback, Files: map[string]File{}, Routes: cfg.routes}
@@ -405,7 +429,10 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 		if err != nil || skip {
 			return err
 		}
-		file = strings.TrimPrefix(file, p.strip)
+		file, ok := strings.CutPrefix(file, p.strip)
+		if !ok {
+			return nil // outside the pail's folder
+		}
 		stored, err := s.storeFile(ctx, prefix+file, r, size, d)
 		if err != nil {
 			return err
@@ -583,7 +610,11 @@ func extractTo(archive string, format archiveFormat, strip string) func(dir stri
 			if err != nil || skip {
 				return err
 			}
-			target := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(file, strip)))
+			file, ok := strings.CutPrefix(file, strip)
+			if !ok {
+				return nil // outside the pail's folder
+			}
+			target := filepath.Join(dir, filepath.FromSlash(file))
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
@@ -623,14 +654,17 @@ func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, arc
 	if ok, why := s.CanBuild(); !ok {
 		return nil, userErrorf("This project needs a build, and this Pail can’t run one: %s. Build it yourself and deploy the result with pail up ./dist.", why)
 	}
-	lg.add("", "unpacking %d %s · found package.json with a build script", len(p.names), plural(len(p.names), "file"))
+	lg.add("", "unpacking %d %s%s · found package.json with a build script", len(p.names), plural(len(p.names), "file"), p.from())
 	lg.add("step", "→ building in a microVM")
 
 	built, err := s.builder.BuildSite(ctx, microvm.BuildRequest{
 		// With a build, pail.json's static is where the result lands.
 		Static: strings.TrimSuffix(cfg.root, "/"),
 		Log:    func(line string) { lg.add("", "%s", line) },
-		Fill:   extractTo(archive, format, p.strip),
+		// The build gets the whole upload and is told which folder of it
+		// the project is in.
+		Fill: extractTo(archive, format, p.top),
+		Dir:  p.dir,
 	})
 	if err != nil {
 		var ue userError
@@ -650,7 +684,7 @@ func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, arc
 			return nil, err
 		}
 		defer os.Remove(packed)
-		return s.unpack(ctx, name, d, packed, formatTarGz, built.Output, lg)
+		return s.unpack(ctx, name, d, packed, formatTarGz, "", built.Output, lg)
 	}
 
 	man := &Manifest{Fallback: cfg.fallback, Files: map[string]File{}}
@@ -691,8 +725,14 @@ func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, arc
 }
 
 // survey reads the archive once without storing anything: it enforces the
-// limits, finds a wrapping folder to drop and picks out pail.json.
-func (s *Service) survey(archive string, format archiveFormat) (plan, error) {
+// limits, finds a wrapping folder to drop and picks out pail.json. dir, when
+// set, is the folder the pail is in: the rest of the archive is left out.
+func (s *Service) survey(archive string, format archiveFormat, dir string) (plan, error) {
+	// How deep the files that say what a project is may sit.
+	depth := 1
+	if dir != "" {
+		depth += strings.Count(dir, "/") + 1
+	}
 	var (
 		names    []string
 		total    int64
@@ -711,8 +751,9 @@ func (s *Service) survey(archive string, format archiveFormat) (plan, error) {
 		if s.maxUnpackedSize > 0 && total > s.maxUnpackedSize {
 			return userErrorf("The upload unpacks to more than this Pail takes. Raise PAIL_MAX_UPLOAD_SIZE on the server to send more.")
 		}
-		// The two files that say what a project is, at the top or one folder in.
-		if base := path.Base(file); (base == "pail.json" || base == "package.json") && strings.Count(file, "/") <= 1 {
+		// The two files that say what a project is, at the top or one folder
+		// in, or as far in again as the pail's folder is.
+		if base := path.Base(file); (base == "pail.json" || base == "package.json") && strings.Count(file, "/") <= depth {
 			b, err := io.ReadAll(io.LimitReader(r, 1<<20))
 			if err != nil {
 				return userErrorf("%s can't be read: %v.", base, err)
@@ -728,7 +769,7 @@ func (s *Service) survey(archive string, format archiveFormat) (plan, error) {
 		return plan{}, userErrorf("The upload is empty. Point Pail at the folder with your site in it.")
 	}
 
-	p := plan{names: map[string]bool{}}
+	p := plan{dir: dir, names: map[string]bool{}}
 	// A zip of a folder holds that folder, not its contents. If nothing at
 	// the top says "site" and everything shares one folder, look inside it.
 	top := map[string]bool{}
@@ -745,8 +786,26 @@ func (s *Service) survey(archive string, format archiveFormat) (plan, error) {
 			p.strip = folder + "/"
 		}
 	}
+	p.top = p.strip
+	if dir != "" {
+		// The pail's folder, inside the folder that wraps the upload if one
+		// does: a git host's archive of a repo has one.
+		under := func(prefix string) bool {
+			return slices.ContainsFunc(names, func(n string) bool { return strings.HasPrefix(n, prefix) })
+		}
+		switch {
+		case under(p.strip + dir + "/"):
+			p.strip += dir + "/"
+		case under(dir + "/"):
+			p.top, p.strip = "", dir+"/"
+		default:
+			return plan{}, userErrorf("No folder ./%s in the upload. That is the folder this pail deploys from.", dir)
+		}
+	}
 	for _, n := range names {
-		p.names[strings.TrimPrefix(n, p.strip)] = true
+		if rest, ok := strings.CutPrefix(n, p.strip); ok {
+			p.names[rest] = true
+		}
 	}
 	p.pailJSON = pailJSON[p.strip+"pail.json"]
 	p.packageJSON = pailJSON[p.strip+"package.json"]

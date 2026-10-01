@@ -10,6 +10,10 @@ import (
 type BuildRequest struct {
 	// Fill puts the project's source in the folder it is given.
 	Fill func(dir string) error
+	// Dir, when set, is the folder inside the source that holds the project,
+	// like apps/web: one project of a repo that holds several. The build
+	// runs there, and may use what is above it, as a workspace does.
+	Dir string
 	// Static, when set, is the folder the build's output lands in, from
 	// pail.json. Otherwise Pail looks in the usual places.
 	Static string

@@ -57,6 +57,7 @@ A `pail.json` at the top of the upload tells Pail what it can’t guess. Every f
 | --- | --- |
 | `name` | The pail’s name, when `pail up` isn’t given one with `--name`. |
 | `static` | The folder that holds the files to serve. With a build, the folder the build leaves them in. |
+| `watch` | For one pail of a repo that holds several: folders and files elsewhere in the repo that a push redeploys this pail for. See [More than one pail in a repo](/git-providers/#more-than-one-pail-in-a-repo). |
 | `routes[].fallback` | A file served when a path matches nothing, for single-page apps that handle their own routes. |
 | `functions` | Programs Pail runs once per request. See [Write a function](/deploying/functions/). |
 | `containers` | Dockerfiles to build, or images to pull, and run. See [Run a container](/deploying/containers/). |

@@ -245,6 +245,14 @@ export function PailPage({ name, info }: { name: string; info: Info | null }) {
                 <dd className="pl-mono" style={{ fontSize: 13 }}>
                   {pail.revision}
                 </dd>
+                {pail.dir && (
+                  <>
+                    <dt>Folder</dt>
+                    <dd className="pl-mono" style={{ fontSize: 13, overflowWrap: 'anywhere' }}>
+                      {pail.dir}
+                    </dd>
+                  </>
+                )}
               </>
             )}
             <dt>Serving</dt>

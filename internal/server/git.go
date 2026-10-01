@@ -197,7 +197,19 @@ func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"repos": repos})
 }
 
+// repoDir reads the folder of a repo a pail deploys from, answering 400
+// itself for one that isn't inside the repo.
+func repoDir(w http.ResponseWriter, dir string) (string, bool) {
+	clean, err := pails.CleanDir(dir)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "The folder has to be one inside the repo, like apps/web.")
+		return "", false
+	}
+	return clean, true
+}
+
 // handleDetectRepo says what Pail makes of a repo: ?repo=owner/name&branch=main.
+// With &dir=apps/web it looks in that folder rather than at the top.
 func (s *Server) handleDetectRepo(w http.ResponseWriter, r *http.Request) {
 	kind, ok := s.gitKind(w, r)
 	if !ok {
@@ -208,12 +220,16 @@ func (s *Server) handleDetectRepo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "Say which repo and branch: ?repo=owner/name&branch=main.")
 		return
 	}
+	dir, ok := repoDir(w, r.URL.Query().Get("dir"))
+	if !ok {
+		return
+	}
 	client, err := s.git.Client(r.Context(), kind)
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
 	}
-	found, err := githost.Detect(r.Context(), client, repo, branch, s.canBuild())
+	found, err := githost.Detect(r.Context(), client, repo, branch, dir, s.canBuild())
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
@@ -246,14 +262,15 @@ func (s *Server) deployFromGit(ctx context.Context, r *http.Request, name string
 		return pails.Deploy{}, err
 	}
 	return s.pails.StartDeploy(name, pails.Upload{
-		Path: tmp.Name(), Source: git.Host, Label: label, URL: origin(r, name+"."+s.cfg.BaseDomain),
+		Path: tmp.Name(), Source: git.Host, Label: label, URL: origin(r, name+"."+s.cfg.BaseDomain), Dir: git.Dir,
 	})
 }
 
 // handleCreateFromRepo makes a new pail from a repo:
 // {"host": "forgejo", "repo": "homelab/recipes", "branch": "main"}. It
 // deploys the branch as it stands, then asks the host to say when the branch
-// is pushed to, so every push is a deploy.
+// is pushed to, so every push is a deploy. With "dir": "apps/web" the pail is
+// that folder of the repo, which lets one repo hold several pails.
 func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !pails.ValidName(name) {
@@ -264,12 +281,17 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 		Host   githost.Kind `json:"host"`
 		Repo   string       `json:"repo"`
 		Branch string       `json:"branch"`
+		Dir    string       `json:"dir"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || !body.Host.Valid() || body.Repo == "" || body.Branch == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", `Say which repo to deploy: {"host": "github", "repo": "owner/name", "branch": "main"}.`)
 		return
 	}
 	kind := body.Host
+	dir, ok := repoDir(w, body.Dir)
+	if !ok {
+		return
+	}
 	if _, err := s.pails.Get(name); err == nil {
 		writeError(w, http.StatusConflict, "name_taken", name+" is already a pail. Pick another name.")
 		return
@@ -279,7 +301,7 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 		s.writeGitError(w, r, kind, err)
 		return
 	}
-	found, err := githost.Detect(r.Context(), client, body.Repo, body.Branch, s.canBuild())
+	found, err := githost.Detect(r.Context(), client, body.Repo, body.Branch, dir, s.canBuild())
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
@@ -289,8 +311,12 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	git := pails.GitSource{Host: string(kind), Repo: body.Repo, Branch: body.Branch, HookSecret: randomID()}
-	d, err := s.deployFromGit(r.Context(), r, name, git, "first deploy from "+body.Repo+"@"+body.Branch)
+	git := pails.GitSource{Host: string(kind), Repo: body.Repo, Branch: body.Branch, Dir: dir, HookSecret: randomID()}
+	from := body.Repo + "@" + body.Branch
+	if dir != "" {
+		from += ":" + dir
+	}
+	d, err := s.deployFromGit(r.Context(), r, name, git, "first deploy from "+from)
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
@@ -340,6 +366,12 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"deployed": false})
 		return
 	}
+	// A pail that is one folder of its repo sits out a push that changed
+	// nothing of its own.
+	if git.Dir != "" && !push.Touches(git.Dir, s.watched(r.Context(), git)) {
+		writeJSON(w, http.StatusOK, map[string]any{"deployed": false, "skipped": "The push changed nothing in " + git.Dir + "."})
+		return
+	}
 	d, err := s.deployFromGit(r.Context(), r, name, *git, "push to "+git.Branch)
 	if err != nil {
 		s.log.Error("deploy from webhook", "pail", name, "err", err)
@@ -347,6 +379,26 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"deployed": true, "deploy": d.ID})
+}
+
+// watched reads the folders and files outside its own that a pail's pail.json
+// asks to be redeployed for, as paths from the top of the repo. If they can't
+// be read, everything is watched: the pail deploys.
+func (s *Server) watched(ctx context.Context, git *pails.GitSource) []string {
+	everything := []string{""}
+	client, err := s.git.Client(ctx, githost.Kind(git.Host))
+	if err != nil {
+		return everything
+	}
+	manifest, err := client.ReadFile(ctx, git.Repo, git.Branch, path.Join(git.Dir, "pail.json"))
+	if errors.Is(err, githost.ErrNotFound) {
+		return nil
+	}
+	watch, ok := pails.Watched(manifest)
+	if err != nil || !ok {
+		return everything
+	}
+	return watch
 }
 
 // removeHook takes Pail's webhook off a repo when its pail goes. It's a

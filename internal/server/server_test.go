@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -747,7 +748,9 @@ type forge struct {
 	t     *testing.T
 	repos map[string]map[string]string // repo → path → contents
 	hooks map[string]map[string]any    // repo → what Pail asked for
-	gone  []string                     // hooks Pail removed
+	// secrets are the webhooks' secrets, by the pail each one calls.
+	secrets map[string]string
+	gone    []string // hooks Pail removed
 }
 
 func (f *forge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -802,6 +805,13 @@ func (f *forge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var asked map[string]any
 		json.NewDecoder(r.Body).Decode(&asked)
 		f.hooks[repo] = asked
+		if config, _ := asked["config"].(map[string]any); config != nil {
+			if f.secrets == nil {
+				f.secrets = map[string]string{}
+			}
+			hookURL, _ := config["url"].(string)
+			f.secrets[path.Base(hookURL)], _ = config["secret"].(string)
+		}
 		reply(map[string]int{"id": 41})
 	case parts[2] == "hooks" && r.Method == "DELETE":
 		f.gone = append(f.gone, repo+"#"+parts[3])
@@ -818,6 +828,14 @@ func TestPailsFromAGitHost(t *testing.T) {
 		"homelab/recipes":        {"index.html": "recipes v1", "about.html": "about"},
 		"homelab/garden-journal": {"index.html": "x", "package.json": `{"scripts": {"build": "vite build"}, "devDependencies": {"vite": "^5"}}`},
 		"locked/notes":           {"index.html": "notes"},
+		"homelab/mono": {
+			"README.md":                   "two pails",
+			"apps/web/index.html":         "the web app",
+			"apps/web/about.html":         "about the web app",
+			"apps/docs/pail.json":         `{"static": "./public"}`,
+			"apps/docs/public/index.html": "the docs",
+			"apps/docs/notes.txt":         "not served",
+		},
 	}}
 	ts := httptest.NewServer(host)
 	defer ts.Close()
@@ -902,6 +920,63 @@ func TestPailsFromAGitHost(t *testing.T) {
 	if _, err := f.svc.Get("garden"); err == nil {
 		t.Error("a repo Pail can't deploy left a pail behind")
 	}
+
+	// A repo with more than one pail: each pail is one folder of it.
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?repo=homelab/mono&branch=main", nil), 200, "No index.html at the top")
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?repo=homelab/mono&branch=main&dir=apps/web", nil), 200, "index.html in apps/web")
+	wantBody(t, f.api("GET", "/api/v1/git/forgejo/detect?repo=homelab/mono&branch=main&dir=../etc", nil), http.StatusBadRequest, "inside the repo")
+	wantBody(t, post("/api/v1/pails/mono/repo", `{"host": "forgejo", "repo": "homelab/mono", "branch": "main"}`), http.StatusConflict, "No index.html at the top")
+	wantBody(t, post("/api/v1/pails/mono/repo", `{"host": "forgejo", "repo": "homelab/mono", "branch": "main", "dir": "apps/../.."}`), http.StatusBadRequest, "inside the repo")
+	wantBody(t, post("/api/v1/pails/mono-web/repo", `{"host": "forgejo", "repo": "homelab/mono", "branch": "main", "dir": "./apps/web/"}`), http.StatusAccepted, `"label":"first deploy from homelab/mono@main:apps/web"`)
+	wantBody(t, post("/api/v1/pails/mono-docs/repo", `{"host": "forgejo", "repo": "homelab/mono", "branch": "main", "dir": "apps/docs"}`), http.StatusAccepted, `"hook":true`)
+	f.svc.Wait()
+	wantBody(t, f.site("mono-web.pail.lan", "/"), 200, "the web app")
+	wantBody(t, f.site("mono-web.pail.lan", "/about"), 200, "about the web app")
+	wantBody(t, f.site("mono-web.pail.lan", "/apps/docs/notes.txt"), 404, "")
+	wantBody(t, f.site("mono-docs.pail.lan", "/"), 200, "the docs")
+	wantBody(t, f.site("mono-docs.pail.lan", "/notes.txt"), 404, "")
+	wantBody(t, f.api("GET", "/api/v1/pails/mono-web", nil), 200, `"dir":"apps/web"`)
+	wantBody(t, f.api("GET", "/api/v1/pails/mono-web/deploys", nil), 200, `"files":2`)
+	// Redeploy pulls the same folder again.
+	host.repos["homelab/mono"]["apps/web/index.html"] = "the web app, again"
+	wantBody(t, post("/api/v1/pails/mono-web/redeploy", ""), http.StatusAccepted, `"label":"redeploy of main"`)
+	f.svc.Wait()
+	wantBody(t, f.site("mono-web.pail.lan", "/"), 200, "the web app, again")
+	wantBody(t, f.site("mono-docs.pail.lan", "/"), 200, "the docs")
+
+	// A push redeploys the pails whose folders it changed, and no others.
+	// A delivery that doesn't say what changed redeploys them all.
+	monoHook := func(pail, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		// Both pails' hooks were added to the one repo; the forge keeps the last.
+		secret := host.secrets[pail]
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(body))
+		rec := f.do("POST", "pail.lan", "/api/v1/hooks/"+pail, []byte(body), "X-Gitea-Signature", hex.EncodeToString(mac.Sum(nil)))
+		f.svc.Wait()
+		return rec
+	}
+	pushOf := func(files ...string) string {
+		b, _ := json.Marshal(map[string]any{"ref": "refs/heads/main", "total_commits": 1, "commits": []map[string]any{{"added": []string{}, "modified": files, "removed": []string{}}}})
+		return string(b)
+	}
+	host.repos["homelab/mono"]["apps/web/index.html"] = "the web app, pushed"
+	host.repos["homelab/mono"]["apps/docs/public/index.html"] = "the docs, pushed"
+	wantBody(t, monoHook("mono-docs", pushOf("apps/web/index.html", "README.md")), 200, `"skipped":"The push changed nothing in apps/docs."`)
+	wantBody(t, monoHook("mono-web", pushOf("apps/web/index.html", "README.md")), http.StatusAccepted, `"deployed":true`)
+	wantBody(t, f.site("mono-web.pail.lan", "/"), 200, "the web app, pushed")
+	wantBody(t, f.site("mono-docs.pail.lan", "/"), 200, "the docs")
+	// pail.json can name what else a pail is redeployed for.
+	wantBody(t, monoHook("mono-docs", pushOf("packages/ui/button.js")), 200, `"deployed":false`)
+	host.repos["homelab/mono"]["apps/docs/pail.json"] = `{"static": "./public", "watch": ["packages/ui"]}`
+	wantBody(t, monoHook("mono-docs", pushOf("packages/ui/button.js")), http.StatusAccepted, `"deployed":true`)
+	wantBody(t, f.site("mono-docs.pail.lan", "/"), 200, "the docs, pushed")
+	host.repos["homelab/mono"]["apps/web/index.html"] = "the web app, pushed blind"
+	wantBody(t, monoHook("mono-web", `{"ref": "refs/heads/main"}`), http.StatusAccepted, `"deployed":true`)
+	wantBody(t, f.site("mono-web.pail.lan", "/"), 200, "the web app, pushed blind")
+	// A pail that is the whole repo deploys on every push to its branch.
+	wantBody(t, deliver(pushOf("docs/unrelated.md"), secret), http.StatusAccepted, `"deployed":true`)
+	f.svc.Wait()
 
 	// A token that can't add webhooks still makes the pail, and says so.
 	locked := post("/api/v1/pails/notes/repo", `{"host": "forgejo", "repo": "locked/notes", "branch": "main"}`)
@@ -1055,6 +1130,9 @@ func (b *fakeBuilder) BuildSite(_ context.Context, req microvm.BuildRequest) (mi
 		}
 		return nil
 	})
+	// The project is the source's top, or the folder of it the build is
+	// told; either way the fake has seen everything it was given.
+	src = filepath.Join(src, filepath.FromSlash(req.Dir))
 	if _, err := os.Stat(filepath.Join(src, "broken")); err == nil {
 		return microvm.BuildResult{}, errors.New("the build exited with status 1")
 	}
@@ -1103,7 +1181,7 @@ func TestProjectsThatNeedABuild(t *testing.T) {
 		"garden/src/main.js":  "import './app'",
 		"garden/pail.json":    `{"routes": [{"path": "/*", "to": "static", "fallback": "index.html"}]}`,
 	}
-	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"builds":{"available":true}`)
+	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"builds":{"available":true,"workspaces":true}`)
 
 	// What is served is what the build made, not the source it was made from.
 	d, log := f.deploy("garden", tarGz(t, project))
@@ -1138,6 +1216,28 @@ func TestProjectsThatNeedABuild(t *testing.T) {
 		t.Errorf("with no way to build: %+v", none)
 	}
 	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"reason":"this machine has no /dev/kvm"`)
+
+	// One project of a workspace: the build is given the whole upload, so
+	// it has the lockfile and the packages beside it, and is told which
+	// folder to build. Only what that folder's build made is served.
+	builder.down = ""
+	workspace := tarGz(t, map[string]string{
+		"acme/pnpm-lock.yaml":         "lockfile",
+		"acme/package.json":           `{"private": true}`,
+		"acme/packages/ui/button.js":  "export {}",
+		"acme/apps/web/package.json":  `{"scripts": {"build": "vite build"}}`,
+		"acme/apps/web/src/main.js":   "import 'ui'",
+		"acme/apps/docs/package.json": `{"scripts": {"build": "astro build"}}`,
+	})
+	rec := f.api("POST", "/api/v1/pails/acme-web/deploys?source=cli&dir=apps/web", workspace)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("deploy a folder of an upload: %d %s", rec.Code, rec.Body)
+	}
+	f.svc.Wait()
+	wantBody(t, f.site("acme-web.pail.lan", "/"), 200, "built from apps/docs/package.json,apps/web/package.json,apps/web/src/main.js,package.json,packages/ui/button.js,pnpm-lock.yaml")
+	wantBody(t, f.api("GET", "/api/v1/pails/acme-web/deploys", nil), 200, `"files":2`)
+	wantBody(t, f.api("POST", "/api/v1/pails/acme-web/deploys?dir=../x", workspace), http.StatusBadRequest, "inside the repo")
+	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"workspaces":true`)
 
 	// A package.json with nothing to build is served as it is.
 	plain, _ := f.deploy("plain", tarGz(t, map[string]string{"index.html": "as it is", "package.json": `{"scripts": {"test": "x"}}`}))

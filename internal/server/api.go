@@ -126,7 +126,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) buildsInfo() map[string]any {
 	ok, why := s.pails.CanBuild()
-	info := map[string]any{"available": ok}
+	// workspaces says an upload may be a whole repo, with ?dir= naming the
+	// folder of it to deploy.
+	info := map[string]any{"available": ok, "workspaces": true}
 	if !ok {
 		info["reason"] = why
 	}
@@ -326,7 +328,8 @@ func (s *Server) handleSetOff(off bool) http.HandlerFunc {
 
 // handleCreateDeploy takes a .tar.gz or .zip as the request body and starts a
 // deploy of it, creating the pail on its first. It answers as soon as the
-// archive has arrived; the deploy's log says how it went.
+// archive has arrived; the deploy's log says how it went. With ?dir=apps/web
+// the pail is that folder of the archive, and a build sees the rest.
 func (s *Server) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !pails.ValidName(name) {
@@ -339,6 +342,12 @@ func (s *Server) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	if source != "cli" && source != "upload" {
 		writeError(w, http.StatusBadRequest, "bad_source", `source is "cli" or "upload".`)
+		return
+	}
+
+	// The upload may be a whole repo, of which the pail is one folder.
+	dir, ok := repoDir(w, r.URL.Query().Get("dir"))
+	if !ok {
 		return
 	}
 
@@ -381,7 +390,7 @@ func (s *Server) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	url := origin(r, name+"."+s.cfg.BaseDomain)
-	d, err := s.pails.StartDeploy(name, pails.Upload{Path: tmp.Name(), Source: source, Label: label, URL: url})
+	d, err := s.pails.StartDeploy(name, pails.Upload{Path: tmp.Name(), Source: source, Label: label, URL: url, Dir: dir})
 	if err != nil {
 		s.writePailError(w, r, err)
 		return

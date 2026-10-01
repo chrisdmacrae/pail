@@ -215,7 +215,10 @@ func extractFunction(archive string, format archiveFormat, strip, src string, si
 			if err != nil || skip {
 				return err
 			}
-			file = strings.TrimPrefix(file, strip)
+			file, ok := strings.CutPrefix(file, strip)
+			if !ok {
+				return nil // outside the pail's folder
+			}
 			var rel string
 			switch {
 			case single && file == src:
@@ -225,7 +228,6 @@ func extractFunction(archive string, format archiveFormat, strip, src string, si
 			case src == "":
 				rel = file
 			default:
-				var ok bool
 				if rel, ok = strings.CutPrefix(file, src+"/"); !ok {
 					return nil
 				}

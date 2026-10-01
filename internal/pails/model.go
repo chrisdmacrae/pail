@@ -38,6 +38,9 @@ type Pail struct {
 	// deploys from a git host.
 	Repo     string `json:"repo,omitempty"`
 	Revision string `json:"revision,omitempty"`
+	// Dir is the folder of the repo the pail deploys from, when that isn't
+	// the top: one pail of a repo that holds several.
+	Dir string `json:"dir,omitempty"`
 	// Hosts are the custom hostnames it also answers at.
 	Hosts []string `json:"hosts"`
 	// Containers are the containers of the deploy being served, and how
@@ -62,6 +65,8 @@ type GitSource struct {
 	Host   string `json:"host"`
 	Repo   string `json:"repo"`
 	Branch string `json:"branch"`
+	// Dir is the folder of the repo that holds the pail, or "" for the top.
+	Dir string `json:"dir,omitempty"`
 	// HookID and HookSecret are the webhook Pail added to the repo, so a
 	// push deploys. They never leave the server.
 	HookID     string `json:"hook_id,omitempty"`

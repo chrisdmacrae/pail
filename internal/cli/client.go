@@ -22,6 +22,12 @@ type apiInfo struct {
 	Limits     struct {
 		MaxUploadSize int64 `json:"max_upload_size"`
 	} `json:"limits"`
+	Builds struct {
+		// Available says the server can build a project; Workspaces, that
+		// it takes a whole repo with the folder to deploy named.
+		Available  bool `json:"available"`
+		Workspaces bool `json:"workspaces"`
+	} `json:"builds"`
 }
 
 type apiPail struct {

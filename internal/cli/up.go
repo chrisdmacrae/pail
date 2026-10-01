@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -53,7 +54,20 @@ func (a *app) up(args []string) error {
 		return err
 	}
 
-	archive, size, err := pack(dir)
+	// A project that builds from its workspace's lockfile is no use to the
+	// server alone: the workspace goes too, and the server is told which
+	// folder of it to deploy.
+	packed, folder := dir, ""
+	if root, lockfile := workspace(dir, manifest); root != "" && info.Builds.Available && info.Builds.Workspaces {
+		if rel, err := filepath.Rel(root, dir); err == nil {
+			packed, folder = root, filepath.ToSlash(rel)
+			if !a.flags.quiet {
+				fmt.Fprintf(a.env.Stderr, "%s builds from the %s in %s, so that folder is sent with it.\n", shown, lockfile, root)
+			}
+		}
+	}
+
+	archive, size, err := pack(packed)
 	if err != nil {
 		return usagef("Couldn't pack %s: %v.", shown, err)
 	}
@@ -67,7 +81,11 @@ func (a *app) up(args []string) error {
 		return err
 	}
 	defer f.Close()
-	resp, err := c.do("POST", "/api/v1/pails/"+name+"/deploys?source=cli", f, size, "application/gzip")
+	target := "/api/v1/pails/" + name + "/deploys?source=cli"
+	if folder != "" {
+		target += "&dir=" + url.QueryEscape(folder)
+	}
+	resp, err := c.do("POST", target, f, size, "application/gzip")
 	if err != nil {
 		return err
 	}
@@ -126,7 +144,8 @@ var outputFolders = map[string]bool{
 }
 
 // pailName picks the pail's name: --name, else name in pail.json, else the
-// git repo's name, else the current folder's name.
+// git repo's name, with the folder's after it for a folder that isn't the
+// repo's top, else the current folder's name.
 func (a *app) pailName(dir string, manifest []byte) (string, error) {
 	const rule = "Pail names are lowercase letters, numbers and dashes, like my-site."
 	if a.flags.name != "" {
@@ -146,7 +165,13 @@ func (a *app) pailName(dir string, manifest []byte) (string, error) {
 	}
 
 	if root := gitRoot(dir); root != "" {
-		if name := slug(filepath.Base(root)); name != "" {
+		name := filepath.Base(root)
+		// A repo may hold more than one pail. Each is named for its folder
+		// too, so one doesn't deploy over another.
+		if folder := pailFolder(root, dir); folder != "" {
+			name += "-" + folder
+		}
+		if name = slug(name); name != "" {
 			return name, nil
 		}
 	}
@@ -164,6 +189,53 @@ func (a *app) pailName(dir string, manifest []byte) (string, error) {
 	}
 }
 
+// lockfiles are what the package managers Pail builds with leave at the top
+// of a project, or of a workspace of several.
+var lockfiles = []string{"pnpm-lock.yaml", "package-lock.json", "yarn.lock"}
+
+func lockfileIn(dir string) string {
+	for _, name := range lockfiles {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// workspace finds the workspace a project is part of: the nearest folder
+// above dir, no further up than its git repo's top, that holds a lockfile.
+// It returns "" for a project with a lockfile of its own, one outside a git
+// repo, and one Pail wouldn't build: no build script, or server code, which
+// is built from the folder alone.
+func workspace(dir string, manifest []byte) (root, lockfile string) {
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil || json.Unmarshal(b, &pkg) != nil || pkg.Scripts["build"] == "" {
+		return "", ""
+	}
+	var pj struct {
+		Functions  map[string]json.RawMessage `json:"functions"`
+		Containers map[string]json.RawMessage `json:"containers"`
+	}
+	if json.Unmarshal(manifest, &pj) == nil && len(pj.Functions)+len(pj.Containers) > 0 {
+		return "", ""
+	}
+	top := gitRoot(dir)
+	if top == "" || top == dir || lockfileIn(dir) != "" {
+		return "", ""
+	}
+	for at := filepath.Dir(dir); ; at = filepath.Dir(at) {
+		if name := lockfileIn(at); name != "" {
+			return at, name
+		}
+		if at == top || filepath.Dir(at) == at {
+			return "", ""
+		}
+	}
+}
+
 // gitRoot is the folder holding the .git that dir sits under, or "".
 func gitRoot(dir string) string {
 	for at := dir; ; at = filepath.Dir(at) {
@@ -174,6 +246,20 @@ func gitRoot(dir string) string {
 			return ""
 		}
 	}
+}
+
+// pailFolder is the name of the folder under a repo's root that dir deploys,
+// stepping out of anything named like build output, or "" when that is the
+// root itself.
+func pailFolder(root, dir string) string {
+	at := dir
+	for at != root && outputFolders[strings.ToLower(filepath.Base(at))] {
+		at = filepath.Dir(at)
+	}
+	if at == root {
+		return ""
+	}
+	return filepath.Base(at)
 }
 
 // slug makes a folder name into a pail name, or "" if nothing is left.

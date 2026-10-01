@@ -1,10 +1,12 @@
 package githost
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -23,12 +25,17 @@ var frameworks = []struct{ pkg, name string }{
 	{"@11ty/eleventy", "Eleventy site"}, {"gatsby", "Gatsby site"},
 }
 
-// Detect looks at the top of a repo and says whether Pail can serve it.
-// canBuild says this Pail can build a project first; where it can't, a
-// project that needs building is recognised and declined.
-func Detect(ctx context.Context, c Client, repo, branch string, canBuild bool) (Detection, error) {
-	read := func(path string) ([]byte, bool, error) {
-		b, err := c.ReadFile(ctx, repo, branch, path)
+// Detect looks at the top of a repo, or at the folder dir of one that holds
+// several pails, and says whether Pail can serve it. canBuild says this Pail
+// can build a project first; where it can't, a project that needs building is
+// recognised and declined.
+func Detect(ctx context.Context, c Client, repo, branch, dir string, canBuild bool) (Detection, error) {
+	where := "at the top"
+	if dir != "" {
+		where = "in " + dir
+	}
+	read := func(file string) ([]byte, bool, error) {
+		b, err := c.ReadFile(ctx, repo, branch, path.Join(dir, file))
 		if errors.Is(err, ErrNotFound) {
 			return nil, false, nil
 		}
@@ -100,7 +107,7 @@ func Detect(ctx context.Context, c Client, repo, branch string, canBuild bool) (
 	if hasManifest {
 		static := strings.TrimSpace(m.Static)
 		if static == "" || static == "." || static == "./" {
-			static = "the top folder"
+			static = cmp.Or(dir, "the top folder")
 		}
 		return Detection{Deployable: true, Summary: "Static files · pail.json serves " + static}, nil
 	}
@@ -108,7 +115,7 @@ func Detect(ctx context.Context, c Client, repo, branch string, canBuild bool) (
 	if _, hasIndex, err := read("index.html"); err != nil {
 		return Detection{}, err
 	} else if hasIndex {
-		return Detection{Deployable: true, Summary: "Static files · index.html at the top"}, nil
+		return Detection{Deployable: true, Summary: "Static files · index.html " + where}, nil
 	}
-	return Detection{Summary: "No index.html at the top, and no pail.json"}, nil
+	return Detection{Summary: "No index.html " + where + ", and no pail.json"}, nil
 }

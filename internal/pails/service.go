@@ -204,7 +204,7 @@ func (s *Service) view(e *entry) Pail {
 		p.UpdatedAt = e.rec.ServedAt
 	}
 	if g := e.rec.Git; g != nil {
-		p.Source, p.Repo, p.Revision = g.Host, g.Repo, g.Branch
+		p.Source, p.Repo, p.Revision, p.Dir = g.Host, g.Repo, g.Branch, g.Dir
 	}
 	if e.rec.Off {
 		p.Status = StatusOff

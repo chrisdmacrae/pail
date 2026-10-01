@@ -37,7 +37,7 @@ A token is the quickest way to start. Signing in is worth setting up if you’d 
 
 3. **Paste the token and press Connect.** Pail checks it with the host before keeping it. A token the host rejects is not saved.
 
-4. **Pick a repo.** Under each repo, Pail says what it found inside. Pick one it can deploy, check the name, and press **Put it in the pail**.
+4. **Pick a repo.** Under each repo, Pail says what it found inside. Pick one it can deploy, check the name, and press **Put it in the pail**. If the site is in a folder of the repo, say which in **Folder**; see More than one pail in a repo, below.
 
 ## Set up signing in
 
@@ -99,6 +99,52 @@ If Pail couldn’t add the webhook at all, usually because the token may not, th
 
 Builds run in a small virtual machine of their own, which needs a Pail server on Linux with KVM. A Pail without it says so under the repo, and declines it. In that case, build the project yourself and deploy the result with `pail up ./dist`, from your machine or from CI.
 
+## More than one pail in a repo
+
+A repo can hold several pails, each in a folder of its own:
+
+```
+acme/
+  apps/web/     index.html, …
+  apps/docs/    pail.json, public/
+```
+
+Make one pail per folder. Pick the repo in New pail, type the folder into **Folder**, like `apps/web`, and Pail looks inside it and suggests a name made of the repo’s and the folder’s: `acme-web`. Then do the same for `apps/docs`.
+
+- **The folder is the pail’s top.** Its `index.html`, `pail.json` and `package.json` are the ones Pail reads, and paths in `pail.json` start from it. Nothing outside the folder is deployed.
+- **Each pail is its own.** It has its own name, addresses, deploys and rollback.
+- **A build has the whole repo.** A project that needs building is built with the rest of the repo beside it. Dependencies are installed where the lockfile is, in the folder or above it, so a project in an npm, pnpm or yarn workspace builds as it does on your machine. Pail runs the folder’s own build script and no other.
+
+From the command line, `pail up apps/web` deploys one folder. Without `--name` or a `name` in its `pail.json`, the pail is named the same way, `acme-web`. When the project builds from a lockfile above it, `pail up` sends the workspace along and says so.
+
+### Which pushes deploy which pail
+
+A push redeploys a pail when it changed something the pail is made from:
+
+- a file in the pail’s folder,
+- a `package.json`, lockfile, `pnpm-workspace.yaml` or `.npmrc` in a folder above it,
+- anything its `pail.json` lists under `watch`.
+
+`watch` is for what the pail uses from elsewhere in the repo. Its paths start from the top of the repo, and each is a folder or a file:
+
+```json
+{
+  "watch": ["packages/ui", "shared/theme.css"]
+}
+```
+
+A push that changed none of these is skipped: no deploy is made, and the pail goes on serving what it was.
+
+Pail only skips a push when the host lists every file it changed. It deploys to be safe when the host doesn’t:
+
+| When | Why |
+| --- | --- |
+| Any push on Bitbucket | Bitbucket doesn’t list files. |
+| A forced push, or a new branch | What changed isn’t the commits that were pushed. |
+| A push of twenty commits or more | Hosts list only the first of a long push. |
+
+Only GitHub says when a push was forced. On the others, press **Redeploy** after rewriting a branch.
+
 ## When it doesn’t work
 
 **“… didn’t accept that token.”** The token is mistyped, has expired, or can’t read your repos. Make a new one with the permissions in the host’s guide.
@@ -113,6 +159,6 @@ Builds run in a small virtual machine of their own, which needs a Pail server on
 
 **“The sign-in to … has run out. Sign in again from New pail.”** Pail renews a sign-in by itself, but the host can end one, for instance if you revoke the app. Sign in again.
 
-**Pushes don’t deploy.** The host can’t reach Pail, or blocked the delivery. Look at the webhook’s recent deliveries in the repo’s settings at the host: it shows what happened to each one.
+**Pushes don’t deploy.** The host can’t reach Pail, or blocked the delivery. Look at the webhook’s recent deliveries in the repo’s settings at the host: it shows what happened to each one. For a pail that is a folder of its repo, a delivery answered with “The push changed nothing in …” was skipped on purpose; see Which pushes deploy which pail, above.
 
 **“… isn’t connected.”** The host was disconnected after the pail was made. Connect it again from New pail; the pail picks up where it left off.
