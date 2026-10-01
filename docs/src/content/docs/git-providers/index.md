@@ -89,17 +89,15 @@ If Pail couldn’t add the webhook at all, usually because the token may not, th
 
 ## What Pail can deploy
 
-Pail serves a repo’s files as they are. It doesn’t run builds yet.
-
 | What’s in the repo | What Pail does |
 | --- | --- |
-| An `index.html` at the top | Serves the repo. |
+| An `index.html` at the top | Serves the repo as it is. |
 | A `pail.json` with `static` set | Serves that folder. |
-| A `package.json` with a build script | Declines it for now, and says what kind of project it looks like. |
+| A `package.json` with a build script | Builds it on every deploy, then serves the result. |
 | A `pail.json` with functions or containers | Declines it for now. |
 | None of these | Declines it: there is nothing to serve. |
 
-For a project that needs building, build it yourself and deploy the result with `pail up ./dist`, from your machine or from CI.
+Builds run in a small virtual machine of their own, which needs a Pail server on Linux with KVM. A Pail without it says so under the repo, and declines it. In that case, build the project yourself and deploy the result with `pail up ./dist`, from your machine or from CI.
 
 ## When it doesn’t work
 
@@ -107,7 +105,7 @@ For a project that needs building, build it yourself and deploy the result with 
 
 **The repo list is empty.** The token can’t see any repos. Some hosts limit a token to chosen repos; check what it was given.
 
-**A repo says it “needs a build”.** Pail can’t run builds yet. See What Pail can deploy, above.
+**A repo says it “needs a build, which this Pail can’t run”.** This Pail’s server can’t run the virtual machines builds happen in. See What Pail can deploy, above.
 
 **“That sign-in didn’t start here, or took too long.”** A sign-in has ten minutes to finish, and each one works once. Press **Sign in with …** again.
 

@@ -26,6 +26,13 @@ type Config struct {
 	Listen string
 	// ListenTLS is the address the HTTPS listener binds (PAIL_LISTEN_TLS).
 	ListenTLS string
+	// DataDir is local disk for what microVMs need: root filesystems and
+	// work disks (PAIL_DATA_DIR).
+	DataDir string
+	// Firecracker is the firecracker binary (PAIL_FIRECRACKER), and Kernel
+	// the guest kernel microVMs boot (PAIL_KERNEL).
+	Firecracker string
+	Kernel      string
 	// TLSOff turns HTTPS off (PAIL_TLS=off): Pail then serves everything
 	// over plain HTTP, for local development or behind a proxy that
 	// terminates TLS itself.
@@ -97,6 +104,7 @@ func Load(getenv func(string) string) (Config, error) {
 		BaseDomain: strings.ToLower(strings.Trim(get("PAIL_BASE_DOMAIN", "pail.lan"), ".")),
 		Listen:     get("PAIL_LISTEN", ":80"),
 		ListenTLS:  get("PAIL_LISTEN_TLS", ":443"),
+		DataDir:    get("PAIL_DATA_DIR", "/var/lib/pail"),
 		S3: S3{
 			Endpoint:  get("PAIL_S3_ENDPOINT", ""),
 			AccessKey: get("PAIL_S3_ACCESS_KEY", ""),
@@ -139,6 +147,9 @@ func Load(getenv func(string) string) (Config, error) {
 	if (c.ACME.DNSProvider == "") != (c.ACME.DNSToken == "") {
 		return c, errors.New("PAIL_ACME_DNS_PROVIDER and PAIL_ACME_DNS_TOKEN go together. Set both, or neither")
 	}
+
+	c.Firecracker = get("PAIL_FIRECRACKER", "firecracker")
+	c.Kernel = get("PAIL_KERNEL", c.DataDir+"/vmlinux")
 
 	c.OAuth = map[string]OAuthApp{}
 	for _, h := range oauthHosts {

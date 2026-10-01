@@ -28,7 +28,8 @@ GOFILES   := $(shell git ls-files '*.go')
 
 .DEFAULT_GOAL := help
 .PHONY: help setup build ui install test test-go test-ui lint lint-go lint-ui fmt check \
-        dev dev-storage dev-server dev-ui dev-docs docs clean
+        dev dev-storage dev-server dev-ui dev-docs docs clean \
+        kvm-up kvm-check kvm-smoke kvm-shell kvm-down dev-kvm test-kvm release
 
 help: ## List these commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -51,6 +52,9 @@ ui: ## Build the web UI into the folder pail-server embeds
 
 docs: ## Build the documentation site into docs/dist
 	cd $(DOCS) && pnpm install --frozen-lockfile && pnpm build
+
+release: ui ## Build what a release publishes into dist/release (VERSION=v0.1.0)
+	scripts/release $(or $(VERSION),dev)
 
 install: ## Install the pail command into your Go bin
 	go install ./cmd/pail
@@ -114,6 +118,34 @@ dev-ui: ## Run the web UI with hot reload on :5173, using dev-server's API
 dev-docs: ## Run the documentation site with hot reload on :4321
 	cd $(DOCS) && pnpm dev
 
+## The KVM host: where Firecracker runs
+#
+# Firecracker needs Linux with KVM. KVM_HOST says where that is: "lima" (the
+# default: a Lima VM on this machine, for Apple M3 or later) or user@host for
+# any Linux machine over SSH. For example: make kvm-up KVM_HOST=chris@homelab
+export KVM_HOST ?= lima
+
+kvm-up: ## Make the KVM host ready: start the Lima VM (or check the SSH host), install Firecracker
+	scripts/kvm-host up
+
+kvm-check: ## Say whether the KVM host can run microVMs
+	scripts/kvm-host check
+
+kvm-smoke: ## Boot one microVM on the KVM host, to see that it can
+	scripts/kvm-host smoke
+
+kvm-shell: ## Open a shell on the KVM host
+	scripts/kvm-host shell
+
+kvm-down: ## Stop the Lima VM
+	scripts/kvm-host down
+
+dev-kvm: ui ## Run Pail on the KVM host, with microVMs, on :8080
+	scripts/kvm-host run
+
+test-kvm: ## Run the tests that boot real microVMs, on the KVM host
+	scripts/kvm-host test
+
 clean: ## Remove what the build made
-	rm -rf $(BIN) $(DOCS)/dist $(DOCS)/.astro
+	rm -rf $(BIN) dist $(DOCS)/dist $(DOCS)/.astro
 	find internal/webui/dist -mindepth 1 ! -name .gitkeep -delete

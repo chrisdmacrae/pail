@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Builds everything a Pail release publishes, into dist/release:
+#
+#   pail-server_linux_<arch>.tar.gz   the server, with the web UI inside
+#   pail_<os>_<arch>.tar.gz|zip       pail-cli, for macOS, Linux and Windows
+#   pail-proxmox.sh                   the Proxmox LXC installer
+#   checksums.txt                     SHA-256 of each of the above
+#
+# File names carry no version, so "releases/latest/download/<name>" always
+# points at the newest. Build the web UI first (make ui): the server embeds it.
+#
+# Usage: scripts/release <version>     e.g. scripts/release v0.1.0
+set -euo pipefail
+
+version=${1:?usage: scripts/release <version>}
+repo=$(cd "$(dirname "$0")/.." && pwd)
+out="$repo/dist/release"
+cd "$repo"
+
+[ -f internal/webui/dist/index.html ] || { echo "release: the web UI isn't built. Run make ui first." >&2; exit 1; }
+
+rm -rf "$out" && mkdir -p "$out"
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+flags="-s -w -X main.version=$version"
+# Built on a Mac, tar would add its own attributes to the archives.
+export COPYFILE_DISABLE=1
+
+for arch in amd64 arm64; do
+  echo "pail-server linux/$arch" >&2
+  GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "$flags" -o "$stage/pail-server" ./cmd/pail-server
+  tar --no-xattrs -czf "$out/pail-server_linux_$arch.tar.gz" -C "$stage" pail-server
+  rm "$stage/pail-server"
+done
+
+for os in linux darwin windows; do
+  for arch in amd64 arm64; do
+    echo "pail $os/$arch" >&2
+    bin=pail
+    [ "$os" = windows ] && bin=pail.exe
+    GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "$flags" -o "$stage/$bin" ./cmd/pail
+    if [ "$os" = windows ]; then
+      (cd "$stage" && zip -q "$out/pail_${os}_$arch.zip" "$bin")
+    else
+      tar --no-xattrs -czf "$out/pail_${os}_$arch.tar.gz" -C "$stage" "$bin"
+    fi
+    rm "$stage/$bin"
+  done
+done
+
+cp deploy/proxmox/pail-lxc.sh "$out/pail-proxmox.sh"
+
+(cd "$out" && { command -v sha256sum >/dev/null && sha256sum -- * || shasum -a 256 -- *; } > "$stage/checksums.txt")
+mv "$stage/checksums.txt" "$out/checksums.txt"
+ls -1 "$out" >&2

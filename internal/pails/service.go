@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chrisdmacrae/pail/internal/microvm"
 	"github.com/chrisdmacrae/pail/internal/storage"
 )
 
@@ -22,7 +23,16 @@ type Options struct {
 	MaxDeploys int
 	// MaxUnpackedSize caps what one archive may unpack to, in bytes.
 	MaxUnpackedSize int64
-	Logger          *slog.Logger
+	// Builder runs builds in microVMs. Nil means this Pail has none.
+	Builder Builder
+	Logger  *slog.Logger
+}
+
+// Builder builds a project that can't be served as it stands.
+type Builder interface {
+	// Available says whether builds can run here and, if not, why.
+	Available() (bool, string)
+	BuildSite(ctx context.Context, req microvm.BuildRequest) (microvm.BuildResult, error)
 }
 
 // Service is the one writer of a Pail installation's storage. It keeps every
@@ -33,6 +43,7 @@ type Service struct {
 	baseDomain      string
 	maxDeploys      int
 	maxUnpackedSize int64
+	builder         Builder
 	log             *slog.Logger
 
 	deploys sync.WaitGroup
@@ -69,6 +80,7 @@ func New(o Options) *Service {
 		baseDomain:      o.BaseDomain,
 		maxDeploys:      o.MaxDeploys,
 		maxUnpackedSize: o.MaxUnpackedSize,
+		builder:         o.Builder,
 		log:             o.Logger,
 		pails:           map[string]*entry{},
 		removing:        map[string]bool{},
@@ -215,6 +227,15 @@ func (s *Service) updateRecord(ctx context.Context, e *entry, man *Manifest, cha
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// CanBuild says whether this Pail can build a project before serving it and,
+// if not, why.
+func (s *Service) CanBuild() (bool, string) {
+	if s.builder == nil {
+		return false, "it has no way to run microVMs"
+	}
+	return s.builder.Available()
 }
 
 // SetGit records the repo a pail deploys from, or with nil, that it no

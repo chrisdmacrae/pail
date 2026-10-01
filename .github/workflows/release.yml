@@ -1,0 +1,37 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds the binaries and publishes a release. The
+# Proxmox installer downloads the server from the newest one.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/ui/pnpm-lock.yaml
+      - name: Test
+        run: go test ./...
+      - name: Build the web UI
+        run: make ui
+      - name: Build the release
+        run: scripts/release "$GITHUB_REF_NAME"
+      - name: Publish
+        run: gh release create "$GITHUB_REF_NAME" dist/release/* --title "Pail $GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

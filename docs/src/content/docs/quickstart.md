@@ -4,8 +4,8 @@ lead: "From nothing to your first pail. This page is still being written."
 section: Start here
 order: 1
 next:
-  href: /git-providers/
-  label: Set up a git provider
+  href: /running/
+  label: Running Pail
 ---
 
 > **Not written yet.** The quickstart will walk through installing Pail, starting it, and putting your first site in it with one command.

@@ -218,10 +218,16 @@ func TestDetect(t *testing.T) {
 		{"nothing to serve", files{"README.md": "hello"}, false, "No index.html at the top"},
 	}
 	for _, c := range cases {
-		got, err := Detect(context.Background(), c.repo, "o/r", "main")
+		got, err := Detect(context.Background(), c.repo, "o/r", "main", false)
 		if err != nil || got.Deployable != c.deploy || !strings.Contains(got.Summary, c.says) {
 			t.Errorf("%s: %+v, %v; want deployable=%v saying %q", c.name, got, err, c.deploy, c.says)
 		}
+	}
+
+	// A Pail that can run builds takes the projects that need one.
+	vite := files{"index.html": "x", "package.json": `{"scripts": {"build": "vite build"}, "devDependencies": {"vite": "^5"}}`}
+	if got, err := Detect(context.Background(), vite, "o/r", "main", true); err != nil || !got.Deployable || !strings.Contains(got.Summary, "Vite app · Pail builds it") {
+		t.Errorf("a Vite app where builds run: %+v, %v", got, err)
 	}
 }
 

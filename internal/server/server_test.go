@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/hmac"
@@ -19,6 +20,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -26,6 +29,7 @@ import (
 	"github.com/chrisdmacrae/pail/internal/certs"
 	"github.com/chrisdmacrae/pail/internal/config"
 	"github.com/chrisdmacrae/pail/internal/githost"
+	"github.com/chrisdmacrae/pail/internal/microvm"
 	"github.com/chrisdmacrae/pail/internal/pails"
 	"github.com/chrisdmacrae/pail/internal/storage"
 )
@@ -1015,4 +1019,100 @@ func TestSigningInToAGitHost(t *testing.T) {
 	if problem := landed(callback("code=the-code&state=" + state)); !strings.Contains(problem, "didn’t start here") {
 		t.Errorf("the same state again: %q", problem)
 	}
+}
+
+// fakeBuilder stands in for the microVM: it "builds" by writing a page that
+// names the files it was given.
+type fakeBuilder struct {
+	down string // why builds can't run, or "" if they can
+	seen []string
+}
+
+func (b *fakeBuilder) Available() (bool, string) { return b.down == "", b.down }
+
+func (b *fakeBuilder) BuildSite(_ context.Context, req microvm.BuildRequest) (microvm.BuildResult, error) {
+	dir, err := os.MkdirTemp("", "pail-fake-build-")
+	if err != nil {
+		return microvm.BuildResult{}, err
+	}
+	src := filepath.Join(dir, "src")
+	os.MkdirAll(src, 0o755)
+	if err := req.Fill(src); err != nil {
+		return microvm.BuildResult{}, err
+	}
+	b.seen = nil
+	filepath.WalkDir(src, func(p string, d os.DirEntry, _ error) error {
+		if !d.IsDir() {
+			rel, _ := filepath.Rel(src, p)
+			b.seen = append(b.seen, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if _, err := os.Stat(filepath.Join(src, "broken")); err == nil {
+		return microvm.BuildResult{}, errors.New("the build exited with status 1")
+	}
+	req.Log("→ npm run build")
+	out := filepath.Join(dir, "out", "dist")
+	os.MkdirAll(filepath.Join(out, "assets"), 0o755)
+	os.WriteFile(filepath.Join(out, "index.html"), []byte("built from "+strings.Join(b.seen, ",")), 0o644)
+	os.WriteFile(filepath.Join(out, "assets", "app.js"), []byte("console.log(1)"), 0o644)
+	return microvm.BuildResult{Dir: out, Output: cmp.Or(req.Static, "dist"), Cleanup: func() { os.RemoveAll(dir) }}, nil
+}
+
+func TestProjectsThatNeedABuild(t *testing.T) {
+	store := storage.NewMemory()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	builder := &fakeBuilder{}
+	cfg := config.Config{Token: token, BaseDomain: "pail.lan", MaxUploadSize: 1 << 20, MaxDeploys: 3}
+	svc := pails.New(pails.Options{Store: store, BaseDomain: cfg.BaseDomain, MaxDeploys: 3, Builder: builder, Logger: logger})
+	f := &fixture{t: t, store: store, svc: svc, srv: New(Options{Config: cfg, Pails: svc, Logger: logger, Version: "test"})}
+
+	project := map[string]string{
+		"garden/package.json": `{"scripts": {"build": "vite build"}}`,
+		"garden/index.html":   "the unbuilt entry page",
+		"garden/src/main.js":  "import './app'",
+		"garden/pail.json":    `{"routes": [{"path": "/*", "to": "static", "fallback": "index.html"}]}`,
+	}
+	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"builds":{"available":true}`)
+
+	// What is served is what the build made, not the source it was made from.
+	d, log := f.deploy("garden", tarGz(t, project))
+	if d.State != "ok" {
+		t.Fatalf("deploy: %+v\n%s", d, log)
+	}
+	for _, want := range []string{"found package.json with a build script", "building in a microVM", "npm run build", "built ./dist · 2 files"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log lacks %q:\n%s", want, log)
+		}
+	}
+	wantBody(t, f.site("garden.pail.lan", "/"), 200, "built from index.html,package.json,pail.json,src/main.js")
+	wantBody(t, f.site("garden.pail.lan", "/assets/app.js"), 200, "console.log(1)")
+	wantBody(t, f.site("garden.pail.lan", "/some/route"), 200, "built from") // pail.json's fallback still applies
+	if rec := f.site("garden.pail.lan", "/src/main.js"); !strings.Contains(rec.Body.String(), "built from") {
+		t.Errorf("the project's source was served: %s", rec.Body)
+	}
+
+	// A build that fails is a failed deploy, and the last one keeps serving.
+	project["garden/broken"] = "x"
+	bad, log := f.deploy("garden", tarGz(t, project))
+	if bad.State != "failed" || !strings.Contains(bad.Error, "The build didn’t finish: the build exited with status 1") {
+		t.Errorf("a failing build: %+v\n%s", bad, log)
+	}
+	wantBody(t, f.site("garden.pail.lan", "/"), 200, "built from")
+
+	// Where builds can't run, the deploy says why and what to do instead.
+	builder.down = "this machine has no /dev/kvm"
+	delete(project, "garden/broken")
+	none, _ := f.deploy("garden", tarGz(t, project))
+	if none.State != "failed" || !strings.Contains(none.Error, "this machine has no /dev/kvm") || !strings.Contains(none.Error, "pail up ./dist") {
+		t.Errorf("with no way to build: %+v", none)
+	}
+	wantBody(t, f.api("GET", "/api/v1/info", nil), 200, `"reason":"this machine has no /dev/kvm"`)
+
+	// A package.json with nothing to build is served as it is.
+	plain, _ := f.deploy("plain", tarGz(t, map[string]string{"index.html": "as it is", "package.json": `{"scripts": {"test": "x"}}`}))
+	if plain.State != "ok" {
+		t.Errorf("a site with a package.json but no build: %+v", plain)
+	}
+	wantBody(t, f.site("plain.pail.lan", "/"), 200, "as it is")
 }

@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# The KVM host: where Pail's Firecracker work runs during development.
+#
+# Firecracker needs Linux with KVM, so on a Mac it runs somewhere else. That
+# somewhere is a setting:
+#
+#   KVM_HOST=lima          a Lima VM on this machine, with nested
+#                          virtualization (the default; Apple M3 or later)
+#   KVM_HOST=user@host     any Linux machine with /dev/kvm, reached over SSH,
+#                          as a user who can sudo without a password
+#   KVM_HOST=local         this machine, when it is Linux with /dev/kvm
+#
+# Usage: scripts/kvm-host <up|setup|check|smoke|push|run|test|shell|down>
+set -euo pipefail
+
+KVM_HOST=${KVM_HOST:-lima}
+LIMA_NAME=${KVM_LIMA_NAME:-pail-kvm}
+# Where Firecracker, the guest kernel, images and Pail's own data live on the host.
+KVM_DIR=${KVM_DIR:-/var/lib/pail-dev}
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+
+# Pinned, so every dev host runs the same thing. The kernel and root image
+# come from Firecracker's own CI builds; its newest set is for v1.15.
+FC_VERSION=${FC_VERSION:-v1.17.0}
+FC_CI=${FC_CI:-v1.15}
+FC_KERNEL=${FC_KERNEL:-vmlinux-6.1.155}
+FC_ROOTFS=${FC_ROOTFS:-ubuntu-24.04.squashfs}
+
+is_lima() { [ "$KVM_HOST" = lima ]; }
+is_local() { [ "$KVM_HOST" = local ]; }
+# shares_files says the host sees this checkout at the same path.
+shares_files() { is_lima || is_local; }
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "kvm-host: $*"; exit 1; }
+
+# on_host runs a shell script on the KVM host.
+on_host() {
+  if is_lima; then
+    limactl shell --workdir / "$LIMA_NAME" -- bash -lc "$1"
+  elif is_local; then
+    bash -c "$1"
+  else
+    ssh -o BatchMode=yes "$KVM_HOST" "bash -lc $(printf '%q' "$1")"
+  fi
+}
+
+# host_arch is the host's architecture as Go names it.
+host_arch() {
+  case "$(on_host 'uname -m')" in
+    aarch64 | arm64) echo arm64 ;;
+    x86_64 | amd64) echo amd64 ;;
+    *) die "the KVM host has an architecture Firecracker doesn't run on" ;;
+  esac
+}
+
+cmd_up() {
+  if is_lima; then
+    command -v limactl >/dev/null || die "Lima isn't installed. Run: brew install lima"
+    if ! limactl list -q 2>/dev/null | grep -qx "$LIMA_NAME"; then
+      say "Making the Lima VM $LIMA_NAME (this downloads an Ubuntu image the first time)"
+      # The repo is mounted read-only: binaries are built on this machine
+      # and run from the mount.
+      limactl start --name="$LIMA_NAME" --tty=false --vm-type=vz --nested-virt \
+        --cpus=4 --memory=6 --disk=30 --mount-only "$REPO" template:ubuntu-lts
+    elif [ "$(limactl list -f '{{.Status}}' "$LIMA_NAME")" != Running ]; then
+      limactl start --tty=false "$LIMA_NAME"
+    fi
+  elif is_local; then
+    [ "$(uname -s)" = Linux ] || die "KVM_HOST=local needs this machine to be Linux"
+    sudo -n true || die "this user needs sudo without a password"
+  else
+    on_host true || die "can't reach $KVM_HOST over SSH"
+    on_host 'sudo -n true' || die "$KVM_HOST needs sudo without a password for this user"
+  fi
+  cmd_setup
+}
+
+# setup installs what the host needs. It's safe to run again.
+cmd_setup() {
+  on_host "
+    set -e
+    missing=
+    for tool in mkfs.ext4 debugfs iptables ip rsync curl; do
+      command -v \$tool >/dev/null 2>&1 || PATH=\$PATH:/sbin:/usr/sbin command -v \$tool >/dev/null 2>&1 || missing=\"\$missing \$tool\"
+    done
+    if [ -n \"\$missing\" ]; then
+      command -v apt-get >/dev/null || { echo \"This host is missing:\$missing. Install them and run this again.\" >&2; exit 1; }
+      echo \"Installing:\$missing\" >&2
+      sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq e2fsprogs iptables iproute2 rsync curl >/dev/null
+    fi
+    sudo mkdir -p $KVM_DIR/bin && sudo chown -R \$(id -u):\$(id -g) $KVM_DIR
+    cd $KVM_DIR
+    arch=\$(uname -m)
+    if [ ! -x firecracker ] || ! ./firecracker --version | grep -q '${FC_VERSION#v}'; then
+      echo 'Downloading Firecracker $FC_VERSION' >&2
+      curl -fsSL https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-\$arch.tgz | tar -xz
+      mv release-$FC_VERSION-\$arch/firecracker-$FC_VERSION-\$arch firecracker
+      rm -rf release-$FC_VERSION-\$arch
+    fi
+    base=https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/$FC_CI/\$arch
+    [ -f vmlinux ] || { echo 'Downloading the guest kernel' >&2; curl -fsSL -o vmlinux \$base/$FC_KERNEL; }
+    [ -f ubuntu.squashfs ] || { echo 'Downloading a root image for the smoke test' >&2; curl -fsSL -o ubuntu.squashfs \$base/$FC_ROOTFS; }
+  "
+  cmd_check
+}
+
+# check says whether the host is ready, and fails if it isn't.
+cmd_check() {
+  on_host "
+    ok=0
+    line() { printf '  %-14s %s\n' \"\$1\" \"\$2\" >&2; }
+    line host \"\$(hostname) · \$(uname -sm) · $KVM_HOST\"
+    if [ -e /dev/kvm ]; then line kvm /dev/kvm; else line kvm 'missing: this host can not run microVMs'; ok=1; fi
+    if [ -e /dev/net/tun ]; then line tun /dev/net/tun; else line tun missing; ok=1; fi
+    if [ -x $KVM_DIR/firecracker ]; then line firecracker \"\$($KVM_DIR/firecracker --version | head -1)\"; else line firecracker 'missing: run make kvm-up'; ok=1; fi
+    if [ -f $KVM_DIR/vmlinux ]; then line kernel $KVM_DIR/vmlinux; else line kernel 'missing: run make kvm-up'; ok=1; fi
+    exit \$ok
+  " || die "the KVM host isn't ready"
+}
+
+# smoke boots one microVM to a shell prompt and reads its console.
+cmd_smoke() {
+  on_host "
+    set -e
+    cd $KVM_DIR
+    cat > smoke.json <<JSON
+{
+  \"boot-source\": {\"kernel_image_path\": \"$KVM_DIR/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 root=/dev/vda ro init=/bin/sh\"},
+  \"drives\": [{\"drive_id\": \"rootfs\", \"path_on_host\": \"$KVM_DIR/ubuntu.squashfs\", \"is_root_device\": true, \"is_read_only\": true}],
+  \"machine-config\": {\"vcpu_count\": 1, \"mem_size_mib\": 256}
+}
+JSON
+    sudo timeout 15 ./firecracker --no-api --config-file smoke.json > smoke.log 2>&1 < /dev/null || true
+    if grep -aq 'Run /bin/sh as init process' smoke.log; then
+      echo \"A microVM booted: \$(grep -a 'Run /bin/sh' smoke.log | grep -o '\\[ *[0-9.]*\\]') from kernel to init.\" >&2
+    else
+      echo 'The microVM did not boot. Its console:' >&2; tail -15 smoke.log >&2; exit 1
+    fi
+  " || die "Firecracker doesn't work on this host"
+}
+
+# push builds Pail for the host and puts the binaries where it can run them.
+# It prints the folder they are in, on the host.
+cmd_push() {
+  local arch; arch=$(host_arch)
+  local out="$REPO/bin/linux-$arch"
+  mkdir -p "$out"
+  (cd "$REPO" && GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -o "$out/" ./cmd/pail-server ./cmd/pail)
+  if [ ! -x "$out/versitygw" ]; then
+    say "Building versitygw for the host"
+    (cd "$REPO" && GOOS=linux GOARCH=$arch CGO_ENABLED=0 GOBIN= go install github.com/versity/versitygw/cmd/versitygw@latest)
+    local built; built="$(go env GOPATH)/bin/linux_$arch/versitygw"
+    # Built for this machine's own OS it lands in bin/ itself; that isn't Linux here.
+    [ -x "$built" ] || die "couldn't build versitygw for linux/$arch"
+    cp "$built" "$out/versitygw"
+  fi
+  if shares_files; then
+    echo "$out" # the host sees this checkout at the same path
+  else
+    on_host "mkdir -p $KVM_DIR/bin"
+    rsync -az --delete "$out/" "$KVM_HOST:$KVM_DIR/bin/"
+    echo "$KVM_DIR/bin"
+  fi
+}
+
+# run starts versitygw and pail-server on the host, as root, and shows
+# Pail's log until you press Ctrl-C. Ports reach this machine: Lima forwards
+# them by itself, and for an SSH host this forwards them.
+cmd_run() {
+  local bin; bin=$(cmd_push)
+  local script="
+    set -e
+    mkdir -p $KVM_DIR/s3
+    trap 'sudo pkill -f $bin/pail-server; pkill -f $bin/versitygw; exit 0' INT TERM EXIT
+    ROOT_ACCESS_KEY=pail ROOT_SECRET_KEY=pail-dev-secret $bin/versitygw --port 127.0.0.1:7070 posix $KVM_DIR/s3 > $KVM_DIR/versitygw.log 2>&1 &
+    until (exec 3<>/dev/tcp/127.0.0.1/7070) 2>/dev/null; do sleep 0.2; done
+    sudo env PAIL_TOKEN=\${PAIL_TOKEN:-dev-token} PAIL_BASE_DOMAIN=\${PAIL_BASE_DOMAIN:-localhost} PAIL_TLS=off \
+      PAIL_LISTEN=0.0.0.0:${PAIL_PORT:-8080} PAIL_DATA_DIR=$KVM_DIR/data \
+      PAIL_FIRECRACKER=$KVM_DIR/firecracker PAIL_KERNEL=$KVM_DIR/vmlinux \
+      PAIL_S3_ENDPOINT=http://127.0.0.1:7070 PAIL_S3_ACCESS_KEY=pail PAIL_S3_SECRET_KEY=pail-dev-secret \
+      $bin/pail-server
+  "
+  if is_lima; then
+    limactl shell --workdir / "$LIMA_NAME" -- bash -lc "$script"
+  elif is_local; then
+    bash -c "$script"
+  else
+    ssh -t -L "${PAIL_PORT:-8080}:127.0.0.1:${PAIL_PORT:-8080}" "$KVM_HOST" "bash -lc $(printf '%q' "$script")"
+  fi
+}
+
+# test builds the tests that need real microVMs and runs them on the host.
+cmd_test() {
+  local arch; arch=$(host_arch)
+  local out="$REPO/bin/linux-$arch"
+  mkdir -p "$out"
+  local pkgs=${KVM_TEST_PKGS:-./internal/microvm}
+  # Extra arguments for the test binary, such as: KVM_TEST_ARGS='-test.run TestBuildSite'
+  local args=""
+  for arg in ${KVM_TEST_ARGS:-}; do args="$args $(printf '%q' "$arg")"; done
+  local dir="$out"
+  for pkg in $pkgs; do
+    local name; name=$(basename "$pkg").kvm.test
+    (cd "$REPO" && GOOS=linux GOARCH=$arch CGO_ENABLED=0 go test -c -tags kvm -o "$out/$name" "$pkg")
+    if ! shares_files; then
+      rsync -az "$out/$name" "$KVM_HOST:$KVM_DIR/bin/"
+      dir="$KVM_DIR/bin"
+    fi
+    on_host "sudo env PAIL_FIRECRACKER=$KVM_DIR/firecracker PAIL_KERNEL=$KVM_DIR/vmlinux PAIL_KVM_SCRATCH=$KVM_DIR/test $dir/$name -test.v $args"
+  done
+}
+
+cmd_shell() {
+  if is_lima; then limactl shell --workdir "$KVM_DIR" "$LIMA_NAME"; elif is_local; then cd "$KVM_DIR" && exec "${SHELL:-bash}"; else ssh -t "$KVM_HOST"; fi
+}
+
+cmd_down() {
+  if is_lima; then limactl stop "$LIMA_NAME"; else say "Nothing to stop: $KVM_HOST is a machine of its own."; fi
+}
+
+case "${1:-}" in
+  up | setup | check | smoke | push | run | test | shell | down) "cmd_$1" ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

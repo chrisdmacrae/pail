@@ -22,10 +22,10 @@ var frameworks = []struct{ pkg, name string }{
 	{"@11ty/eleventy", "Eleventy site"}, {"gatsby", "Gatsby site"},
 }
 
-// Detect looks at the top of a repo and says whether Pail can serve it. Pail
-// serves files as they are in the repo; a project that has to be built
-// first is recognised and declined.
-func Detect(ctx context.Context, c Client, repo, branch string) (Detection, error) {
+// Detect looks at the top of a repo and says whether Pail can serve it.
+// canBuild says this Pail can build a project first; where it can't, a
+// project that needs building is recognised and declined.
+func Detect(ctx context.Context, c Client, repo, branch string, canBuild bool) (Detection, error) {
 	read := func(path string) ([]byte, bool, error) {
 		b, err := c.ReadFile(ctx, repo, branch, path)
 		if errors.Is(err, ErrNotFound) {
@@ -52,7 +52,10 @@ func Detect(ctx context.Context, c Client, repo, branch string) (Detection, erro
 					break
 				}
 			}
-			return Detection{Summary: what + " · needs a build, which Pail can’t run yet"}, nil
+			if canBuild {
+				return Detection{Deployable: true, Summary: what + " · Pail builds it on every deploy"}, nil
+			}
+			return Detection{Summary: what + " · needs a build, which this Pail can’t run"}, nil
 		}
 	}
 

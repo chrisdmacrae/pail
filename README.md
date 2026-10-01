@@ -19,7 +19,7 @@ The spec is the handoff doc; the look and copy come from the design system and t
 | 5 | Custom hostnames and the DNS self-check | done |
 | — | TLS: Pail's own certificate authority, and Let's Encrypt by DNS-01 | done |
 | 6 | Git hosts: token first, then OAuth | done |
-| 7 | Firecracker microVMs: the build VM, containers, and the KVM check | next |
+| 7 | Firecracker microVMs: the build VM, containers, and the KVM check | the KVM check and the build VM are done; containers are next |
 | 8 | pail.json functions: base images, snapshots, sleep when idle, and routing | |
 
 ## Layout
@@ -31,6 +31,11 @@ internal/config      environment variables
 internal/storage     the object store: S3 (versitygw) and an in-memory one for tests
 internal/certs       TLS certificates: Pail's own authority, or Let's Encrypt
 internal/githost     git hosts: GitHub, GitLab, Bitbucket, Gitea and Forgejo
+internal/microvm     Firecracker microVMs: base images, networking, builds
+scripts/kvm-host     the KVM host for development: a Lima VM, or a Linux machine over SSH
+scripts/release      builds what a release publishes
+deploy/proxmox       the installer that sets Pail up in a Proxmox container
+.github/workflows    CI, and the release that tags publish
 internal/pails       pails, deploys, the live pointer, the deploy pipeline
 internal/server      the listener: Host routing, the REST API, static serving
 internal/cli         the pail command: profiles, packing, the API client
@@ -133,6 +138,9 @@ Everything is an environment variable on the server.
 | `PAIL_ACME_RESOLVERS` | the system's | DNS servers to check the challenge record with, comma-separated, e.g. `1.1.1.1:53`. Set it when your home resolver answers for the domain itself and would never see the public record. |
 | `PAIL_OAUTH_<HOST>_CLIENT_ID` · `_CLIENT_SECRET` | unset | An OAuth app for a git host (`GITHUB`, `GITLAB`, `BITBUCKET`, `GITEA`, `FORGEJO`), which puts "Sign in with …" on New pail. |
 | `PAIL_OAUTH_<HOST>_SERVER` | gitlab.com for GitLab | Where the app is registered, for a host you run. Required for Gitea and Forgejo. |
+| `PAIL_DATA_DIR` | `/var/lib/pail` | Local disk for what microVMs need: root filesystems and work disks. |
+| `PAIL_FIRECRACKER` | `firecracker` | The Firecracker binary. |
+| `PAIL_KERNEL` | `<data dir>/vmlinux` | The guest kernel every microVM boots. |
 | `PAIL_LISTEN` | `:80` | Address the plain-HTTP listener binds. |
 | `PAIL_LISTEN_TLS` | `:443` | Address the HTTPS listener binds. |
 | `PAIL_TLS` | on | `off` serves everything over plain HTTP: for development, or behind a proxy that terminates TLS itself. |
@@ -183,13 +191,45 @@ On a pail's site, `/` and `/dir/` serve `index.html`, `/dir` redirects to `/dir/
 
 A pail can come from a repo on GitHub, GitLab, Bitbucket, Gitea or Forgejo. Pail holds one access token per host, checks it with the host before keeping it, and stores it in the object store under `git/`.
 
-- **What Pail deploys.** A repo's files as they are: an `index.html` at the top, or a `pail.json` that says where the files live. A repo whose `package.json` has a build script is recognised and declined, because Pail can't run builds until step 7.
+- **What Pail deploys.** A repo's files as they are: an `index.html` at the top, or a `pail.json` that says where the files live. A repo whose `package.json` has a build script is built first, where Pail can run microVMs (see Builds and microVMs), and declined where it can't.
 - **Pushes deploy.** When a pail is made from a repo, Pail adds a webhook to it. Each push to the pail's branch is fetched and deployed like any other deploy. The host has to be able to reach Pail for this; a host on the internet can't reach a Pail that is only on your network.
 - **If the webhook can't be added,** the pail is still made and says so. Redeploy pulls the branch by hand: `pail redeploy <pail>`.
 - **Tokens.** For Bitbucket, an access token, or `email:api-token`. For the others, a personal access token that can read repos and add webhooks.
 - **Signing in.** With an OAuth app set up for a host (`PAIL_OAUTH_<HOST>_CLIENT_ID` and `_CLIENT_SECRET`), New pail offers "Sign in with …" above the token form. The app's callback address is the one you open Pail at, followed by `/oauth/callback/<host>`. Pail renews a sign-in's token by itself when the host issues ones that run out. Signing in happens in the browser, so it works on a Pail only your network can reach.
 
 The documentation site has a guide for each host under "Set up a git provider".
+
+## Builds and microVMs
+
+Pail runs builds in Firecracker microVMs, so a project's build can't touch the server. This needs Linux with KVM.
+
+- **The KVM check.** At start Pail looks for `/dev/kvm`, `/dev/net/tun`, the Firecracker binary, the guest kernel, root, and the tools it prepares disks with (`mkfs.ext4`, `debugfs`, `ip`, `iptables`). The log says what it found, and `GET /api/v1/info` reports it under `builds`. Without them Pail serves static files as before, and a deploy that needs a build fails saying why.
+- **What gets built.** A deploy whose `package.json` has a `build` script, from `pail up`, an upload or a git host. Pail installs dependencies with the package manager the lockfile names (npm, pnpm or yarn), runs the build, and serves what it leaves in `dist`, `build`, `out`, `_site`, `.output/public` or `public`, or the folder `static` names in `pail.json`. The source isn't stored or served.
+- **The build VM.** A throwaway microVM from the `node:22-slim` image, with 2 vCPUs, 2GB of memory and 15 minutes. Its root filesystem is read-only and shared; everything it writes goes to a work disk that is deleted afterwards.
+- **Isolation.** Each microVM has a network of its own. It can reach the internet through NAT for dependencies, and nothing else: not the home network, not other microVMs, not the server itself.
+- **Guest init.** Inside a microVM, PID 1 is Pail's own binary, so there is nothing extra to install in an image.
+
+Running microVMs needs Pail to run as root.
+
+### Developing this on a Mac
+
+Firecracker doesn't run on macOS, so it runs on a KVM host: a Lima VM on your Mac (Apple M3 or later, for nested virtualization), or any Linux machine over SSH. `KVM_HOST` says which.
+
+| Command | What it does |
+| --- | --- |
+| `make kvm-up` | Starts the Lima VM, or checks the SSH host, and installs Firecracker and a guest kernel there. |
+| `make kvm-check` · `make kvm-smoke` | Says whether the host is ready; boots one microVM to prove it. |
+| `make dev-kvm` | Runs Pail on the KVM host, with builds on, at http://localhost:8080. |
+| `make test-kvm` | Runs the tests that boot real microVMs. |
+| `make kvm-shell` · `make kvm-down` | A shell on the host; stops the Lima VM. |
+
+`KVM_HOST=local` uses this machine itself, when it is Linux with KVM. CI does.
+
+For a Linux machine instead of Lima, as a user who can `sudo` without a password:
+
+```bash
+make kvm-up KVM_HOST=chris@homelab
+```
 
 ## Hostnames and the DNS check
 
@@ -240,6 +280,31 @@ Pail keeps the newest `PAIL_MAX_DEPLOYS` good deploys per pail for rollback and 
 ```bash
 make check
 ```
+
+## Releases
+
+Pushing a tag like `v0.1.0` to `chrisdmacrae/pail` runs `.github/workflows/release.yml`, which tests, builds and publishes a GitHub release with:
+
+| File | What it is |
+| --- | --- |
+| `pail-server_linux_<arch>.tar.gz` | The server, with the web UI inside, for amd64 and arm64. |
+| `pail_<os>_<arch>.tar.gz` or `.zip` | pail-cli for macOS, Linux and Windows, amd64 and arm64. |
+| `pail-proxmox.sh` | The Proxmox installer. |
+| `checksums.txt` | SHA-256 of each file. |
+
+File names carry no version, so `releases/latest/download/<name>` always points at the newest. `make release VERSION=v0.1.0` builds the same files into `dist/release` on your machine.
+
+`.github/workflows/ci.yml` runs `make check` on every push and pull request, builds a release without publishing it, and runs the microVM tests on GitHub's runners, which have KVM.
+
+## Running on Proxmox
+
+`deploy/proxmox/pail-lxc.sh` sets Pail up in an unprivileged LXC container on a Proxmox host: versitygw and pail-server as services, Firecracker and a guest kernel, and `/dev/kvm` and `/dev/net/tun` passed through for builds. On the host, as root:
+
+```bash
+bash -c "$(curl -fsSL https://github.com/chrisdmacrae/pail/releases/latest/download/pail-proxmox.sh)"
+```
+
+It needs a published release to download the server from. The documentation site's "Running on Proxmox" page covers its settings and looking after the container.
 
 ## Documentation site
 

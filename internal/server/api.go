@@ -111,12 +111,24 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		// "off", "internal" (Pail's own authority, whose root devices trust
 		// once) or "acme" (Let's Encrypt).
 		"tls": s.TLSMode(),
+		// builds says whether this Pail can build a project, or run server
+		// code, in microVMs; where it can't, reason says why.
+		"builds": s.buildsInfo(),
 		"limits": map[string]any{
 			"max_upload_size":     s.cfg.MaxUploadSize,
 			"max_deploys":         s.cfg.MaxDeploys,
 			"max_function_memory": s.cfg.MaxFunctionMemory,
 		},
 	})
+}
+
+func (s *Server) buildsInfo() map[string]any {
+	ok, why := s.pails.CanBuild()
+	info := map[string]any{"available": ok}
+	if !ok {
+		info["reason"] = why
+	}
+	return info
 }
 
 func (s *Server) handleListPails(w http.ResponseWriter, r *http.Request) {

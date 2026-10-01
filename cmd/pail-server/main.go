@@ -17,6 +17,7 @@ import (
 	"github.com/chrisdmacrae/pail/internal/certs"
 	"github.com/chrisdmacrae/pail/internal/config"
 	"github.com/chrisdmacrae/pail/internal/githost"
+	"github.com/chrisdmacrae/pail/internal/microvm"
 	"github.com/chrisdmacrae/pail/internal/pails"
 	"github.com/chrisdmacrae/pail/internal/server"
 	"github.com/chrisdmacrae/pail/internal/storage"
@@ -30,6 +31,11 @@ var version = "dev"
 const unpackedRatio = 10
 
 func main() {
+	// Inside a microVM, this same binary is what the kernel boots.
+	if microvm.IsGuestInit() {
+		microvm.GuestMain()
+		return
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := run(logger); err != nil {
 		logger.Error("pail can't start", "err", err)
@@ -57,11 +63,21 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	// The KVM check: builds and server code run in microVMs, which need
+	// Linux with KVM. Without it Pail still serves static files.
+	vms := microvm.New(microvm.Config{Firecracker: cfg.Firecracker, Kernel: cfg.Kernel, Dir: cfg.DataDir}, logger)
+	if ok, why := vms.Available(); ok {
+		logger.Info("this pail can run microVMs: builds are on", "firecracker", cfg.Firecracker, "kernel", cfg.Kernel)
+	} else {
+		logger.Info("this pail serves static files only: " + why)
+	}
+
 	svc := pails.New(pails.Options{
 		Store:           store,
 		BaseDomain:      cfg.BaseDomain,
 		MaxDeploys:      cfg.MaxDeploys,
 		MaxUnpackedSize: cfg.MaxUploadSize * unpackedRatio,
+		Builder:         vms,
 		Logger:          logger,
 	})
 	if err := svc.Load(ctx); err != nil {

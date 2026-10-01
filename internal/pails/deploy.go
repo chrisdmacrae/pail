@@ -5,10 +5,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chrisdmacrae/pail/internal/microvm"
 	"io"
+	"io/fs"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -284,6 +289,17 @@ type plan struct {
 	strip    string // folder every file sits in, dropped from names
 	names    map[string]bool
 	pailJSON []byte
+	// packageJSON is the project's package.json, if it has one at the top.
+	packageJSON []byte
+}
+
+// needsBuild reports whether a project has to be built before it can be
+// served: its package.json has a build script.
+func needsBuild(packageJSON []byte) bool {
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	return json.Unmarshal(packageJSON, &pkg) == nil && pkg.Scripts["build"] != ""
 }
 
 // unpack copies the archive's files into the deploy's own folder and returns
@@ -301,6 +317,9 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 		if cfg, err = parsePailJSON(p.pailJSON); err != nil {
 			return nil, err
 		}
+	}
+	if needsBuild(p.packageJSON) {
+		return s.buildAndStore(ctx, name, d, archive, format, p, cfg, lg)
 	}
 	static := "./" + strings.TrimSuffix(cfg.root, "/")
 	switch {
@@ -320,15 +339,12 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 			return err
 		}
 		file = strings.TrimPrefix(file, p.strip)
-		ctype := contentType(file)
-		hash := sha256.New()
-		if err := s.store.Put(ctx, prefix+file, io.TeeReader(r, hash), size, ctype); err != nil {
+		stored, err := s.storeFile(ctx, prefix+file, r, size, d)
+		if err != nil {
 			return err
 		}
-		d.Files++
-		d.Bytes += size
 		if served, ok := strings.CutPrefix(file, cfg.root); ok && file != "pail.json" {
-			man.Files[served] = File{Size: size, ETag: hex.EncodeToString(hash.Sum(nil)[:12]), Type: ctype}
+			man.Files[served] = stored
 		}
 		return nil
 	})
@@ -338,6 +354,100 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 	if len(man.Files) == 0 {
 		return nil, userErrorf("pail.json points static at %s, but the upload has no files there.", static)
 	}
+	return man, nil
+}
+
+// storeFile puts one of a deploy's files in storage, counting it.
+func (s *Service) storeFile(ctx context.Context, key string, r io.Reader, size int64, d *Deploy) (File, error) {
+	ctype := contentType(key)
+	hash := sha256.New()
+	if err := s.store.Put(ctx, key, io.TeeReader(r, hash), size, ctype); err != nil {
+		return File{}, err
+	}
+	d.Files++
+	d.Bytes += size
+	return File{Size: size, ETag: hex.EncodeToString(hash.Sum(nil)[:12]), Type: ctype}, nil
+}
+
+// buildAndStore is for a project that has to be built first. The source is
+// built in a throwaway microVM, and what the build leaves is what the deploy
+// stores and serves.
+func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, archive string, format archiveFormat, p plan, cfg staticConfig, lg *Log) (*Manifest, error) {
+	if ok, why := s.CanBuild(); !ok {
+		return nil, userErrorf("This project needs a build, and this Pail can’t run one: %s. Build it yourself and deploy the result with pail up ./dist.", why)
+	}
+	lg.add("", "unpacking %d %s · found package.json with a build script", len(p.names), plural(len(p.names), "file"))
+	lg.add("step", "→ building in a microVM")
+
+	built, err := s.builder.BuildSite(ctx, microvm.BuildRequest{
+		// With a build, pail.json's static is where the result lands.
+		Static: strings.TrimSuffix(cfg.root, "/"),
+		Log:    func(line string) { lg.add("", "%s", line) },
+		Fill: func(dir string) error {
+			return walkArchive(archive, format, func(raw string, _ int64, r io.Reader) error {
+				file, skip, err := cleanName(raw)
+				if err != nil || skip {
+					return err
+				}
+				target := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(file, p.strip)))
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					return err
+				}
+				f, err := os.Create(target)
+				if err != nil {
+					return err
+				}
+				if _, err := io.Copy(f, r); err != nil {
+					f.Close()
+					return err
+				}
+				return f.Close()
+			})
+		},
+	})
+	if err != nil {
+		var ue userError
+		if errors.As(err, &ue) {
+			return nil, err
+		}
+		return nil, userErrorf("The build didn’t finish: %v.", err)
+	}
+	defer built.Cleanup()
+
+	man := &Manifest{Fallback: cfg.fallback, Files: map[string]File{}}
+	prefix := deployFiles(name, d.ID)
+	err = filepath.WalkDir(built.Dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
+			return err
+		}
+		rel, err := filepath.Rel(built.Dir, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		file := filepath.ToSlash(rel)
+		stored, err := s.storeFile(ctx, prefix+file, f, info.Size(), d)
+		if err != nil {
+			return err
+		}
+		man.Files[file] = stored
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if cfg.fallback != "" && man.Files[cfg.fallback] == (File{}) {
+		return nil, userErrorf("pail.json falls back to %s, but the build left no such file in ./%s.", cfg.fallback, built.Output)
+	}
+	lg.add("", "built ./%s · %d %s", built.Output, len(man.Files), plural(len(man.Files), "file"))
 	return man, nil
 }
 
@@ -362,10 +472,11 @@ func (s *Service) survey(archive string, format archiveFormat) (plan, error) {
 		if s.maxUnpackedSize > 0 && total > s.maxUnpackedSize {
 			return userErrorf("The upload unpacks to more than this Pail takes. Raise PAIL_MAX_UPLOAD_SIZE on the server to send more.")
 		}
-		if file == "pail.json" || strings.Count(file, "/") == 1 && strings.HasSuffix(file, "/pail.json") {
+		// The two files that say what a project is, at the top or one folder in.
+		if base := path.Base(file); (base == "pail.json" || base == "package.json") && strings.Count(file, "/") <= 1 {
 			b, err := io.ReadAll(io.LimitReader(r, 1<<20))
 			if err != nil {
-				return userErrorf("pail.json can't be read: %v.", err)
+				return userErrorf("%s can't be read: %v.", base, err)
 			}
 			pailJSON[file] = b
 		}
@@ -399,6 +510,7 @@ func (s *Service) survey(archive string, format archiveFormat) (plan, error) {
 		p.names[strings.TrimPrefix(n, p.strip)] = true
 	}
 	p.pailJSON = pailJSON[p.strip+"pail.json"]
+	p.packageJSON = pailJSON[p.strip+"package.json"]
 	return p, nil
 }
 

@@ -13,7 +13,7 @@ const { title, description } = Astro.props;
 // The sidebar is the collection: sections in a fixed order, pages by their
 // order, and provider guides nested under their section.
 const pages = (await getCollection('docs')).sort((a, b) => a.data.order - b.data.order);
-const sections = ['Start here', 'Git providers', 'Custom domains'].map((name) => ({
+const sections = ['Start here', 'Running Pail', 'Git providers', 'Custom domains'].map((name) => ({
   name,
   pages: pages.filter((p) => p.data.section === name && !p.data.provider),
   providers: pages.filter((p) => p.data.section === name && p.data.provider),

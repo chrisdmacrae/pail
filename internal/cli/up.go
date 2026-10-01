@@ -34,7 +34,9 @@ func (a *app) up(args []string) error {
 	}
 	_, noIndex := os.Stat(filepath.Join(dir, "index.html"))
 	manifest, noManifest := os.ReadFile(filepath.Join(dir, "pail.json"))
-	if noIndex != nil && noManifest != nil {
+	// A project with a package.json may be one Pail builds; the server says.
+	_, noPackage := os.Stat(filepath.Join(dir, "package.json"))
+	if noIndex != nil && noManifest != nil && noPackage != nil {
 		return usagef("No index.html in %s. Point Pail at the folder that has it.", shown)
 	}
 

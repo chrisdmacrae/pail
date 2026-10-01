@@ -213,12 +213,18 @@ func (s *Server) handleDetectRepo(w http.ResponseWriter, r *http.Request) {
 		s.writeGitError(w, r, kind, err)
 		return
 	}
-	found, err := githost.Detect(r.Context(), client, repo, branch)
+	found, err := githost.Detect(r.Context(), client, repo, branch, s.canBuild())
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, found)
+}
+
+// canBuild says whether this Pail can build a project before serving it.
+func (s *Server) canBuild() bool {
+	ok, _ := s.pails.CanBuild()
+	return ok
 }
 
 // deployFromGit fetches a pail's branch from its git host and starts a
@@ -273,7 +279,7 @@ func (s *Server) handleCreateFromRepo(w http.ResponseWriter, r *http.Request) {
 		s.writeGitError(w, r, kind, err)
 		return
 	}
-	found, err := githost.Detect(r.Context(), client, body.Repo, body.Branch)
+	found, err := githost.Detect(r.Context(), client, body.Repo, body.Branch, s.canBuild())
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return

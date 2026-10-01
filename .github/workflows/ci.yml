@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, test, docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            web/ui/pnpm-lock.yaml
+            docs/pnpm-lock.yaml
+      - name: Install the UI's and the docs' packages
+        run: |
+          pnpm --dir web/ui install --frozen-lockfile
+          pnpm --dir docs install --frozen-lockfile
+      - name: Lint, test, and build the docs
+        run: make check
+      - name: Build everything a release ships
+        run: make ui && scripts/release ci
+
+  microvms:
+    name: MicroVM tests
+    # GitHub's Linux runners have KVM, so these boot real Firecracker microVMs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Get Firecracker and a guest kernel
+        run: scripts/kvm-host up
+        env:
+          KVM_HOST: local
+      - name: Boot one microVM
+        run: scripts/kvm-host smoke
+        env:
+          KVM_HOST: local
+      - name: Run the microVM tests
+        run: scripts/kvm-host test
+        env:
+          KVM_HOST: local
