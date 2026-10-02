@@ -270,6 +270,8 @@ func TestZipFolderWithPailJSON(t *testing.T) {
 	wantBody(t, f.site("dash.pail.lan", "/"), 200, "app shell")
 	wantBody(t, f.site("dash.pail.lan", "/main.css"), 200, "body{}")
 	wantBody(t, f.site("dash.pail.lan", "/settings/profile"), 200, "app shell")
+	// The pail says what its pail.json made of the files.
+	wantBody(t, f.api("GET", "/api/v1/pails/dash", nil), 200, `"static":"build","fallback":"index.html"`)
 	if rec := f.site("dash.pail.lan", "/pail.json"); rec.Body.String() != "app shell" {
 		t.Errorf("pail.json was served: %q", rec.Body)
 	}
@@ -754,6 +756,8 @@ type forge struct {
 	// secrets are the webhooks' secrets, by the pail each one calls.
 	secrets map[string]string
 	gone    []string // hooks Pail removed
+	// pulled is what the last archive was asked for at: a branch or a commit.
+	pulled string
 	// revoked is a token it took once and no longer does.
 	revoked string
 }
@@ -797,6 +801,9 @@ func (f *forge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		io.WriteString(w, body)
 	case parts[2] == "archive":
+		if len(parts) == 4 {
+			f.pulled = strings.TrimSuffix(parts[3], ".tar.gz")
+		}
 		// Like the real thing, the archive wraps everything in one folder.
 		wrapped := map[string]string{}
 		for name, body := range files {
@@ -1068,6 +1075,15 @@ func TestPailsFromAGitHost(t *testing.T) {
 	host.repos["homelab/mono"]["apps/web/index.html"] = "the web app, pushed blind"
 	wantBody(t, monoHook("mono-web", `{"ref": "refs/heads/main"}`), http.StatusAccepted, `"deployed":true`)
 	wantBody(t, f.site("mono-web.pail.lan", "/"), 200, "the web app, pushed blind")
+	if host.pulled != "main" {
+		t.Errorf("a push that names no commit pulled %q, want the branch", host.pulled)
+	}
+	// A push that names its commit pulls that commit, not the branch: a host
+	// asked for the branch this soon may still hand back the commit before.
+	wantBody(t, monoHook("mono-web", `{"ref": "refs/heads/main", "after": "4bf74c3"}`), http.StatusAccepted, `"deployed":true`)
+	if host.pulled != "4bf74c3" {
+		t.Errorf("a push to 4bf74c3 pulled %q", host.pulled)
+	}
 	// A pail that is the whole repo deploys on every push to its branch.
 	wantBody(t, deliver(pushOf("docs/unrelated.md"), secret), http.StatusAccepted, `"deployed":true`)
 	f.svc.Wait()
@@ -1415,7 +1431,7 @@ func TestProjectsThatNeedABuild(t *testing.T) {
 	if d.State != "ok" {
 		t.Fatalf("deploy: %+v\n%s", d, log)
 	}
-	for _, want := range []string{"found package.json with a build script", "building in a microVM", "npm run build", "built ./dist · 2 files"} {
+	for _, want := range []string{"found package.json with a build script, and pail.json", "building in a microVM", "npm run build", "built ./dist · 2 files"} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log lacks %q:\n%s", want, log)
 		}
@@ -1423,6 +1439,7 @@ func TestProjectsThatNeedABuild(t *testing.T) {
 	wantBody(t, f.site("garden.pail.lan", "/"), 200, "built from index.html,package.json,pail.json,src/main.js")
 	wantBody(t, f.site("garden.pail.lan", "/assets/app.js"), 200, "console.log(1)")
 	wantBody(t, f.site("garden.pail.lan", "/some/route"), 200, "built from") // pail.json's fallback still applies
+	wantBody(t, f.api("GET", "/api/v1/pails/garden", nil), 200, `"fallback":"index.html"`)
 	if rec := f.site("garden.pail.lan", "/src/main.js"); !strings.Contains(rec.Body.String(), "built from") {
 		t.Errorf("the project's source was served: %s", rec.Body)
 	}

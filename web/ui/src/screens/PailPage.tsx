@@ -569,8 +569,9 @@ const PAIL_JSON = `{
   ]
 }`;
 
-// ServerCode shows what the serving deploy's pail.json set up: which paths go
-// where, and its functions. Without any, it says how to add some.
+// ServerCode shows what the serving deploy's pail.json set up: where its
+// files are, which paths go where, and its functions. With none of that, it
+// says how to add some.
 function ServerCode({ pail }: { pail: Pail }) {
   const functions = pail.functions ?? [];
   const label = { fontSize: 12, fontWeight: 600, letterSpacing: '.03em' };
@@ -579,7 +580,15 @@ function ServerCode({ pail }: { pail: Pail }) {
       Functions and routes
     </h2>
   );
-  if (!pail.routes?.length) {
+  const routes = pail.routes ?? [];
+  // What pail.json says of the files, which a pail with no server code may
+  // still have.
+  const files = [
+    pail.static && { from: `./${pail.static}`, what: 'the folder the files are in' },
+    pail.fallback && { from: pail.fallback, what: 'answers a path with no file of its own' },
+  ].filter((f) => !!f);
+  const row = { display: 'flex', gap: 12, alignItems: 'baseline', flexWrap: 'wrap', fontSize: 13 } as const;
+  if (routes.length === 0 && files.length === 0) {
     return (
       <>
         {heading}
@@ -601,27 +610,35 @@ function ServerCode({ pail }: { pail: Pail }) {
           From <code>pail.json</code> in deploy {pail.serving}. Change it in your project; Pail reads it again on every
           deploy.
         </p>
-        <div className="pl-stack" style={{ gap: 8 }}>
-          <span style={label}>ROUTES</span>
-          {pail.routes.map((r) => (
-            <div
-              key={r.path}
-              className="pl-mono"
-              style={{ display: 'flex', gap: 12, alignItems: 'baseline', flexWrap: 'wrap', fontSize: 13 }}
-            >
-              <span style={{ minWidth: 120 }}>{r.path}</span>
-              <span style={{ color: 'var(--ink-muted)' }}>→ {r.to}</span>
-            </div>
-          ))}
-        </div>
+        {files.length > 0 && (
+          <div className="pl-stack" style={{ gap: 8 }}>
+            <span style={label}>FILES</span>
+            {files.map((f) => (
+              <div key={f.what} style={row}>
+                <span className="pl-mono" style={{ minWidth: 120 }}>
+                  {f.from}
+                </span>
+                <span style={{ color: 'var(--ink-muted)' }}>{f.what}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {routes.length > 0 && (
+          <div className="pl-stack" style={{ gap: 8 }}>
+            <span style={label}>ROUTES</span>
+            {routes.map((r) => (
+              <div key={r.path} className="pl-mono" style={row}>
+                <span style={{ minWidth: 120 }}>{r.path}</span>
+                <span style={{ color: 'var(--ink-muted)' }}>→ {r.to}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {functions.length > 0 && (
           <div className="pl-stack" style={{ gap: 8 }}>
             <span style={label}>FUNCTIONS</span>
             {functions.map((f) => (
-              <div
-                key={f.name}
-                style={{ display: 'flex', gap: 12, alignItems: 'baseline', flexWrap: 'wrap', fontSize: 13 }}
-              >
+              <div key={f.name} style={row}>
                 <span className="pl-mono" style={{ minWidth: 120 }}>
                   {f.name}
                 </span>

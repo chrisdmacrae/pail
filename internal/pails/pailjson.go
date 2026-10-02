@@ -89,6 +89,12 @@ type deployConfig struct {
 	routes     []Route
 }
 
+// static is the folder pail.json names for the deploy's files, or "" when it
+// names none.
+func (c deployConfig) static() string {
+	return strings.TrimSuffix(c.root, "/")
+}
+
 // functionConfig is one function as pail.json declares it.
 type functionConfig struct {
 	// src is the source's path inside the upload: a folder or a file.

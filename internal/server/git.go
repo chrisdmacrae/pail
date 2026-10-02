@@ -312,9 +312,10 @@ func (s *Server) canBuild() bool {
 }
 
 // deployFromGit fetches a pail's branch from its git host and starts a
-// deploy of it, the same way an upload would. It pulls with client, or with
-// the pail's own connection when client is nil.
-func (s *Server) deployFromGit(ctx context.Context, r *http.Request, client githost.Client, name string, git pails.GitSource, label string) (pails.Deploy, error) {
+// deploy of it, the same way an upload would. commit, when set, is the commit
+// of the branch to fetch: the one a push left it at. It pulls with client, or
+// with the pail's own connection when client is nil.
+func (s *Server) deployFromGit(ctx context.Context, r *http.Request, client githost.Client, name string, git pails.GitSource, commit, label string) (pails.Deploy, error) {
 	if client == nil {
 		var err error
 		if client, err = s.git.Client(ctx, name, githost.Kind(git.Host)); err != nil {
@@ -325,7 +326,7 @@ func (s *Server) deployFromGit(ctx context.Context, r *http.Request, client gith
 	if err != nil {
 		return pails.Deploy{}, err
 	}
-	err = client.Archive(ctx, git.Repo, git.Branch, tmp, s.cfg.MaxUploadSize)
+	err = client.Archive(ctx, git.Repo, cmp.Or(commit, git.Branch), tmp, s.cfg.MaxUploadSize)
 	tmp.Close()
 	if err != nil {
 		os.Remove(tmp.Name())
@@ -411,7 +412,7 @@ func (s *Server) setRepo(w http.ResponseWriter, r *http.Request, create bool) {
 	if !create {
 		label = "now deploys from " + from
 	}
-	d, err := s.deployFromGit(r.Context(), r, client, name, git, label)
+	d, err := s.deployFromGit(r.Context(), r, client, name, git, "", label)
 	if err != nil {
 		s.writeGitError(w, r, kind, err)
 		return
@@ -563,11 +564,13 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	}
 	// A pail that is one folder of its repo sits out a push that changed
 	// nothing of its own.
-	if git.Dir != "" && !push.Touches(git.Dir, s.watched(r.Context(), name, git)) {
+	if git.Dir != "" && !push.Touches(git.Dir, s.watched(r.Context(), name, git, push.Commit)) {
 		writeJSON(w, http.StatusOK, map[string]any{"deployed": false, "skipped": "The push changed nothing in " + git.Dir + "."})
 		return
 	}
-	d, err := s.deployFromGit(r.Context(), r, nil, name, *git, "push to "+git.Branch)
+	// What is pulled is the commit that was pushed, where the host names it:
+	// a host asked for the branch this soon may still hand back the one before.
+	d, err := s.deployFromGit(r.Context(), r, nil, name, *git, push.Commit, "push to "+git.Branch)
 	if err != nil {
 		s.log.Error("deploy from webhook", "pail", name, "err", err)
 		s.writeGitError(w, r, githost.Kind(git.Host), err)
@@ -578,14 +581,15 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 
 // watched reads the folders and files outside its own that a pail's pail.json
 // asks to be redeployed for, as paths from the top of the repo. If they can't
-// be read, everything is watched: the pail deploys.
-func (s *Server) watched(ctx context.Context, name string, git *pails.GitSource) []string {
+// be read, everything is watched: the pail deploys. commit, when set, is the
+// commit of the branch to read them at.
+func (s *Server) watched(ctx context.Context, name string, git *pails.GitSource, commit string) []string {
 	everything := []string{""}
 	client, err := s.git.Client(ctx, name, githost.Kind(git.Host))
 	if err != nil {
 		return everything
 	}
-	manifest, err := client.ReadFile(ctx, git.Repo, git.Branch, path.Join(git.Dir, "pail.json"))
+	manifest, err := client.ReadFile(ctx, git.Repo, cmp.Or(commit, git.Branch), path.Join(git.Dir, "pail.json"))
 	if errors.Is(err, githost.ErrNotFound) {
 		return nil
 	}

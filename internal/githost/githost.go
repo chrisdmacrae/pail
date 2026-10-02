@@ -75,10 +75,11 @@ type Client interface {
 	Account(ctx context.Context) (string, error)
 	// Repos lists repositories, most recently active first.
 	Repos(ctx context.Context) ([]Repo, error)
-	// ReadFile returns a small file from a repo at a branch, or ErrNotFound.
+	// ReadFile returns a small file from a repo at a branch, or at a commit
+	// named in the branch's place, or ErrNotFound.
 	ReadFile(ctx context.Context, repo, branch, path string) ([]byte, error)
-	// Archive writes the branch as a .tar.gz, stopping with ErrTooLarge past
-	// limit bytes.
+	// Archive writes the branch, or a commit named in its place, as a
+	// .tar.gz, stopping with ErrTooLarge past limit bytes.
 	Archive(ctx context.Context, repo, branch string, w io.Writer, limit int64) error
 	// AddHook asks the host to call url on every push, signing with secret.
 	// verifyTLS is false when Pail's certificate isn't one the host trusts.

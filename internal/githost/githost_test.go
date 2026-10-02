@@ -284,9 +284,10 @@ func TestReadPush(t *testing.T) {
 		mac.Write([]byte(body))
 		return hex.EncodeToString(mac.Sum(nil))
 	}
-	push := `{"ref": "refs/heads/main"}`
-	tag := `{"ref": "refs/tags/v1"}`
-	bb := `{"push": {"changes": [{"new": {"type": "branch", "name": "main"}}]}}`
+	push := `{"ref": "refs/heads/main", "after": "4bf74c3"}`
+	tag := `{"ref": "refs/tags/v1", "after": "4bf74c3"}`
+	gone := `{"ref": "refs/heads/main", "after": "0000000000000000000000000000000000000000"}`
+	bb := `{"push": {"changes": [{"new": {"type": "branch", "name": "main", "target": {"hash": "4bf74c3"}}}]}}`
 
 	cases := []struct {
 		name          string
@@ -295,25 +296,28 @@ func TestReadPush(t *testing.T) {
 		body          string
 		genuine       bool
 		branch        string
+		commit        string
 	}{
-		{"github push", GitHub, "X-Hub-Signature-256", "sha256=" + sign(push), push, true, "main"},
-		{"github tag", GitHub, "X-Hub-Signature-256", "sha256=" + sign(tag), tag, true, ""},
-		{"github ping", GitHub, "X-Hub-Signature-256", "sha256=" + sign(`{"zen": "x"}`), `{"zen": "x"}`, true, ""},
-		{"github forged", GitHub, "X-Hub-Signature-256", "sha256=" + sign("other"), push, false, ""},
-		{"github unsigned", GitHub, "X-Other", "x", push, false, ""},
-		{"gitlab push", GitLab, "X-Gitlab-Token", secret, push, true, "main"},
-		{"gitlab wrong token", GitLab, "X-Gitlab-Token", "nope", push, false, ""},
-		{"gitea push", Gitea, "X-Gitea-Signature", sign(push), push, true, "main"},
-		{"forgejo push", Forgejo, "X-Hub-Signature-256", "sha256=" + sign(push), push, true, "main"},
-		{"bitbucket push", Bitbucket, "X-Hub-Signature", "sha256=" + sign(bb), bb, true, "main"},
-		{"bitbucket forged", Bitbucket, "X-Hub-Signature", "sha256=" + sign(push), bb, false, ""},
+		{"github push", GitHub, "X-Hub-Signature-256", "sha256=" + sign(push), push, true, "main", "4bf74c3"},
+		{"github tag", GitHub, "X-Hub-Signature-256", "sha256=" + sign(tag), tag, true, "", ""},
+		{"github ping", GitHub, "X-Hub-Signature-256", "sha256=" + sign(`{"zen": "x"}`), `{"zen": "x"}`, true, "", ""},
+		{"github forged", GitHub, "X-Hub-Signature-256", "sha256=" + sign("other"), push, false, "", ""},
+		{"github unsigned", GitHub, "X-Other", "x", push, false, "", ""},
+		// A branch that was deleted is at no commit.
+		{"github branch deleted", GitHub, "X-Hub-Signature-256", "sha256=" + sign(gone), gone, true, "main", ""},
+		{"gitlab push", GitLab, "X-Gitlab-Token", secret, push, true, "main", "4bf74c3"},
+		{"gitlab wrong token", GitLab, "X-Gitlab-Token", "nope", push, false, "", ""},
+		{"gitea push", Gitea, "X-Gitea-Signature", sign(push), push, true, "main", "4bf74c3"},
+		{"forgejo push", Forgejo, "X-Hub-Signature-256", "sha256=" + sign(push), push, true, "main", "4bf74c3"},
+		{"bitbucket push", Bitbucket, "X-Hub-Signature", "sha256=" + sign(bb), bb, true, "main", "4bf74c3"},
+		{"bitbucket forged", Bitbucket, "X-Hub-Signature", "sha256=" + sign(push), bb, false, "", ""},
 	}
 	for _, c := range cases {
 		h := http.Header{}
 		h.Set(c.header, c.value)
 		got := ReadPush(c.kind, secret, h, []byte(c.body))
-		if got.Genuine != c.genuine || got.Branch != c.branch {
-			t.Errorf("%s: %+v, want genuine=%v branch=%q", c.name, got, c.genuine, c.branch)
+		if got.Genuine != c.genuine || got.Branch != c.branch || got.Commit != c.commit {
+			t.Errorf("%s: %+v, want genuine=%v branch=%q commit=%q", c.name, got, c.genuine, c.branch, c.commit)
 		}
 	}
 }

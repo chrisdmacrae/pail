@@ -427,7 +427,7 @@ func (s *Service) unpack(ctx context.Context, name string, d *Deploy, archive st
 		lg.add("", "unpacking %d %s%s · found %s", len(p.names), plural(len(p.names), "file"), p.from(), found)
 	}
 
-	man := &Manifest{Root: cfg.root, Fallback: cfg.fallback, Files: map[string]File{}, Routes: cfg.routes}
+	man := &Manifest{Root: cfg.root, Static: cfg.static(), Fallback: cfg.fallback, Files: map[string]File{}, Routes: cfg.routes}
 	prefix := deployFiles(name, d.ID)
 	err = walkArchive(archive, format, func(raw string, size int64, r io.Reader) error {
 		file, skip, err := cleanName(raw)
@@ -659,7 +659,11 @@ func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, arc
 	if ok, why := s.CanBuild(); !ok {
 		return nil, userErrorf("This project needs a build, and this Pail can’t run one: %s. Build it yourself and deploy the result with pail up ./dist.", why)
 	}
-	lg.add("", "unpacking %d %s%s · found package.json with a build script", len(p.names), plural(len(p.names), "file"), p.from())
+	found := "package.json with a build script"
+	if p.pailJSON != nil {
+		found += ", and pail.json"
+	}
+	lg.add("", "unpacking %d %s%s · found %s", len(p.names), plural(len(p.names), "file"), p.from(), found)
 	lg.add("step", "→ building in a %s", s.box())
 
 	built, err := s.builder.BuildSite(ctx, microvm.BuildRequest{
@@ -692,7 +696,7 @@ func (s *Service) buildAndStore(ctx context.Context, name string, d *Deploy, arc
 		return s.unpack(ctx, name, d, packed, formatTarGz, "", built.Output, lg)
 	}
 
-	man := &Manifest{Fallback: cfg.fallback, Files: map[string]File{}}
+	man := &Manifest{Static: cfg.static(), Fallback: cfg.fallback, Files: map[string]File{}}
 	prefix := deployFiles(name, d.ID)
 	err = filepath.WalkDir(built.Dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || !entry.Type().IsRegular() {

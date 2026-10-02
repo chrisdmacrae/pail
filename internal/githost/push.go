@@ -18,6 +18,10 @@ type Push struct {
 	// Branch is the branch that was pushed to, or "" when the delivery
 	// wasn't a push to a branch (a ping, a tag).
 	Branch string
+	// Commit is the commit the push left the branch at, or "" when the
+	// delivery doesn't say. Pulling it rather than the branch gets what was
+	// pushed even from a host that is still catching up with the push.
+	Commit string
 	// Changed lists the files the push added, changed or removed, as paths
 	// from the top of the repo. It is nil when the delivery doesn't say, or
 	// can't be trusted to say it all: what was pushed may then be anything.
@@ -67,6 +71,15 @@ func (p Push) Touches(dir string, watch []string) bool {
 	return false
 }
 
+// commit cleans the commit a delivery names. A host names a branch that was
+// deleted by a commit of all zeros, which is no commit.
+func commit(sha string) string {
+	if strings.Trim(sha, "0") == "" {
+		return ""
+	}
+	return sha
+}
+
 func signed(secret string, body []byte, got string) bool {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
@@ -98,14 +111,17 @@ func ReadPush(kind Kind, secret string, header http.Header, body []byte) Push {
 		var payload struct {
 			Push struct {
 				Changes []struct {
-					New *struct{ Type, Name string } `json:"new"`
+					New *struct {
+						Type, Name string
+						Target     struct{ Hash string }
+					} `json:"new"`
 				} `json:"changes"`
 			} `json:"push"`
 		}
 		if json.Unmarshal(body, &payload) == nil {
 			for _, c := range payload.Push.Changes {
 				if c.New != nil && c.New.Type == "branch" {
-					p.Branch = c.New.Name
+					p.Branch, p.Commit = c.New.Name, commit(c.New.Target.Hash)
 				}
 			}
 		}
@@ -113,6 +129,8 @@ func ReadPush(kind Kind, secret string, header http.Header, body []byte) Push {
 	}
 	var payload struct {
 		Ref string `json:"ref"`
+		// The commit the branch is at now: all zeros when it was deleted.
+		After string `json:"after"`
 		// GitHub says when a push made the branch, or rewrote it.
 		Created bool `json:"created"`
 		Forced  bool `json:"forced"`
@@ -130,7 +148,7 @@ func ReadPush(kind Kind, secret string, header http.Header, body []byte) Push {
 		return p
 	}
 	if branch, ok := strings.CutPrefix(payload.Ref, "refs/heads/"); ok {
-		p.Branch = branch
+		p.Branch, p.Commit = branch, commit(payload.After)
 	}
 
 	// The files are known only when every commit of the push is listed, with

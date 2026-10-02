@@ -51,6 +51,11 @@ type Pail struct {
 	// Routes say what answers each path of the deploy being served, when
 	// its pail.json has server code.
 	Routes []Route `json:"routes,omitempty"`
+	// Static and Fallback are what pail.json says of the files of the deploy
+	// being served: the folder they are in, and the file that answers a
+	// path with no file of its own.
+	Static   string `json:"static,omitempty"`
+	Fallback string `json:"fallback,omitempty"`
 	// Serving is the ID of the deploy requests are answered from, or "".
 	Serving   string    `json:"serving"`
 	CreatedAt time.Time `json:"created_at"`
@@ -107,6 +112,10 @@ type record struct {
 type Manifest struct {
 	// Root is the folder inside the deploy that is served, "" or "build/".
 	Root string `json:"root"`
+	// Static is the folder pail.json names for the files, like "dist", for
+	// the pail's page to show. A build leaves its files at the top, so Root
+	// doesn't say.
+	Static string `json:"static,omitempty"`
 	// Fallback is served when a path matches no file (single-page apps).
 	Fallback string `json:"fallback,omitempty"`
 	// Files is keyed by path relative to Root.

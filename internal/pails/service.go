@@ -227,7 +227,7 @@ func (s *Service) view(e *entry) Pail {
 		p.Status = StatusOff
 	}
 	if e.manifest != nil {
-		p.Routes = e.manifest.Routes
+		p.Routes, p.Static, p.Fallback = e.manifest.Routes, e.manifest.Static, e.manifest.Fallback
 	}
 	if e.running != nil {
 		for name, u := range e.running.units {

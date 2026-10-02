@@ -349,7 +349,7 @@ func (s *Server) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 	// A pail from a git host pulls its branch again; any other deploys its
 	// latest good files again.
 	if git, _ := s.pails.Git(name); git != nil {
-		d, err := s.deployFromGit(r.Context(), r, nil, name, *git, "redeploy of "+git.Branch)
+		d, err := s.deployFromGit(r.Context(), r, nil, name, *git, "", "redeploy of "+git.Branch)
 		if err != nil {
 			s.writeGitError(w, r, githost.Kind(git.Host), err)
 			return

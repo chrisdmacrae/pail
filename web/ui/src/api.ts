@@ -58,6 +58,10 @@ export interface Pail {
   functions?: Fn[];
   // routes say what answers each path, for a pail with server code.
   routes?: Route[];
+  // static and fallback are what pail.json says of the files being served:
+  // the folder they are in, and the file that answers a path with none.
+  static?: string;
+  fallback?: string;
 }
 
 export interface Info {
